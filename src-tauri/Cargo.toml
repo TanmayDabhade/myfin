@@ -1,0 +1,24 @@
+[package]
+name = "market-lens"
+version = "0.1.0"
+edition = "2021"
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog"]
+[[bin]]
+name = "market-lens"
+path = "src/main.rs"
+required-features = ["desktop"]
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+[dependencies]
+tauri = { version = "2", features = [], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["sync"] }
+
+tauri-plugin-opener = { version = "2", optional = true }
+
+tauri-plugin-dialog = { version = "2", optional = true }

@@ -1,0 +1,20 @@
+{
+  "name": "market-lens-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "vite build",
+    "test": "node --test tests/*.test.js",
+    "tauri": "tauri",
+    "test:e2e": "node scripts/smoke.cjs",
+    "format": "prettier --write src tests e2e *.json *.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1",
+    "@tauri-apps/cli": "^2.0.0",
+    "prettier": "^3.5.3",
+    "vite": "^7.0.0"
+  }
+}
