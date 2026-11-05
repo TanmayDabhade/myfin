@@ -2,6 +2,24 @@
 
 A local-first financial research and paper-trading application built with **Tauri 2, Rust, SQLite, and a lightweight Vite/JavaScript interface**. There is no Electron runtime or hosted backend. All trades are simulations.
 
+## Install and update with Homebrew (preview channel)
+
+Available after the release workflow is merged and the first eligible PR build publishes:
+
+```sh
+brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
+brew install --cask tanmaydabhade/myfin/market-lens-preview
+```
+
+To replace the installed app with the newer build:
+
+```sh
+brew update
+brew upgrade --cask tanmaydabhade/myfin/market-lens-preview
+```
+
+The cask uses versioned, checksum-verified universal Mac builds. These are unsigned/unnotarized previews of individual PRs. See [release behavior, activation, and install-or-upgrade command](docs/RELEASES.md). Windows and Linux installers are attached to each successful PR prerelease.
+
 ## Start on macOS
 
 Install Node.js 22 or later, Rust stable, and the Xcode command-line tools (`xcode-select --install`). Use the official [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS. Then open Terminal in this project:

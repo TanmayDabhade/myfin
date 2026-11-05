@@ -1,0 +1,77 @@
+name: PR desktop builds
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+concurrency:
+  group: pr-desktop-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-24.04
+            args: --bundles deb,appimage
+          - platform: windows-x64
+            os: windows-2022
+            args: --bundles nsis
+          - platform: macos-universal
+            os: macos-latest
+            args: --target universal-apple-darwin --bundles dmg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install both Mac targets
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npm test
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+      - name: Browser tests
+        if: runner.os == 'Linux'
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - run: npm run tauri build -- ${{ matrix.args }}
+      - name: Collect installers
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os, shutil
+          platform = os.environ['PLATFORM']
+          out = Path('installers')
+          out.mkdir()
+          extensions = {'linux-x64': ['.deb', '.AppImage'], 'windows-x64': ['.exe'], 'macos-universal': ['.dmg']}[platform]
+          for ext in extensions:
+              files = list(Path('src-tauri/target').glob('**/release/bundle/**/*' + ext))
+              if len(files) != 1:
+                  raise SystemExit(f'Expected one {ext} installer, got {len(files)}')
+              shutil.copy2(files[0], out / ('Market-Lens-' + platform + ext))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Market-Lens-${{ matrix.platform }}
+          path: installers/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
