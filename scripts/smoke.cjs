@@ -20,6 +20,7 @@ const server = spawn(
   await page.waitForSelector("h1");
   for (const name of [
     "Research",
+    "Relationships",
     "Trade",
     "Portfolio",
     "Screener",
@@ -35,6 +36,39 @@ const server = spawn(
     )
       throw Error("Overflow on " + name);
   }
+  await page.click('[data-page="Research"]');
+  await page.click('[data-action="graph-open"]');
+  if ((await page.locator(".evidence-card").count()) !== 3)
+    throw Error("Apple neighborhood absent");
+  await page.click('[data-entity="td-synnex"]');
+  if ((await page.locator(".evidence-card").count()) !== 4)
+    throw Error("Graph recenter failed");
+  await page.selectOption("#graph-center", "apple");
+  await page.locator('[data-entity="broadcom"]').focus();
+  await page.keyboard.press("Enter");
+  if ((await page.locator("#graph-center").inputValue()) !== "broadcom")
+    throw Error("Graph keyboard traversal failed");
+  const candidate = require("../src/data/relationships.json");
+  candidate.edges = [{ ...candidate.edges[0], id: "test-import" }];
+  await page.setInputFiles("#graph-import", {
+    name: "evidence.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(candidate)),
+  });
+  await page.waitForSelector('[data-action="graph-review"]');
+  await page.selectOption("#graph-candidates", "reviewed");
+  if ((await page.locator(".evidence-card").count()) !== 1)
+    throw Error("Import self-certified review");
+  await page.selectOption("#graph-candidates", "all");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.click('[data-action="graph-review"]');
+  await page.waitForFunction(
+    () => !document.querySelector('[data-action="graph-review"]'),
+  );
+  await page.reload();
+  await page.click('[data-page="Relationships"]');
+  if ((await page.locator(".evidence-card").count()) !== 4)
+    throw Error("Reviewed graph not persisted");
   await page.click('[data-page="Trade"]');
   await page.click('[data-action="buy"]');
   await page.waitForTimeout(100);
@@ -96,7 +130,7 @@ const server = spawn(
     JSON.stringify({
       errors,
       result:
-        "UI navigation, trades, persistence, alerts, CSV import, sample isolation passed",
+        "UI navigation, graph traversal/import/review, trades, persistence, alerts, CSV import, sample isolation passed",
     }),
   );
   await browser.close();

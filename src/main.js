@@ -1,4 +1,10 @@
 import {
+  seedGraph,
+  validateGraph,
+  mergeGraph,
+  relationshipsView,
+} from "./relationships.js";
+import {
   screenerView,
   screenRows,
   defaults as screenDefaults,
@@ -63,9 +69,14 @@ let state = await load(),
   screen = { pe: 100, growth: -100, sector: "" },
   statement = "INCOME_STATEMENT",
   period = "annualReports";
+let graphCenter = "apple",
+  graphCandidates = false;
+const graph = () => (state.relationshipGraph ||= seedGraph());
+if (state.relationshipGraph) validateGraph(state.relationshipGraph);
 const pages = [
   "Overview",
   "Research",
+  "Relationships",
   "Trade",
   "Portfolio",
   "Screener",
@@ -150,7 +161,7 @@ function render() {
   const a = asset();
   if (a) symbol = a.symbol;
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="workspace-label">PERSONAL TERMINAL</div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⇄", "◉", "☷", "ƒ", "◎", "◇", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><span class="dot"></span>${native ? "Native · SQLite" : "Browser preview"}<small>Local-first research workspace</small></div></aside><main><header><div class="breadcrumb">Workspace <span>/</span> ${page}</div><input id="search" placeholder="Search ticker or company…" aria-label="Search assets"><select id="mode" aria-label="Data workspace"><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Sample workspace</option><option value="market" ${state.mode === "market" ? "selected" : ""}>My market data</option></select></header><div class="notice">${state.mode === "sample" ? "SAMPLE DATA · All prices and company metrics here are synthetic. Trades use a separate demo account." : "DAILY DATA · No real-time quotes or broker execution. Paper trades use your selected historical or manual price."}</div><section class="content"><div class="title-row"><div><p class="eyebrow">MARKET INTELLIGENCE / ${state.mode === "sample" ? "DEMONSTRATION" : "PERSONAL RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page}</h1></div><span class="tag">${assets().length} assets in workspace</span></div>${{ Overview: overview, Research: research, Trade: trade, Portfolio: portfolioPage, Screener: screener, Valuation: valuation, Economy: economy, Alerts: alerts, Settings: settings }[page]()}</section><footer>Market Lens 0.1 · USD equity workspace · Prices are unadjusted unless your CSV supplies adjusted OHLC · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="workspace-label">PERSONAL TERMINAL</div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⋈", "⇄", "◉", "☷", "ƒ", "◎", "◇", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><span class="dot"></span>${native ? "Native · SQLite" : "Browser preview"}<small>Local-first research workspace</small></div></aside><main><header><div class="breadcrumb">Workspace <span>/</span> ${page}</div><input id="search" placeholder="Search ticker or company…" aria-label="Search assets"><select id="mode" aria-label="Data workspace"><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Sample workspace</option><option value="market" ${state.mode === "market" ? "selected" : ""}>My market data</option></select></header><div class="notice">${page === "Relationships" ? "SOURCED RELATIONSHIPS · Dated historical disclosures. Coverage is limited; current status is unverified." : state.mode === "sample" ? "SAMPLE DATA · All prices and company metrics here are synthetic. Trades use a separate demo account." : "DAILY DATA · No real-time quotes or broker execution. Paper trades use your selected historical or manual price."}</div><section class="content"><div class="title-row"><div><p class="eyebrow">MARKET INTELLIGENCE / ${page === "Relationships" ? "COMPANY RELATIONSHIPS" : state.mode === "sample" ? "DEMONSTRATION" : "PERSONAL RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page}</h1></div><span class="tag">${assets().length} assets in workspace</span></div>${{ Overview: overview, Research: research, Relationships: () => relationshipsView(graph(), graphCenter, graphCandidates), Trade: trade, Portfolio: portfolioPage, Screener: screener, Valuation: valuation, Economy: economy, Alerts: alerts, Settings: settings }[page]()}</section><footer>Market Lens 0.1 · USD equity workspace · Prices are unadjusted unless your CSV supplies adjusted OHLC · No investment recommendations</footer></main>`;
   bind();
   drawCharts();
 }
@@ -334,7 +345,7 @@ function research() {
         : null;
   const news =
     state.mode === "market" ? state.datasets[`${symbol}:NEWS_SENTIMENT`] : null;
-  return `<section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${button("Download prices", "prices")}${button("Company overview", "overview-fetch")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || "Download the company overview for a sourced business description.")}</p><div class="metrics"><span>Sector</span><b>${esc(a.sector || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div>${link("https://www.sec.gov/edgar/search/", "SEC filings search")}<p><small>Search company name or ticker on EDGAR. Metrics retain provider definitions and reported currencies.</small></p></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="8" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div><section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select>${button("Download statement", "statement-fetch")}</div>${
+  return `<section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${button("Download prices", "prices")}${button("Company overview", "overview-fetch")}${button("Supplier / customer graph", "graph-open")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || "Download the company overview for a sourced business description.")}</p><div class="metrics"><span>Sector</span><b>${esc(a.sector || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div>${link("https://www.sec.gov/edgar/search/", "SEC filings search")}<p><small>Search company name or ticker on EDGAR. Metrics retain provider definitions and reported currencies.</small></p></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="8" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div><section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select>${button("Download statement", "statement-fetch")}</div>${
     data?.length
       ? table(
           ["Metric", ...data.slice(0, 4).map((r) => esc(r.fiscalDateEnding))],
@@ -687,6 +698,44 @@ async function getData(kind, s = symbol) {
   render();
 }
 function bind() {
+  const recenter = (id) => {
+    graphCenter = id;
+    render();
+  };
+  document.querySelectorAll("[data-entity]").forEach((el) => {
+    el.onclick = () => recenter(el.dataset.entity);
+    el.onkeydown = (event) => {
+      if (["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        recenter(el.dataset.entity);
+      }
+    };
+  });
+  if ($("#graph-center"))
+    $("#graph-center").onchange = (event) => recenter(event.target.value);
+  if ($("#graph-candidates"))
+    $("#graph-candidates").onchange = (event) => {
+      graphCandidates = event.target.value === "all";
+      render();
+    };
+  if ($("#graph-import"))
+    $("#graph-import").onchange = async (event) => {
+      try {
+        const file = event.target.files[0];
+        if (!file) return;
+        if (file.size > 5e6) throw Error("Graph import limit is 5 MB");
+        const next = mergeGraph(graph(), JSON.parse(await file.text()));
+        state.relationshipGraph = next;
+        await persist();
+        graphCandidates = true;
+        render();
+        notify(
+          "Evidence imported as unreviewed claims. Select an entity to inspect sources.",
+        );
+      } catch (error) {
+        notify(error.message, true);
+      }
+    };
   document.querySelectorAll("[data-screen-field]").forEach(
     (el) =>
       (el.onchange = async () => {
@@ -828,6 +877,8 @@ function bind() {
         if (!file) return;
         if (file.size > 20e6) throw Error("Backup limit is 20 MB");
         const restored = validateWorkspace(JSON.parse(await file.text()));
+        if (restored.relationshipGraph)
+          validateGraph(restored.relationshipGraph, { imported: true });
         if (
           !confirm(
             "Replace the entire current workspace with this backup? Export a backup first if needed.",
@@ -856,6 +907,42 @@ function bind() {
 }
 async function action(act, value) {
   switch (act) {
+    case "graph-open": {
+      const entity = graph().nodes.find((n) => n.ticker === asset()?.symbol);
+      if (!entity) {
+        notify(
+          "No relationship coverage for this ticker yet. Open Relationships to import sourced evidence.",
+          true,
+        );
+        break;
+      }
+      graphCenter = entity.id;
+      page = "Relationships";
+      render();
+      break;
+    }
+    case "graph-export":
+      download(
+        "company-relationships.json",
+        JSON.stringify(graph(), null, 2),
+        "application/json",
+      );
+      break;
+    case "graph-review": {
+      const edge = graph().edges.find((x) => x.id === value);
+      if (!edge) throw Error("Relationship not found");
+      if (
+        !confirm(
+          "Have you read the source and verified the named supplier, customer, direction and disclosure date? This marks evidence reviewed, not the relationship currently active.",
+        )
+      )
+        return;
+      edge.review = "reviewed";
+      edge.reviewedOn = new Date().toISOString().slice(0, 10);
+      await persist();
+      render();
+      break;
+    }
     case "visual-screen-save":
       (state.savedVisualScreens ||= []).push({
         name: `${screenConfig().metric} / ${screenConfig().period} / ${screenConfig().sector || "All sectors"}`,
