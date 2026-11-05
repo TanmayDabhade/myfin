@@ -1,3 +1,4 @@
+import { maritimeView, normalizeActivity } from "./maritime.js";
 import {
   screenerView,
   screenRows,
@@ -73,7 +74,13 @@ const pages = [
   "Economy",
   "Alerts",
   "Settings",
+  "Commodities",
 ];
+let maritimeSelected = "chokepoint6",
+  maritimeMetric = "tanker";
+function commodities() {
+  return maritimeView(state.maritime || {}, maritimeSelected, maritimeMetric);
+}
 function activeMap() {
   return state.mode === "sample" ? state.assets : (state.marketAssets ||= {});
 }
@@ -150,7 +157,7 @@ function render() {
   const a = asset();
   if (a) symbol = a.symbol;
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="workspace-label">PERSONAL TERMINAL</div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⇄", "◉", "☷", "ƒ", "◎", "◇", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><span class="dot"></span>${native ? "Native · SQLite" : "Browser preview"}<small>Local-first research workspace</small></div></aside><main><header><div class="breadcrumb">Workspace <span>/</span> ${page}</div><input id="search" placeholder="Search ticker or company…" aria-label="Search assets"><select id="mode" aria-label="Data workspace"><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Sample workspace</option><option value="market" ${state.mode === "market" ? "selected" : ""}>My market data</option></select></header><div class="notice">${state.mode === "sample" ? "SAMPLE DATA · All prices and company metrics here are synthetic. Trades use a separate demo account." : "DAILY DATA · No real-time quotes or broker execution. Paper trades use your selected historical or manual price."}</div><section class="content"><div class="title-row"><div><p class="eyebrow">MARKET INTELLIGENCE / ${state.mode === "sample" ? "DEMONSTRATION" : "PERSONAL RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page}</h1></div><span class="tag">${assets().length} assets in workspace</span></div>${{ Overview: overview, Research: research, Trade: trade, Portfolio: portfolioPage, Screener: screener, Valuation: valuation, Economy: economy, Alerts: alerts, Settings: settings }[page]()}</section><footer>Market Lens 0.1 · USD equity workspace · Prices are unadjusted unless your CSV supplies adjusted OHLC · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="workspace-label">PERSONAL TERMINAL</div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⇄", "◉", "☷", "ƒ", "◎", "◇", "⚙", "◌"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><span class="dot"></span>${native ? "Native · SQLite" : "Browser preview"}<small>Local-first research workspace</small></div></aside><main><header><div class="breadcrumb">Workspace <span>/</span> ${page}</div><input id="search" placeholder="Search ticker or company…" aria-label="Search assets"><select id="mode" aria-label="Data workspace"><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Sample workspace</option><option value="market" ${state.mode === "market" ? "selected" : ""}>My market data</option></select></header><div class="notice">${page === "Commodities" ? "MARITIME DATA · Downloaded PortWatch aggregates; observation dates and retrieval times are shown separately." : state.mode === "sample" ? "SAMPLE DATA · All prices and company metrics here are synthetic. Trades use a separate demo account." : "DAILY DATA · No real-time quotes or broker execution. Paper trades use your selected historical or manual price."}</div><section class="content"><div class="title-row"><div><p class="eyebrow">MARKET INTELLIGENCE / ${state.mode === "sample" ? "DEMONSTRATION" : "PERSONAL RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page}</h1></div><span class="tag">${assets().length} assets in workspace</span></div>${{ Overview: overview, Research: research, Trade: trade, Portfolio: portfolioPage, Screener: screener, Valuation: valuation, Economy: economy, Alerts: alerts, Settings: settings, Commodities: commodities }[page]()}</section><footer>Market Lens 0.1 · USD equity workspace · Prices are unadjusted unless your CSV supplies adjusted OHLC · No investment recommendations</footer></main>`;
   bind();
   drawCharts();
 }
@@ -687,6 +694,29 @@ async function getData(kind, s = symbol) {
   render();
 }
 function bind() {
+  if ($("#maritime-location"))
+    $("#maritime-location").onchange = (e) => {
+      maritimeSelected = e.target.value;
+      render();
+    };
+  if ($("#maritime-metric"))
+    $("#maritime-metric").onchange = (e) => {
+      maritimeMetric = e.target.value;
+      render();
+    };
+  document.querySelectorAll("[data-location]").forEach((el) => {
+    el.onclick = () => {
+      maritimeSelected = el.dataset.location;
+      render();
+    };
+    el.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        el.onclick();
+      }
+    };
+  });
+
   document.querySelectorAll("[data-screen-field]").forEach(
     (el) =>
       (el.onchange = async () => {
@@ -856,6 +886,38 @@ function bind() {
 }
 async function action(act, value) {
   switch (act) {
+    case "maritime-fetch": {
+      if (!native)
+        throw Error(
+          "PortWatch downloads use the native Rust backend. Start with npm run tauri dev.",
+        );
+      const id = maritimeSelected;
+      notify("Downloading public PortWatch observations…");
+      const d = await window.__TAURI__.core.invoke("fetch_maritime", { id });
+      normalizeActivity(d.data, id);
+      (state.maritime ||= {})[id] = d;
+      await persist();
+      render();
+      notify(d.warning || "PortWatch observations saved.");
+      break;
+    }
+    case "maritime-export": {
+      const d = state.maritime?.[maritimeSelected];
+      if (!d) throw Error("Download a location first");
+      download(
+        "portwatch-" + maritimeSelected + ".csv",
+        csv(
+          normalizeActivity(d.data, maritimeSelected).map((r) => ({
+            ...r,
+            provider: "IMF PortWatch",
+            retrieved: new Date(d.fetchedAt * 1000).toISOString(),
+          })),
+        ),
+        "text/csv",
+      );
+      break;
+    }
+
     case "visual-screen-save":
       (state.savedVisualScreens ||= []).push({
         name: `${screenConfig().metric} / ${screenConfig().period} / ${screenConfig().sector || "All sectors"}`,
