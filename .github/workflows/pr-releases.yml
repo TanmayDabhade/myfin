@@ -1,0 +1,40 @@
+name: Publish PR prerelease
+on:
+  workflow_run:
+    workflows: [PR desktop builds]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful PR desktop builds run ID to publish or retry
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: write
+  pull-requests: read
+# Serialize retries of one run without dropping other PRs from the queue.
+concurrency:
+  group: pr-release-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # Only publisher code on the default branch runs with write credentials.
+      # PR archives are uploaded as opaque bytes, never extracted or executed.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/github-script@v7
+        env:
+          BUILD_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        with:
+          github-token: ${{ secrets.PR_RELEASE_TOKEN || github.token }}
+          script: |
+            const publish = require('./.github/scripts/publish-pr-release.cjs');
+            await publish({ github, context, core, runId: Number(process.env.BUILD_RUN_ID) });
