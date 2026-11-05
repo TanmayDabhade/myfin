@@ -1,3 +1,8 @@
+import {
+  screenerView,
+  screenRows,
+  defaults as screenDefaults,
+} from "./screener.js";
 import "./style.css";
 import { load, save, keys, fetchData, native, nativeTrade } from "./bridge.js";
 import { sample } from "./sample.js";
@@ -461,7 +466,17 @@ function filtered() {
     );
   });
 }
+function screenConfig() {
+  return ((state.visualScreens ||= {})[state.mode] ||= { ...screenDefaults });
+}
 function screener() {
+  return screenerView(
+    assets(),
+    screenConfig(),
+    (state.savedVisualScreens || []).filter((x) => x.mode === state.mode),
+  );
+}
+function legacyScreener() {
   return `<section class="panel"><div class="panel-head"><h2>Screen your downloaded universe</h2>${button("Save screen", "screen-save")}${button("Export results", "screen-export")}</div><div class="filters"><label>Maximum P/E<input id="max-pe" type="number" value="${screen.pe}"></label><label>Minimum revenue growth (%)<input id="min-growth" type="number" value="${screen.growth}"></label><label>Sector<select id="sector"><option value="">All sectors</option>${[
     ...new Set(
       assets()
@@ -672,6 +687,19 @@ async function getData(kind, s = symbol) {
   render();
 }
 function bind() {
+  document.querySelectorAll("[data-screen-field]").forEach(
+    (el) =>
+      (el.onchange = async () => {
+        screenConfig()[el.dataset.screenField] = el.value;
+        try {
+          await persist();
+          render();
+        } catch (e) {
+          notify(e.message, true);
+        }
+      }),
+  );
+
   document.querySelectorAll("[data-page]").forEach(
     (el) =>
       (el.onclick = () => {
@@ -828,6 +856,41 @@ function bind() {
 }
 async function action(act, value) {
   switch (act) {
+    case "visual-screen-save":
+      (state.savedVisualScreens ||= []).push({
+        name: `${screenConfig().metric} / ${screenConfig().period} / ${screenConfig().sector || "All sectors"}`,
+        mode: state.mode,
+        options: { ...screenConfig() },
+      });
+      await persist();
+      render();
+      break;
+    case "visual-screen-load": {
+      const view = state.savedVisualScreens.filter(
+        (x) => x.mode === state.mode,
+      )[+value];
+      state.visualScreens[state.mode] = { ...view.options };
+      await persist();
+      render();
+      break;
+    }
+    case "visual-screen-export":
+      download(
+        "screener.csv",
+        csv(
+          screenRows(assets(), screenConfig()).map((a) => ({
+            symbol: a.symbol,
+            name: a.name,
+            sector: a.sector,
+            priceDate: a.bars.at(-1)?.date,
+            source: a.source,
+            ...a.overview,
+          })),
+        ),
+        "text/csv",
+      );
+      break;
+
     case "research":
       page = "Research";
       render();
