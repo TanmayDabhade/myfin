@@ -1,3 +1,4 @@
+import { maritimeView, normalizeActivity } from "./maritime.js";
 import {
   seedGraph,
   validateGraph,
@@ -84,7 +85,13 @@ const pages = [
   "Economy",
   "Alerts",
   "Settings",
+  "Commodities",
 ];
+let maritimeSelected = "chokepoint6",
+  maritimeMetric = "tanker";
+function commodities() {
+  return maritimeView(state.maritime || {}, maritimeSelected, maritimeMetric);
+}
 function activeMap() {
   return state.mode === "sample" ? state.assets : (state.marketAssets ||= {});
 }
@@ -736,6 +743,29 @@ function bind() {
         notify(error.message, true);
       }
     };
+  if ($("#maritime-location"))
+    $("#maritime-location").onchange = (e) => {
+      maritimeSelected = e.target.value;
+      render();
+    };
+  if ($("#maritime-metric"))
+    $("#maritime-metric").onchange = (e) => {
+      maritimeMetric = e.target.value;
+      render();
+    };
+  document.querySelectorAll("[data-location]").forEach((el) => {
+    el.onclick = () => {
+      maritimeSelected = el.dataset.location;
+      render();
+    };
+    el.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        el.onclick();
+      }
+    };
+  });
+
   document.querySelectorAll("[data-screen-field]").forEach(
     (el) =>
       (el.onchange = async () => {
@@ -943,6 +973,38 @@ async function action(act, value) {
       render();
       break;
     }
+    case "maritime-fetch": {
+      if (!native)
+        throw Error(
+          "PortWatch downloads use the native Rust backend. Start with npm run tauri dev.",
+        );
+      const id = maritimeSelected;
+      notify("Downloading public PortWatch observations…");
+      const d = await window.__TAURI__.core.invoke("fetch_maritime", { id });
+      normalizeActivity(d.data, id);
+      (state.maritime ||= {})[id] = d;
+      await persist();
+      render();
+      notify(d.warning || "PortWatch observations saved.");
+      break;
+    }
+    case "maritime-export": {
+      const d = state.maritime?.[maritimeSelected];
+      if (!d) throw Error("Download a location first");
+      download(
+        "portwatch-" + maritimeSelected + ".csv",
+        csv(
+          normalizeActivity(d.data, maritimeSelected).map((r) => ({
+            ...r,
+            provider: "IMF PortWatch",
+            retrieved: new Date(d.fetchedAt * 1000).toISOString(),
+          })),
+        ),
+        "text/csv",
+      );
+      break;
+    }
+
     case "visual-screen-save":
       (state.savedVisualScreens ||= []).push({
         name: `${screenConfig().metric} / ${screenConfig().period} / ${screenConfig().sector || "All sectors"}`,

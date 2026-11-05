@@ -28,6 +28,7 @@ const server = spawn(
     "Economy",
     "Alerts",
     "Settings",
+    "Commodities",
   ]) {
     await page.click(`[data-page="${name}"]`);
     await page.waitForSelector("h1");
