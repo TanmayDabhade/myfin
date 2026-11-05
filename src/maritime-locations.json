@@ -1,0 +1,226 @@
+[
+  {
+    "id": "chokepoint1",
+    "name": "Suez Canal",
+    "lat": 30.59334599,
+    "lon": 32.43688221,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint2",
+    "name": "Panama Canal",
+    "lat": 9.120512367,
+    "lon": -79.76723825,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint3",
+    "name": "Bosporus Strait",
+    "lat": 41.16928167,
+    "lon": 29.09150126,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint4",
+    "name": "Bab el-Mandeb Strait",
+    "lat": 12.78859715,
+    "lon": 43.34954476,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint5",
+    "name": "Malacca Strait",
+    "lat": 1.516954817,
+    "lon": 102.6651061,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint6",
+    "name": "Strait of Hormuz",
+    "lat": 26.29685349,
+    "lon": 56.85984844,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint7",
+    "name": "Cape of Good Hope",
+    "lat": -34.92728556,
+    "lon": 20.88273666,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint8",
+    "name": "Gibraltar Strait",
+    "lat": 35.94227416,
+    "lon": -5.754895722,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint9",
+    "name": "Dover Strait",
+    "lat": 51.03022414,
+    "lon": 1.505839717,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint10",
+    "name": "Oresund Strait",
+    "lat": 55.50784043,
+    "lon": 12.85079477,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint11",
+    "name": "Taiwan Strait",
+    "lat": 24.72350972,
+    "lon": 119.8313644,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint12",
+    "name": "Korea Strait",
+    "lat": 34.13076811,
+    "lon": 129.209206,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint13",
+    "name": "Tsugaru Strait",
+    "lat": 41.32803599,
+    "lon": 140.3532743,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint14",
+    "name": "Luzon Strait",
+    "lat": 20.488890710794,
+    "lon": 121.352295045579,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint15",
+    "name": "Lombok Strait",
+    "lat": -8.41914514129252,
+    "lon": 115.801433044024,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint16",
+    "name": "Ombai Strait",
+    "lat": -8.39854120024364,
+    "lon": 125.090981399512,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint17",
+    "name": "Bohai Strait",
+    "lat": 38.373044249766,
+    "lon": 120.900049176636,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint18",
+    "name": "Torres Strait",
+    "lat": -9.86253413199954,
+    "lon": 142.247528743501,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint19",
+    "name": "Sunda Strait",
+    "lat": -5.96684057041462,
+    "lon": 105.775219888066,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint20",
+    "name": "Makassar Strait",
+    "lat": 0.352280586988657,
+    "lon": 119.257065444388,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint21",
+    "name": "Magellan Strait",
+    "lat": -52.6403396677892,
+    "lon": -69.5948324606974,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint22",
+    "name": "Yucatan Channel",
+    "lat": 21.8152541926988,
+    "lon": -85.6472792223515,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint23",
+    "name": "Windward Passage",
+    "lat": 19.9861871932071,
+    "lon": -73.6975398964955,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint24",
+    "name": "Mona Passage",
+    "lat": 18.4487355684237,
+    "lon": -67.7113544869163,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint25",
+    "name": "Balabac Strait",
+    "lat": 7.413614993177675,
+    "lon": 117.11462168266297,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint26",
+    "name": "Bering Strait",
+    "lat": 65.96648859155934,
+    "lon": -165.54982861145731,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint27",
+    "name": "Mindoro Strait",
+    "lat": 12.468315371959248,
+    "lon": 120.40342787801248,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "chokepoint28",
+    "name": "Kerch Strait",
+    "lat": 45.26676309041701,
+    "lon": 36.54390169965004,
+    "kind": "chokepoint"
+  },
+  {
+    "id": "port362",
+    "name": "Fujairah",
+    "lat": 25.20017278,
+    "lon": 56.35942059,
+    "kind": "port"
+  },
+  {
+    "id": "port1188",
+    "name": "Shanghai",
+    "lat": 31.19179536,
+    "lon": 121.6441968,
+    "kind": "port"
+  },
+  {
+    "id": "port1114",
+    "name": "Rotterdam",
+    "lat": 51.92228121,
+    "lon": 4.215144967,
+    "kind": "port"
+  },
+  {
+    "id": "port481",
+    "name": "Houston (US-TX)",
+    "lat": 29.72023114,
+    "lon": -95.13978774,
+    "kind": "port"
+  }
+]

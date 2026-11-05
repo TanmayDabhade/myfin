@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod ledger;
+mod maritime;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
@@ -45,6 +46,14 @@ async fn export_file(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn fetch_maritime(b:tauri::State<'_,Backend>,id:String)->Result<Value,String>{
+ maritime::query(&id)?;
+ let _gate=b.gate.lock().await;let stamp=now();let key=format!("portwatch:{id}");
+ let cached:Option<(String,i64)>={let db=b.db.lock().map_err(|_|"Database unavailable")?;db.query_row("SELECT body,stamp FROM cache WHERE id=?1",[&key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?};
+ if let Some((body,at))=&cached{if stamp-at<21600{return Ok(json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":at,"cached":true,"provider":"IMF PortWatch"}))}}
+ match maritime::fetch(&b.http,&id).await{Ok(data)=>{b.db.lock().map_err(|_|"Database unavailable")?.execute("INSERT INTO cache(id,body,stamp) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body,stamp=excluded.stamp",params![key,data.to_string(),stamp]).map_err(|e|e.to_string())?;Ok(json!({"data":data,"fetchedAt":stamp,"cached":false,"provider":"IMF PortWatch"}))},Err(error)=>{if let Some((body,at))=cached{Ok(json!({"data":serde_json::from_str::<Value>(&body).map_err(|e|e.to_string())?,"fetchedAt":at,"stale":true,"warning":error,"provider":"IMF PortWatch"}))}else{Err(error)}}}
 }
 #[tauri::command]
 fn load_state(b: tauri::State<Backend>) -> Result<Value, String> {
@@ -228,5 +237,5 @@ async fn fetch_data(
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),keys:Mutex::new((std::env::var("ALPHA_VANTAGE_API_KEY").unwrap_or_default(),std::env::var("FRED_API_KEY").unwrap_or_default())),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,set_keys,fetch_data,paper_trade,export_file]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),keys:Mutex::new((std::env::var("ALPHA_VANTAGE_API_KEY").unwrap_or_default(),std::env::var("FRED_API_KEY").unwrap_or_default())),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,set_keys,fetch_data,paper_trade,export_file,fetch_maritime]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }
