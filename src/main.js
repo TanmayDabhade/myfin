@@ -290,7 +290,7 @@ function liveEmpty() {
   if (!priceSource(state.sources.prices, keyInfo))
     return `<div class="empty">No price source connected yet.<br>${button("Connect a data source", "goto-settings", "primary")}</div>`;
   return empty(
-    syncLabel ||
+    esc(syncLabel) ||
       "Loading your watchlist from " +
         providers[priceSource(state.sources.prices, keyInfo)].name +
         "…",
@@ -457,7 +457,7 @@ function research() {
                   .join("")}</tr>`,
             ),
         )
-      : empty(waiting(statement, "financial statements"))
+      : empty(esc(waiting(statement, "financial statements")))
   }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. Raw provider figures; “None” is missing, not zero.</small></section><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company news</h2></div>${
     news?.data.feed
       ?.slice(0, 10)
@@ -466,7 +466,7 @@ function research() {
         return `<article>${url ? link(url, n.title) : esc(n.title)}<small>${esc(n.source)} · ${esc(n.time_published)}</small><p>${esc(n.summary)}</p></article>`;
       })
       .join("") ||
-    empty(waiting("NEWS_SENTIMENT", "company news"))
+    empty(esc(waiting("NEWS_SENTIMENT", "company news")))
   } ${datasetStamp(news)}</section><section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${state.mode === "market" ? button("Load calendar", "calendar-fetch") : ""}</div>${calendar()}<small>Calendar availability depends on provider access. Dividend dates are available in the company overview: ${esc(o.DividendDate || "—")}.</small></section></div>`;
 }
 const loadErrors = {}; // dataset key -> message from the last failed load
