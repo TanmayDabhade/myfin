@@ -127,6 +127,10 @@ npm run build
 npm run tauri build
 ```
 
+- **Source health**: `.github/workflows/source-health.yml` runs the live provider contract tests (`cargo test ... -- --ignored`) every Monday and on demand.
+- **Native launch**: PR desktop builds start the built Linux app under a virtual display and fail if it exits within 20 seconds.
+- **Workspace migrations**: `migrate()` in `src/engine.js` upgrades saved workspaces (and restored backups) from older schema versions in place, and refuses workspaces from newer versions.
+
 See `VALIDATION.md` for the checks actually executed in the build environment and their limitations. Core Rust tests intentionally do not require desktop libraries; they test the same ledger module used by the desktop command. Browser tests do not validate the native IPC bridge or OS dialogs.
 
 ## Current boundaries

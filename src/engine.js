@@ -305,6 +305,26 @@ export function checkAlerts(alerts, assets) {
     };
   });
 }
+// Workspace schema. v1 = Market Lens 0.1; v2 adds data sources, first-run
+// state, SEC and commodity data. Older workspaces are upgraded in place.
+export const SCHEMA = 2;
+export function migrate(s) {
+  if (!s || typeof s !== "object") return s;
+  const from = s.schema || 1;
+  if (from > SCHEMA)
+    throw Error("This workspace was saved by a newer Market Lens. Update the app to open it.");
+  if (from < 2) {
+    s.sources ||= { prices: "twelve" };
+    s.marketAssets ||= {};
+    for (const k of ["macro", "datasets", "notes"]) s[k] ||= {};
+    for (const k of ["screens", "alerts", "watchlist"]) s[k] ||= [];
+    // 0.1 users who already have their own data skip the first-run screen.
+    if (s.setupDone == null && Object.values(s.marketAssets).some((a) => a.origin !== "sample"))
+      s.setupDone = true;
+  }
+  s.schema = SCHEMA;
+  return s;
+}
 export function validateWorkspace(s) {
   if (
     !s ||
@@ -347,7 +367,7 @@ export function validateWorkspace(s) {
   })) {
     if (!/^[A-Z0-9.^_-]{1,20}$/.test(symbol)) throw Error("Invalid symbol");
     a.bars = validateBars(a.bars);
-    if (!["sample", "import", "alpha"].includes(a.origin))
+    if (!["sample", "import", "alpha", "twelve"].includes(a.origin))
       throw Error("Invalid data origin");
   }
   for (const ac of Object.values(s.accounts)) {
