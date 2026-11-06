@@ -67,8 +67,47 @@ pub fn resource(kind: &str, cik_raw: &str, accession: &str, doc: &str) -> Result
             // Filed documents never change, so they are kept for 30 days.
             Ok((format!("https://www.sec.gov/Archives/edgar/data/{id}/{}/{doc}", accession.replace('-', "")), true, 30 * 86_400))
         }
+        // Full-text search of annual reports. `doc` carries the phrase and
+        // `accession` the earliest filing date.
+        "search" => {
+            let phrase = doc.trim();
+            let ok_phrase = (2..=80).contains(&phrase.len())
+                && phrase.chars().all(|c| c.is_ascii_alphanumeric() || " .,&'-".contains(c));
+            let d = accession;
+            let ok_date = d.len() == 10
+                && d.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
+            if !ok_phrase || !ok_date {
+                return Err("Invalid filing search".into());
+            }
+            let q: String = format!("\"{phrase}\"")
+                .bytes()
+                .map(|b| if b.is_ascii_alphanumeric() || b == b'-' || b == b'.' { (b as char).to_string() } else { format!("%{b:02X}") })
+                .collect();
+            Ok((format!("https://efts.sec.gov/LATEST/search-index?q={q}&forms=10-K,20-F,40-F&dateRange=custom&startdt={d}"), true, 86_400))
+        }
         _ => Err("Unsupported SEC dataset".into()),
     }
+}
+
+/// Keeps one entry per main annual-report document from a search response.
+pub fn search_hits(raw: &Value) -> Value {
+    let mut out = Vec::new();
+    for h in raw["hits"]["hits"].as_array().into_iter().flatten() {
+        let src = &h["_source"];
+        let kind = src["file_type"].as_str().unwrap_or("");
+        if !["10-K", "20-F", "40-F"].contains(&kind) {
+            continue;
+        }
+        let id = h["_id"].as_str().unwrap_or("");
+        let Some((adsh, doc)) = id.split_once(':') else { continue };
+        let Some(cik) = src["ciks"][0].as_str() else { continue };
+        let name = src["display_names"][0].as_str().unwrap_or("").split("  (").next().unwrap_or("").trim();
+        out.push(serde_json::json!({
+            "cik": cik, "name": name, "accession": adsh, "doc": doc, "form": kind,
+            "filed": src["file_date"], "period": src["period_ending"],
+        }));
+    }
+    serde_json::json!({ "total": raw["hits"]["total"]["value"], "hits": out })
 }
 
 fn entity(name: &str) -> Option<char> {
@@ -164,12 +203,29 @@ pub fn interpret(kind: &str, http: u16, body: &str) -> Result<Value, String> {
         let text = html_to_text(body);
         return Ok(serde_json::json!({ "text": text.chars().take(3_000_000).collect::<String>() }));
     }
-    serde_json::from_str(body).map_err(|_| "SEC returned an unreadable response".into())
+    let v: Value = serde_json::from_str(body).map_err(|_| "SEC returned an unreadable response".to_string())?;
+    Ok(if kind == "search" { search_hits(&v) } else { v })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn builds_full_text_search_and_keeps_main_documents() {
+        let (url, contact, _) = resource("search", "", "2025-05-01", "Apple Inc.").unwrap();
+        assert!(contact);
+        assert!(url.starts_with("https://efts.sec.gov/LATEST/search-index?q=%22Apple%20Inc.%22&forms=10-K,20-F,40-F"));
+        assert!(url.ends_with("startdt=2025-05-01"));
+        assert!(resource("search", "", "2025-5-1", "Apple").is_err());
+        assert!(resource("search", "", "2025-05-01", "a\"&forms=8-K").is_err());
+        let raw = serde_json::json!({"hits":{"total":{"value":2},"hits":[
+            {"_id":"0000772406-26-000010:crus-20260328.htm","_source":{"ciks":["0000772406"],"display_names":["CIRRUS LOGIC, INC.  (CRUS)  (CIK 0000772406)"],"file_type":"10-K","file_date":"2026-05-20","period_ending":"2026-03-28"}},
+            {"_id":"0000772406-26-000010:ex21.htm","_source":{"ciks":["0000772406"],"display_names":["CIRRUS"],"file_type":"EX-21"}}]}});
+        let h = search_hits(&raw);
+        assert_eq!(h["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(h["hits"][0]["name"], "CIRRUS LOGIC, INC.");
+        assert_eq!(h["hits"][0]["doc"], "crus-20260328.htm");
+    }
     #[test]
     fn pads_and_rejects_ciks() {
         assert_eq!(cik("320193").unwrap(), "0000320193");

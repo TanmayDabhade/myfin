@@ -926,3 +926,20 @@ select option, select optgroup { background: #111; color: #ececec; }
 .link-button { background: none; border: none; padding: 0; color: #fff; font: inherit; text-decoration: underline; text-decoration-color: #444; text-underline-offset: 3px; }
 .link-button:hover { background: none; text-decoration-color: #fff; }
 @media (max-width: 850px) { .side-search kbd { display: none; } }
+
+/* ---- Company search (relationship explorer) */
+.combo { position: relative; flex: 1; min-width: 240px; max-width: 520px; }
+.combo input { width: 100%; padding: 9px 12px 9px 34px; border-radius: 8px; background: #111 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M20 20l-4-4'/%3E%3C/svg%3E") no-repeat 11px center; border-color: #2b2b2b; font-size: 13px; }
+.combo input:focus { outline: none; border-color: #d0d0d0; box-shadow: 0 0 0 3px #ffffff14; }
+.combo-list { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; right: 0; background: #0f0f0f; border: 1px solid #2e2e2e; border-radius: 10px; padding: 5px; box-shadow: 0 18px 40px #000c; max-height: 380px; overflow: auto; }
+.combo-item { display: flex; width: 100%; justify-content: space-between; align-items: baseline; gap: 12px; background: none; border: none; border-radius: 7px; padding: 9px 11px; text-align: left; }
+.combo-item b { font-weight: 550; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-item small { flex: none; color: #8a8a8a; }
+.combo-item.active, .combo-item:hover { background: #1f1f1f; }
+.combo-empty { padding: 12px; color: #8a8a8a; font-size: 12px; }
+.graph-toolbar { flex-wrap: nowrap; border-bottom: none; padding-bottom: 10px; }
+.trail-row { display: flex; align-items: center; gap: 12px; padding: 0 0 12px; border-bottom: 1px solid #1c1c1c; min-height: 34px; }
+.trail { flex-wrap: nowrap; overflow: hidden; white-space: nowrap; flex: 1; }
+.crumb { flex: none; }
+.crumb.current { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
+@media (max-width: 1100px) { .graph-toolbar { flex-wrap: wrap; } }

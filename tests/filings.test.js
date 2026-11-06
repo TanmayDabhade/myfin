@@ -104,3 +104,30 @@ test("comparison shows counterparties added and dropped since the prior report",
   assert.deepEqual([r.added.length, r.dropped.length, r.kept.length], [1, 1, 1]);
   assert.equal(r.dropped[0].counterparty.cik, "3");
 });
+import { prettyName, searchPhrases, mentionsOf } from "../src/filings.js";
+test("SEC capitals become readable names; acronyms stay", () => {
+  assert.equal(prettyName("TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD"), "Taiwan Semiconductor Manufacturing Co Ltd");
+  assert.equal(prettyName("TD SYNNEX CORP"), "TD Synnex Corp");
+  assert.equal(prettyName("8X8 INC /DE/"), "8X8 Inc");
+  assert.equal(prettyName("Apple Inc."), "Apple Inc.");
+});
+test("search phrases avoid one-word names on their own", () => {
+  assert.deepEqual(searchPhrases("Apple Inc."), ["Apple Inc."]);
+  assert.deepEqual(searchPhrases("TAIWAN SEMICONDUCTOR MANUFACTURING CO LTD"), [
+    "Taiwan Semiconductor Manufacturing Co Ltd",
+    "Taiwan Semiconductor Manufacturing",
+  ]);
+});
+test("another company's filing that names the target as a customer", () => {
+  const apple = { id: "apple", name: "Apple Inc.", ticker: "AAPL", cik: "0000320193" };
+  const filer = { cik: "0000772406", name: "Cirrus Logic, Inc." };
+  const text =
+    "Apple Inc. (“Apple”) designs consumer devices. Apple accounted for 87% of our total net sales in fiscal 2026 and is our largest customer. We also sell to other manufacturers of apple-shaped products.";
+  const found = mentionsOf(text, apple, filer);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].role, "customer");
+  assert.equal(found[0].revenueShare, 0.87);
+  assert.equal(found[0].counterparty.nodeId, "apple");
+  // Without the legal name anywhere, a bare word is not enough.
+  assert.deepEqual(mentionsOf("Apple accounted for 87% of our net sales and is our largest customer.", apple, filer), []);
+});

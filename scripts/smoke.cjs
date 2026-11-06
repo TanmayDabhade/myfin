@@ -80,7 +80,16 @@ function fakeBackend() {
           0: { cik_str: 320193, ticker: "AAPL", title: "Apple Inc." },
           1: { cik_str: 1046179, ticker: "TSM", title: "Taiwan Semiconductor Manufacturing Co Ltd" },
           2: { cik_str: 1018724, ticker: "AMZN", title: "Amazon.com, Inc." },
+          3: { cik_str: 772406, ticker: "CRUS", title: "CIRRUS LOGIC, INC." },
         });
+      // Full-text search: one other company's annual report names Apple.
+      if (kind === "search")
+        return wrap({ total: 2, hits: [
+          { cik: "0000320193", name: "Apple Inc.", accession: "0000320193-26-000026", doc: "cur.htm", form: "10-K", filed: "2026-11-03", period: "2026-09-26" },
+          { cik: "0000772406", name: "CIRRUS LOGIC, INC.", accession: "0000772406-26-000010", doc: "crus.htm", form: "10-K", filed: "2026-05-20", period: "2026-03-28" },
+        ] });
+      if (kind === "document" && accession === "0000772406-26-000010")
+        return wrap({ text: "Apple Inc. (\u201cApple\u201d) is our largest customer and accounted for 87% of our total net sales in fiscal 2026." });
       if (kind === "submissions")
         return wrap({
           cik: "320193",
@@ -117,6 +126,12 @@ function fakeBackend() {
     },
   };
 }
+const centerId = (page) => page.locator(".g-node.center").getAttribute("data-entity");
+async function pickCompany(page, q) {
+  await page.fill("#graph-search", q);
+  await page.waitForSelector(".combo-item");
+  await page.press("#graph-search", "Enter");
+}
 async function liveFlow(browser, errors) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.addInitScript(fakeBackend);
@@ -152,8 +167,17 @@ async function liveFlow(browser, errors) {
   await page.waitForSelector("h2:has-text('CIK 0000320193')");
   if (!(await page.locator("body").innerText()).includes("10.00%")) throw Error("SEC revenue growth missing");
   await page.click('[data-action="graph-open"]');
-  // Opening a company scans its filings without a click.
+  // Opening a company scans its filings, and other companies' reports that
+  // name it, without a click.
   await page.waitForSelector("text=New since prior report");
+  await page.waitForSelector('g[data-entity="cik-0000772406"]');
+  if (!(await page.locator("body").innerText()).includes("Cirrus Logic, Inc."))
+    throw Error("Supplier named in another company's report missing");
+  // Any SEC-listed company can be searched, not just ones already in the graph.
+  await page.fill("#graph-search", "Amazon");
+  await page.waitForSelector(".combo-item:has-text('Amazon.com')");
+  await page.press("#graph-search", "Enter");
+  await page.waitForSelector('.g-node.center[data-entity="cik-0001018724"], .g-node.center[data-entity="t-amzn"]');
   const scanText = await page.locator("body").innerText();
   if (!scanText.includes("Named as supplier in filing (candidate)")) throw Error("Scan candidate missing");
   if (!/New since prior report\s+Taiwan Semiconductor/.test(scanText)) throw Error("Filing comparison missing");
@@ -224,20 +248,20 @@ const server = spawn(
   await page.click('g[data-entity="td-synnex"]');
   if ((await page.locator(".evidence-card").count()) !== 4)
     throw Error("Graph recenter failed");
-  await page.selectOption("#graph-center", "apple");
+  await pickCompany(page, "Apple");
   await page.locator('g[data-entity="broadcom"]').focus();
   await page.keyboard.press("Enter");
-  if ((await page.locator("#graph-center").inputValue()) !== "broadcom")
+  if ((await centerId(page)) !== "broadcom")
     throw Error("Graph keyboard traversal failed");
   // A subsidiary opens its listed parent; Back returns to the previous company.
-  await page.selectOption("#graph-center", "apple");
+  await pickCompany(page, "Apple");
   await page.click('g[data-entity="qualcomm-tech"]');
-  if ((await page.locator("#graph-center").inputValue()) !== "t-qcom")
+  if ((await centerId(page)) !== "t-qcom")
     throw Error("Subsidiary did not open its parent company");
   if (!(await page.locator(".evidence-card").first().innerText()).includes("Qualcomm Technologies"))
     throw Error("Parent view lost the subsidiary's evidence");
   await page.click('[data-action="graph-back"]');
-  if ((await page.locator("#graph-center").inputValue()) !== "apple" || (await page.locator(".evidence-card").count()) !== 3)
+  if ((await centerId(page)) !== "apple" || (await page.locator(".evidence-card").count()) !== 3)
     throw Error("Back did not restore Apple's relationships");
   await page.click('[data-page="Trade"]');
   await page.click('[data-action="buy"]');
