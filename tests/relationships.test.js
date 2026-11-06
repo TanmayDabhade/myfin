@@ -109,3 +109,12 @@ test("the trail keeps the last four companies on one line", () => {
   assert.match(html, /data-value="1" title="Earlier companies">…/);
   assert.doesNotMatch(html, /title="Cisco Systems/);
 });
+test("the graph is drawn 1:1 at the panel width so text never scales up", () => {
+  const g = seedGraph();
+  const wide = relationshipsView(g, "apple", false, { width: 2400 });
+  assert.match(wide, /viewBox="0 0 2400 \d+" width="2400"/);
+  // Customer column sits at the right edge, not at a fixed 720px.
+  assert.ok(!/class="g-col" x="720"/.test(wide));
+  // Too narrow is clamped to the minimum readable layout.
+  assert.match(relationshipsView(g, "apple", false, { width: 300 }), /viewBox="0 0 760 /);
+});
