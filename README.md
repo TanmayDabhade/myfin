@@ -48,12 +48,20 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
    - **Alpha Vantage**: company profile, statements, news, earnings calendar (25 requests/day). [Get a key](https://www.alphavantage.co/support/#api-key)
    - **FRED**: US economic series. [Get a key](https://fredaccount.stlouisfed.org/apikeys)
 
+   - **SEC EDGAR** (optional contact email): filing lists and revenue history load with no key; adding your email also lets the app read 10-K text to find suppliers and customers. SEC asks automated tools to declare a contact; it is sent only to sec.gov.
+
    One key is enough to start. Choose where prices come from and press **Connect and load data**.
 2. That's it. Your watchlist loads right away and refreshes every 30 minutes while the app is open. Type any ticker in the search box (or the watchlist's **Add** field) and it is pulled from your price source.
 3. **Research** loads the company profile, financial statements and news automatically for the selected ticker. **Economy** loads all six FRED series, and **Commodities** loads IMF PortWatch shipping activity, which needs no key.
 4. Keys are saved once, in `credentials.json` in the app-data folder with owner-only file permissions. Change or remove them in **Settings → Data sources**, where each provider's last error is also shown. `TWELVE_DATA_API_KEY`, `ALPHA_VANTAGE_API_KEY` and `FRED_API_KEY` environment variables override saved keys.
 5. **Demo data** (top-right switch) is a synthetic workspace with its own paper account. Use it to explore without keys.
 6. Use **Trade** to record simulated fills at the last daily close or your own price, including fees.
+
+## SEC filing discovery
+
+- **Research → SEC filings** lists recent 10-K, 10-Q, 8-K and similar filings with links, plus annual revenue and year-over-year growth from XBRL company facts (latest restatement per period). No key needed. The company's CIK comes from Alpha Vantage, the relationship graph or SEC's company list.
+- **Relationships → Find suppliers & customers** reads the two latest annual reports, resolves company names against SEC's company list and graph aliases (legal suffixes ignored; one-word names need a legal suffix in the sentence), and adds sentences with supplier or customer wording as **unreviewed** candidates dated to the filing. Revenue concentration is stored only when the same sentence discloses it. The panel compares the two reports: counterparties new this year and no longer mentioned.
+- Candidates never become reviewed automatically; use **Mark source reviewed** after reading the filing.
 
 ## Implemented workflows
 
