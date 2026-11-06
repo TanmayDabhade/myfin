@@ -16,7 +16,7 @@ function fakeBackend() {
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
       const k = store("native-keys") || {};
-      return Object.fromEntries(["alpha", "twelve", "fred", "sec"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
+      return Object.fromEntries(["alpha", "twelve", "fred", "sec", "ais"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
     },
     set_keys: ({ keys }) => {
       const k = store("native-keys") || {};
@@ -35,6 +35,23 @@ function fakeBackend() {
         return wrap({ feed: [{ title: "Fixture headline", url: "https://example.com/n", source: "Fixture", time_published: "20261105T120000", summary: "Test" }] });
       return wrap({ annualReports: [{ fiscalDateEnding: "2025-12-31", reportedCurrency: "USD", totalRevenue: "1000" }] });
     },
+    ais_start: ({ area }) => {
+      if (!(store("native-keys") || {}).ais) throw "No AISStream key";
+      window.__aisArea = area;
+    },
+    ais_stop: () => {
+      window.__aisArea = null;
+    },
+    ais_snapshot: () => ({
+      area: window.__aisArea,
+      status: "live",
+      error: "",
+      lastMessage: Date.now() / 1000,
+      vessels: [
+        { mmsi: 123456789, name: "FIXTURE TANKER", lat: 26.5, lon: 56.3, sog: 11.2, cog: 90, status: "Under way (engine)", class: "tanker", type_code: 80, destination: "FIXTURE PORT", seen: Date.now() / 1000 },
+        { mmsi: 223456789, name: "FIXTURE CARGO", lat: 26.6, lon: 56.1, sog: null, cog: null, status: "At anchor", class: "cargo", type_code: 70, destination: "", seen: Date.now() / 1000 },
+      ],
+    }),
     fetch_sec: ({ kind, accession }) => {
       if (kind !== "submissions" && kind !== "revenue" && !(store("native-keys") || {}).sec)
         throw "SEC contact email required";
@@ -92,6 +109,7 @@ async function liveFlow(browser, errors) {
   await page.fill("#key-alpha", "FAKEKEY2");
   await page.fill("#key-fred", "FAKEKEY3");
   await page.fill("#key-sec", "analyst@example.com");
+  await page.fill("#key-ais", "FAKEKEY4");
   await page.click('[data-action="setup-connect"]');
   await page.waitForSelector(".watch-row");
   await page.waitForFunction(() => document.querySelectorAll(".watch-row").length === 5);
@@ -117,6 +135,11 @@ async function liveFlow(browser, errors) {
   await page.click('[data-page="Commodities"]');
   await page.waitForSelector(".maritime-map");
   await page.waitForFunction(() => document.body.innerText.includes("Retrieved"));
+  await page.waitForFunction(() => document.querySelectorAll(".commodity-grid .macro-card strong").length === 5 && [...document.querySelectorAll(".commodity-grid .macro-card strong")].every((x) => x.textContent === "4.10"));
+  await page.waitForSelector("#vessel-panel td:has-text('FIXTURE TANKER')", { timeout: 10000 });
+  await page.selectOption("#vessel-class", "tanker");
+  if ((await page.locator("#vessel-panel td:has-text('FIXTURE CARGO')").count()) !== 0) throw Error("Vessel class filter failed");
+  if ((await page.locator("#vessel-panel circle.vessel").count()) !== 1) throw Error("Vessel map markers wrong");
   await page.fill("#search", "TSLA");
   await page.press("#search", "Enter");
   await page.waitForSelector("h2:has-text('TSLA')");

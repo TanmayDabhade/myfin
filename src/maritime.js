@@ -126,5 +126,5 @@ export function maritimeView(
     )
     .join(
       "",
-    )}</tbody></table></div><p><a href="https://portwatch.imf.org/" target="_blank" rel="noreferrer">Source and methodology: IMF PortWatch ↗</a> · <a href="https://www.imf.org/external/terms.htm" target="_blank" rel="noreferrer">IMF terms ↗</a></p><small>PortWatch coverage can change or be revised. No inference of disruption, congestion or investment signal is made from a count alone. The selected locations are a curated catalog, not all world ports. Commodity prices and individual AIS vessels are tracked separately in issue #6.</small></section>`;
+    )}</tbody></table></div><p><a href="https://portwatch.imf.org/" target="_blank" rel="noreferrer">Source and methodology: IMF PortWatch ↗</a> · <a href="https://www.imf.org/external/terms.htm" target="_blank" rel="noreferrer">IMF terms ↗</a></p><small>PortWatch coverage can change or be revised. No inference of disruption, congestion or investment signal is made from a count alone. The selected locations are a curated catalog, not all world ports. Commodity prices and live vessels are shown in their own panels on this page.</small></section>`;
 }
