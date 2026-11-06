@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod ledger;
+mod maritime;
+mod providers;
+use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
@@ -11,7 +14,9 @@ use tauri_plugin_dialog::DialogExt;
 struct Backend {
     db: Mutex<Connection>,
     gate: tokio::sync::Mutex<()>,
-    keys: Mutex<(String, String)>,
+    env_keys: Credentials,
+    saved_keys: Mutex<Credentials>,
+    key_path: std::path::PathBuf,
     http: reqwest::Client,
 }
 fn now() -> i64 {
@@ -45,6 +50,14 @@ async fn export_file(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn fetch_maritime(b:tauri::State<'_,Backend>,id:String)->Result<Value,String>{
+ maritime::query(&id)?;
+ let _gate=b.gate.lock().await;let stamp=now();let key=format!("portwatch:{id}");
+ let cached:Option<(String,i64)>={let db=b.db.lock().map_err(|_|"Database unavailable")?;db.query_row("SELECT body,stamp FROM cache WHERE id=?1",[&key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?};
+ if let Some((body,at))=&cached{if stamp-at<21600{return Ok(json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":at,"cached":true,"provider":"IMF PortWatch"}))}}
+ match maritime::fetch(&b.http,&id).await{Ok(data)=>{b.db.lock().map_err(|_|"Database unavailable")?.execute("INSERT INTO cache(id,body,stamp) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body,stamp=excluded.stamp",params![key,data.to_string(),stamp]).map_err(|e|e.to_string())?;Ok(json!({"data":data,"fetchedAt":stamp,"cached":false,"provider":"IMF PortWatch"}))},Err(error)=>{if let Some((body,at))=cached{Ok(json!({"data":serde_json::from_str::<Value>(&body).map_err(|e|e.to_string())?,"fetchedAt":at,"stale":true,"warning":error,"provider":"IMF PortWatch"}))}else{Err(error)}}}
 }
 #[tauri::command]
 fn load_state(b: tauri::State<Backend>) -> Result<Value, String> {
@@ -101,9 +114,36 @@ fn paper_trade(
     Ok(state)
 }
 #[tauri::command]
-fn set_keys(b: tauri::State<Backend>, alpha: String, fred: String) -> Result<(), String> {
-    *b.keys.lock().map_err(|_| "Key store unavailable")? = (alpha, fred);
-    Ok(())
+fn key_status(b: tauri::State<Backend>) -> Result<Value, String> {
+    let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+    Ok(providers::status(&b.env_keys, &saved))
+}
+/// Saves keys to a private file in the app-data folder. Empty values are ignored,
+/// so the form can update one provider without retyping the others.
+#[tauri::command]
+fn set_keys(b: tauri::State<Backend>, keys: std::collections::HashMap<String, String>) -> Result<Value, String> {
+    let mut saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+    let mut next = saved.clone();
+    for (provider, key) in keys {
+        if !providers::PROVIDERS.contains(&provider.as_str()) {
+            return Err("Unknown provider".into());
+        }
+        if !key.trim().is_empty() {
+            next.set(&provider, key)?;
+        }
+    }
+    next.save(&b.key_path)?;
+    *saved = next;
+    Ok(providers::status(&b.env_keys, &saved))
+}
+#[tauri::command]
+fn clear_key(b: tauri::State<Backend>, provider: String) -> Result<Value, String> {
+    let mut saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+    let mut next = saved.clone();
+    next.set(&provider, String::new())?;
+    next.save(&b.key_path)?;
+    *saved = next;
+    Ok(providers::status(&b.env_keys, &saved))
 }
 #[tauri::command]
 async fn fetch_data(
@@ -112,121 +152,75 @@ async fn fetch_data(
     kind: String,
     symbol: String,
 ) -> Result<Value, String> {
+    providers::validate(&provider, &kind, &symbol)?;
     let _guard = b.gate.lock().await;
-    if symbol.len() > 100
-        || !symbol
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ".-_^".contains(c))
-    {
-        return Err("Invalid identifier".into());
-    }
-    let valid = [
-        "TIME_SERIES_DAILY",
-        "OVERVIEW",
-        "INCOME_STATEMENT",
-        "BALANCE_SHEET",
-        "CASH_FLOW",
-        "NEWS_SENTIMENT",
-        "EARNINGS",
-        "EARNINGS_CALENDAR",
-    ];
-    if provider != "fred" && (provider != "alpha" || !valid.contains(&kind.as_str())) {
-        return Err("Unsupported dataset".into());
-    }
+    let rules = providers::budget(&provider);
     let cache_key = format!("{provider}:{kind}:{symbol}");
-    let ts = now();
     let cached: Option<(String, i64)> = {
         let db = b.db.lock().map_err(|_| "Database unavailable")?;
-        db.query_row(
-            "SELECT body,stamp FROM cache WHERE id=?1",
-            [&cache_key],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok()
+        db.query_row("SELECT body,stamp FROM cache WHERE id=?1", [&cache_key], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .map_err(|e| e.to_string())?
     };
     if let Some((body, stamp)) = &cached {
-        if ts - stamp < 21600 {
-            return Ok(
-                json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"provider":provider}),
-            );
+        if now() - stamp < rules.ttl {
+            return Ok(json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"provider":provider}));
         }
     }
     let key = {
-        let keys = b.keys.lock().map_err(|_| "Key store unavailable")?;
-        if provider == "fred" {
-            keys.1.clone()
-        } else {
-            keys.0.clone()
-        }
+        let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+        providers::resolve(&b.env_keys, &saved, &provider).0.to_string()
     };
     if key.is_empty() {
-        return Err("Add your free API key in Settings. Cached downloads remain available in the workspace.".into());
+        return Err(format!("No {} key yet. Add it in Settings → Data sources.", match provider.as_str() { "alpha" => "Alpha Vantage", "twelve" => "Twelve Data", _ => "FRED" }));
     }
-    {
+    let (count, last): (i64, i64) = {
         let db = b.db.lock().map_err(|_| "Database unavailable")?;
-        let count: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM requests WHERE provider=?1 AND stamp>?2",
-                params![provider, ts - 86400],
-                |r| r.get(0),
-            )
+        let count = db
+            .query_row("SELECT COUNT(*) FROM requests WHERE provider=?1 AND stamp>?2", params![provider, now() - 86400], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        let last: i64 = db
-            .query_row(
-                "SELECT COALESCE(MAX(stamp),0) FROM requests WHERE provider=?1",
-                [&provider],
-                |r| r.get(0),
-            )
+        let last = db
+            .query_row("SELECT COALESCE(MAX(stamp),0) FROM requests WHERE provider=?1", [&provider], |r| r.get(0))
             .map_err(|e| e.to_string())?;
-        if provider == "alpha" && (count >= 25 || ts - last < 13) {
-            return Err("Local Alpha Vantage budget: 25 requests per rolling day, at least 13 seconds apart. Use cached data or try later.".into());
-        }
-        db.execute(
-            "INSERT INTO requests(provider,stamp) VALUES(?1,?2)",
-            params![provider, ts],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    let request = if provider == "fred" {
-        b.http
-            .get("https://api.stlouisfed.org/fred/series/observations")
-            .query(&[
-                ("series_id", symbol.as_str()),
-                ("api_key", key.as_str()),
-                ("file_type", "json"),
-                ("sort_order", "desc"),
-                ("limit", "500"),
-            ])
-    } else {
-        let mut q = vec![("function", kind.as_str()), ("apikey", key.as_str())];
-        q.push((
-            if kind == "NEWS_SENTIMENT" {
-                "tickers"
-            } else {
-                "symbol"
-            },
-            symbol.as_str(),
-        ));
-        b.http.get("https://www.alphavantage.co/query").query(&q)
+        (count, last)
     };
-    let result:Result<Value,String>=async{let resp=request.send().await.map_err(|_|"Provider connection failed".to_string())?;if !resp.status().is_success(){return Err(format!("Provider returned HTTP {}",resp.status().as_u16()))}let body=resp.text().await.map_err(|_|"Could not read provider response")?;let data=if kind=="EARNINGS_CALENDAR" && provider=="alpha"{json!({"csv":body})}else{serde_json::from_str::<Value>(&body).map_err(|_|"Provider returned an invalid response")?};for k in ["Error Message","Information","Note","error_message"]{if data.get(k).is_some(){return Err("Provider denied this request, reported a quota limit, or requires a different plan. Check your provider account.".into())}}Ok(data)}.await;
+    if count >= rules.daily {
+        let msg = format!("Daily free-plan limit reached ({} requests). Showing saved data; new downloads resume within 24 hours.", rules.daily);
+        return match cached {
+            Some((body, stamp)) => Ok(json!({"data":serde_json::from_str::<Value>(&body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"stale":true,"warning":msg,"provider":provider})),
+            None => Err(msg),
+        };
+    }
+    // Space requests to respect per-minute limits instead of failing them.
+    let wait = rules.gap - (now() - last);
+    if wait > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(wait as u64)).await;
+    }
+    let ts = now();
+    b.db.lock()
+        .map_err(|_| "Database unavailable")?
+        .execute("INSERT INTO requests(provider,stamp) VALUES(?1,?2)", params![provider, ts])
+        .map_err(|e| e.to_string())?;
+    let (url, query) = providers::request(&provider, &kind, &symbol, &key);
+    let result: Result<Value, String> = async {
+        let resp = b.http.get(url).query(&query).send().await.map_err(|_| "Could not reach the provider. Check your internet connection.".to_string())?;
+        let http = resp.status().as_u16();
+        let body = resp.text().await.map_err(|_| "Could not read provider response".to_string())?;
+        providers::interpret(&provider, &kind, http, &body, &key)
+    }
+    .await;
     match result {
         Ok(data) => {
             b.db.lock().map_err(|_|"Database unavailable")?.execute("INSERT INTO cache(id,body,stamp) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body,stamp=excluded.stamp",params![cache_key,data.to_string(),ts]).map_err(|e|e.to_string())?;
             Ok(json!({"data":data,"fetchedAt":ts,"cached":false,"provider":provider}))
         }
-        Err(error) => {
-            if let Some((body, stamp)) = cached {
-                Ok(
-                    json!({"data":serde_json::from_str::<Value>(&body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"stale":true,"warning":error,"provider":provider}),
-                )
-            } else {
-                Err(error)
-            }
-        }
+        Err(error) => match cached {
+            Some((body, stamp)) => Ok(json!({"data":serde_json::from_str::<Value>(&body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"stale":true,"warning":error,"provider":provider})),
+            None => Err(error),
+        },
     }
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),keys:Mutex::new((std::env::var("ALPHA_VANTAGE_API_KEY").unwrap_or_default(),std::env::var("FRED_API_KEY").unwrap_or_default())),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,set_keys,fetch_data,paper_trade,export_file]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,paper_trade,export_file,fetch_maritime]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

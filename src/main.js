@@ -1,10 +1,34 @@
+import { maritimeView, normalizeActivity } from "./maritime.js";
+import {
+  seedGraph,
+  validateGraph,
+  mergeGraph,
+  relationshipsView,
+} from "./relationships.js";
 import {
   screenerView,
   screenRows,
   defaults as screenDefaults,
 } from "./screener.js";
 import "./style.css";
-import { load, save, keys, fetchData, native, nativeTrade } from "./bridge.js";
+import {
+  load,
+  save,
+  keyStatus,
+  saveKeys,
+  clearKey,
+  fetchData,
+  fetchMaritime,
+  native,
+  nativeTrade,
+} from "./bridge.js";
+import {
+  providers,
+  priceProviders,
+  priceSource,
+  normalizeTwelve,
+  stale,
+} from "./sources.js";
 import { sample } from "./sample.js";
 import {
   risk,
@@ -55,6 +79,7 @@ const pct = (x) => (x == null ? "—" : fmt(x * 100) + "%"),
         }).format(x);
 let state = await load(),
   page = "Overview",
+  keyInfo = await keyStatus().catch(() => null),
   symbol = "AAPL",
   range = 90,
   candles = true,
@@ -63,17 +88,43 @@ let state = await load(),
   screen = { pe: 100, growth: -100, sector: "" },
   statement = "INCOME_STATEMENT",
   period = "annualReports";
+let graphCenter = "apple",
+  graphCandidates = false;
+state.sources ||= { prices: "twelve" };
+const lastError = {}; // provider -> latest failure message, shown in Settings
+const attempted = new Set(); // automatic loads tried this session
+let syncLabel = "";
+const anyKey = () =>
+  !!keyInfo && Object.values(keyInfo).some((k) => k.configured);
+const hasKey = (p) => !!keyInfo?.[p]?.configured;
+const live = () => native && state.mode === "market";
+// First launch in the desktop app: ask for keys, unless they already exist.
+if (native && !state.setupDone) {
+  if (anyKey()) {
+    state.setupDone = true;
+    state.mode = "market";
+  } else page = "Setup";
+}
+const graph = () => (state.relationshipGraph ||= seedGraph());
+if (state.relationshipGraph) validateGraph(state.relationshipGraph);
 const pages = [
   "Overview",
   "Research",
+  "Relationships",
   "Trade",
   "Portfolio",
   "Screener",
   "Valuation",
   "Economy",
   "Alerts",
+  "Commodities",
   "Settings",
 ];
+let maritimeSelected = "chokepoint6",
+  maritimeMetric = "tanker";
+function commodities() {
+  return maritimeView(state.maritime || {}, maritimeSelected, maritimeMetric);
+}
 function activeMap() {
   return state.mode === "sample" ? state.assets : (state.marketAssets ||= {});
 }
@@ -149,17 +200,56 @@ function notify(message, error = false) {
 function render() {
   const a = asset();
   if (a) symbol = a.symbol;
+  const views = {
+    Setup: setup,
+    Overview: overview,
+    Research: research,
+    Relationships: () =>
+      relationshipsView(graph(), graphCenter, graphCandidates),
+    Trade: trade,
+    Portfolio: portfolioPage,
+    Screener: screener,
+    Valuation: valuation,
+    Economy: economy,
+    Alerts: alerts,
+    Commodities: commodities,
+    Settings: settings,
+  };
+  const notice =
+    page === "Relationships"
+      ? "SOURCED RELATIONSHIPS · Dated historical disclosures. Coverage is limited; current status is unverified."
+      : state.mode === "sample"
+        ? "DEMO DATA · Prices and company metrics here are synthetic. Switch to Live data in the top right."
+        : "LIVE DATA · Daily prices from your connected sources. Paper trades only; no broker execution.";
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="workspace-label">PERSONAL TERMINAL</div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⇄", "◉", "☷", "ƒ", "◎", "◇", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><span class="dot"></span>${native ? "Native · SQLite" : "Browser preview"}<small>Local-first research workspace</small></div></aside><main><header><div class="breadcrumb">Workspace <span>/</span> ${page}</div><input id="search" placeholder="Search ticker or company…" aria-label="Search assets"><select id="mode" aria-label="Data workspace"><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Sample workspace</option><option value="market" ${state.mode === "market" ? "selected" : ""}>My market data</option></select></header><div class="notice">${state.mode === "sample" ? "SAMPLE DATA · All prices and company metrics here are synthetic. Trades use a separate demo account." : "DAILY DATA · No real-time quotes or broker execution. Paper trades use your selected historical or manual price."}</div><section class="content"><div class="title-row"><div><p class="eyebrow">MARKET INTELLIGENCE / ${state.mode === "sample" ? "DEMONSTRATION" : "PERSONAL RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page}</h1></div><span class="tag">${assets().length} assets in workspace</span></div>${{ Overview: overview, Research: research, Trade: trade, Portfolio: portfolioPage, Screener: screener, Valuation: valuation, Economy: economy, Alerts: alerts, Settings: settings }[page]()}</section><footer>Market Lens 0.1 · USD equity workspace · Prices are unadjusted unless your CSV supplies adjusted OHLC · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="workspace-label">PERSONAL TERMINAL</div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⋈", "⇄", "◉", "☷", "ƒ", "◎", "◇", "≋", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><span class="dot ${live() ? "on" : ""}"></span>${native ? (live() ? "Live data" : "Demo data") : "Browser preview"}<small id="sync-status">${esc(syncText())}</small></div></aside><main><header><div class="breadcrumb">Workspace <span>/</span> ${page}</div><input id="search" placeholder="Ticker, e.g. AAPL — press Enter" aria-label="Search or add a ticker"><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></header>${page === "Setup" ? "" : `<div class="notice">${notice}</div>`}<section class="content"><div class="title-row"><div><p class="eyebrow">MARKET INTELLIGENCE / ${page === "Setup" ? "FIRST RUN" : page === "Relationships" ? "COMPANY RELATIONSHIPS" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<span class="tag">${assets().length} assets in workspace</span>`}</div>${views[page]()}</section><footer>Market Lens 0.2 · USD equity workspace · Daily, unadjusted prices · No investment recommendations</footer></main>`;
   bind();
   drawCharts();
+  autoLoad();
+}
+function syncText() {
+  if (syncLabel) return syncLabel;
+  if (!native) return "Live data needs the desktop app";
+  if (!anyKey()) return "No data source connected";
+  return state.lastSync
+    ? "Updated " + new Date(state.lastSync * 1000).toLocaleTimeString()
+    : "Connected";
+}
+function setSync(text) {
+  syncLabel = text;
+  const el = $("#sync-status");
+  if (el) el.textContent = syncText();
+}
+// Re-render without wiping something the user is typing.
+function refresh() {
+  const f = document.activeElement;
+  if (f && ["INPUT", "TEXTAREA", "SELECT"].includes(f.tagName) && f.id !== "mode")
+    return setSync(syncLabel);
+  render();
 }
 function overview() {
   const all = assets();
-  if (!all.length)
-    return empty(
-      "Your market workspace is empty. Open Settings to import OHLCV CSV data, or download a symbol with your API key.",
-    );
+  if (!all.length) return liveEmpty();
   const a = asset();
   return `<div class="stats">${all
     .slice(0, 4)
@@ -172,7 +262,7 @@ function overview() {
     )
     .join(
       "",
-    )}</div><div class="grid main-grid"><section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${button("Research →", "research")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><section class="panel"><div class="panel-head"><h2>Watchlist</h2>${button("+ Add", "watch-add")}</div>${
+    )}</div><div class="grid main-grid"><section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${button("Research →", "research")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><section class="panel"><div class="panel-head"><h2>Watchlist</h2></div><div class="watch-add"><input id="watch-input" placeholder="Add ticker" maxlength="20" aria-label="Add ticker to watchlist">${button("Add", "watch-add")}</div>${
     state.watchlist
       .map((s) => all.find((a) => a.symbol === s))
       .filter(Boolean)
@@ -191,6 +281,20 @@ function overview() {
           `<tr><td>${ticker(a)}</td><td>${money(price(a))}</td><td class="${tone(change(a))}">${pct(change(a))}</td></tr>`,
       ),
   )}</section></div>`;
+}
+function liveEmpty() {
+  if (!native)
+    return empty(
+      "Live data runs in the desktop app. Switch to Demo data to explore here.",
+    );
+  if (!priceSource(state.sources.prices, keyInfo))
+    return `<div class="empty">No price source connected yet.<br>${button("Connect a data source", "goto-settings", "primary")}</div>`;
+  return empty(
+    esc(syncLabel) ||
+      "Loading your watchlist from " +
+        providers[priceSource(state.sources.prices, keyInfo)].name +
+        "…",
+  );
 }
 function chartTools() {
   return `<div class="chart-tools"><select id="asset-select" aria-label="Chart symbol">${assets()
@@ -249,21 +353,21 @@ function drawCharts() {
     out += bars
       .map(
         (b, i) =>
-          `<rect x="${x(i) - (iw / bars.length) * 0.32}" y="${H - bottom - (b.volume / volMax) * 45}" width="${(iw / bars.length) * 0.64}" height="${(b.volume / volMax) * 45}" fill="${b.close >= b.open ? "#44cba4" : "#ed7a80"}" opacity=".12"/>`,
+          `<rect x="${x(i) - (iw / bars.length) * 0.32}" y="${H - bottom - (b.volume / volMax) * 45}" width="${(iw / bars.length) * 0.64}" height="${(b.volume / volMax) * 45}" fill="${b.close >= b.open ? "#4cc38a" : "#f0716a"}" opacity=".12"/>`,
       )
       .join("");
     if (candles)
       out += bars
         .map((b, i) => {
-          const color = b.close >= b.open ? "#44cba4" : "#ed7a80";
+          const color = b.close >= b.open ? "#4cc38a" : "#f0716a";
           return `<line x1="${x(i)}" x2="${x(i)}" y1="${y(b.high)}" y2="${y(b.low)}" stroke="${color}"/><rect x="${x(i) - Math.max(1, (iw / bars.length) * 0.3)}" y="${y(Math.max(b.close, b.open))}" width="${Math.max(1, (iw / bars.length) * 0.6)}" height="${Math.max(1, Math.abs(y(b.open) - y(b.close)))}" fill="${color}"/>`;
         })
         .join("");
     else
-      out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="#44cba4" stroke-width="2" points="${bars.map((b, i) => `${x(i)},${y(b.close)}`).join(" ")}"/>`;
+      out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="#f5f5f5" stroke-width="2" points="${bars.map((b, i) => `${x(i)},${y(b.close)}`).join(" ")}"/>`;
     for (const [n, c] of [
-      [20, "#c9a75d"],
-      [50, "#869bea"],
+      [20, "#a3a3a3"],
+      [50, "#5c5c5c"],
     ]) {
       const ma = sma(a.bars, n).slice(-bars.length);
       out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="${c}" stroke-width="1.5" points="${ma
@@ -272,7 +376,7 @@ function drawCharts() {
         .join(" ")}"/>`;
     }
     if (compare && first)
-      out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="#da8cd4" stroke-width="2" points="${bars
+      out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="#ffffff" stroke-dasharray="5 4" stroke-width="1.5" points="${bars
         .map((b, i) =>
           peerMap.has(b.date)
             ? `${x(i)},${y(scalePeer(peerMap.get(b.date)))}`
@@ -283,11 +387,11 @@ function drawCharts() {
     for (const t of account().trades.filter((t) => t.symbol === a.symbol)) {
       const i = bars.findIndex((b) => b.date === t.date.slice(0, 10));
       if (i >= 0)
-        out += `<circle cx="${x(i)}" cy="${y(t.price)}" r="6" fill="${t.side === "buy" ? "#fff" : "#ed7a80"}"><title>${esc(t.side)} ${t.qty} @ ${t.price}</title></circle>`;
+        out += `<circle cx="${x(i)}" cy="${y(t.price)}" r="6" fill="${t.side === "buy" ? "#fff" : "#f0716a"}"><title>${esc(t.side)} ${t.qty} @ ${t.price}</title></circle>`;
     }
     for (const i of [0, Math.floor(bars.length / 2), bars.length - 1])
       out += `<text x="${x(i)}" y="${H - 10}" text-anchor="middle">${bars[i].date}</text>`;
-    el.innerHTML = `<div class="chart-readout">${esc(a.symbol)} · ${bars.at(-1).date} · ${money(bars.at(-1).close)}</div><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${a.symbol} daily price chart"><defs><clipPath id="plot-area"><rect x="${left}" y="${top}" width="${iw}" height="${ih}"/></clipPath></defs>${out}<line id="crosshair" y1="${top}" y2="${H - bottom}" stroke="#829093" stroke-dasharray="4" visibility="hidden"/></svg>`;
+    el.innerHTML = `<div class="chart-readout">${esc(a.symbol)} · ${bars.at(-1).date} · ${money(bars.at(-1).close)}</div><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${a.symbol} daily price chart"><defs><clipPath id="plot-area"><rect x="${left}" y="${top}" width="${iw}" height="${ih}"/></clipPath></defs>${out}<line id="crosshair" y1="${top}" y2="${H - bottom}" stroke="#8d8d8d" stroke-dasharray="4" visibility="hidden"/></svg>`;
     el.onpointermove = (e) => {
       const rect = el.querySelector("svg").getBoundingClientRect();
       const i = Math.max(
@@ -334,7 +438,7 @@ function research() {
         : null;
   const news =
     state.mode === "market" ? state.datasets[`${symbol}:NEWS_SENTIMENT`] : null;
-  return `<section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${button("Download prices", "prices")}${button("Company overview", "overview-fetch")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || "Download the company overview for a sourced business description.")}</p><div class="metrics"><span>Sector</span><b>${esc(a.sector || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div>${link("https://www.sec.gov/edgar/search/", "SEC filings search")}<p><small>Search company name or ticker on EDGAR. Metrics retain provider definitions and reported currencies.</small></p></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="8" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div><section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select>${button("Download statement", "statement-fetch")}</div>${
+  return `<section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${state.mode === "market" ? button("Refresh", "research-refresh") : ""}${button("Supplier / customer graph", "graph-open")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || waiting("OVERVIEW", "the company profile"))}</p><div class="metrics"><span>Sector</span><b>${esc(a.sector || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div>${link("https://www.sec.gov/edgar/search/", "SEC filings search")}<p><small>Search company name or ticker on EDGAR. Metrics retain provider definitions and reported currencies.</small></p></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="8" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div><section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select></div>${
     data?.length
       ? table(
           ["Metric", ...data.slice(0, 4).map((r) => esc(r.fiscalDateEnding))],
@@ -353,10 +457,8 @@ function research() {
                   .join("")}</tr>`,
             ),
         )
-      : empty(
-          "No downloaded statements. Each statement download uses one API request.",
-        )
-  }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. Raw provider figures; “None” is missing, not zero.</small></section><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company news</h2>${button("Download news", "news-fetch")}</div>${
+      : empty(esc(waiting(statement, "financial statements")))
+  }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. Raw provider figures; “None” is missing, not zero.</small></section><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company news</h2></div>${
     news?.data.feed
       ?.slice(0, 10)
       .map((n) => {
@@ -364,12 +466,22 @@ function research() {
         return `<article>${url ? link(url, n.title) : esc(n.title)}<small>${esc(n.source)} · ${esc(n.time_published)}</small><p>${esc(n.summary)}</p></article>`;
       })
       .join("") ||
-    empty("Connect your API key and download news. No fabricated headlines.")
-  } ${datasetStamp(news)}</section><section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${button("Download calendar", "calendar-fetch")}</div>${calendar()}<small>Calendar availability depends on provider access. Dividend dates are available in the company overview: ${esc(o.DividendDate || "—")}.</small></section></div>`;
+    empty(esc(waiting("NEWS_SENTIMENT", "company news")))
+  } ${datasetStamp(news)}</section><section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${state.mode === "market" ? button("Load calendar", "calendar-fetch") : ""}</div>${calendar()}<small>Calendar availability depends on provider access. Dividend dates are available in the company overview: ${esc(o.DividendDate || "—")}.</small></section></div>`;
+}
+const loadErrors = {}; // dataset key -> message from the last failed load
+// What to show while a company dataset isn't loaded yet.
+function waiting(kind, label) {
+  if (state.mode === "sample")
+    return "Switch to Live data for sourced " + label + ".";
+  if (!native) return "Live " + label + " load in the desktop app.";
+  if (!hasKey("alpha"))
+    return "Add an Alpha Vantage key in Settings → Data sources to load " + label + ".";
+  return loadErrors[`${symbol}:${kind}`] || "Loading " + label + "…";
 }
 function datasetStamp(d) {
   return d
-    ? `<small>Alpha Vantage · downloaded ${new Date(d.fetchedAt * 1000).toLocaleString()}${d.stale ? " · STALE CACHE" : ""}</small>`
+    ? `<small>${providers[d.provider]?.name || "Alpha Vantage"} · updated ${new Date(d.fetchedAt * 1000).toLocaleString()}${d.stale ? " · STALE CACHE" : ""}</small>`
     : "";
 }
 function calendar() {
@@ -591,30 +703,32 @@ const macroSeries = {
   GDPC1: "Real GDP · billions of chained 2017 USD",
 };
 function economy() {
-  return `<section class="panel"><div class="panel-head"><h2>Economic observatory</h2><select id="macro-series">${Object.entries(
+  const note = !native
+    ? "Economic series load in the desktop app."
+    : !hasKey("fred")
+      ? "Add a free FRED key in Settings → Data sources to load these series."
+      : "";
+  return `<section class="panel"><div class="panel-head"><h2>Economic observatory</h2>${native && hasKey("fred") ? button("Refresh", "macro-refresh") : ""}</div><p>FRED observations in their original units: GDP is quarterly, CPI and unemployment monthly, Treasury yields daily.${note ? " <b>" + esc(note) + "</b>" : ""}</p><div class="macro-grid">${Object.entries(
     macroSeries,
   )
-    .map(([k, v]) => `<option value="${k}">${k} — ${v}</option>`)
-    .join(
-      "",
-    )}</select>${button("Download series", "macro-fetch", "primary")}</div><p>FRED observations through your free API key. Values retain the original units; GDP is quarterly, CPI and unemployment monthly, Treasury yields daily.</p><div class="macro-grid">${
-    Object.entries(state.macro)
-      .map(([s, d]) => {
-        const rows = d.data.observations
-          .filter((x) => number(x.value) != null)
-          .slice()
-          .reverse();
-        const latest = rows.at(-1);
-        return `<section class="macro-card"><h3>${esc(macroSeries[s] || s)}</h3><strong>${fmt(number(latest?.value))}</strong><small>${esc(latest?.date)} · ${esc(s)}</small>${spark(rows.map((x) => +x.value))}${link("https://fred.stlouisfed.org/series/" + encodeURIComponent(s), "View series and source")}${datasetStamp({ ...d, provider: "fred" }).replace("Alpha Vantage", "FRED")}</section>`;
-      })
-      .join("") || empty("No downloaded economic series yet.")
-  }</div></section>`;
+    .map(([s, label]) => {
+      const d = state.macro[s];
+      if (!d)
+        return `<section class="macro-card"><h3>${esc(label)}</h3><strong>—</strong><small>${esc(loadErrors["fred:" + s] || (note ? "Not connected" : "Loading…"))}</small></section>`;
+      const rows = d.data.observations
+        .filter((x) => number(x.value) != null)
+        .slice()
+        .reverse();
+      const latest = rows.at(-1);
+      return `<section class="macro-card"><h3>${esc(label)}</h3><strong>${fmt(number(latest?.value))}</strong><small>${esc(latest?.date)} · ${esc(s)}</small>${spark(rows.map((x) => +x.value))}${link("https://fred.stlouisfed.org/series/" + encodeURIComponent(s), "View series and source")}${datasetStamp({ ...d, provider: "fred" })}</section>`;
+    })
+    .join("")}</div></section>`;
 }
 function spark(values) {
   if (values.length < 2) return "";
   let min = Math.min(...values),
     max = Math.max(...values);
-  return `<svg class="spark" viewBox="0 0 400 90"><polyline fill="none" stroke="#44cba4" stroke-width="2" points="${values.map((v, i) => `${(i / (values.length - 1)) * 400},${80 - ((v - min) / (max - min || 1)) * 70}`).join(" ")}"/></svg>`;
+  return `<svg class="spark" viewBox="0 0 400 90"><polyline fill="none" stroke="#e5e5e5" stroke-width="2" points="${values.map((v, i) => `${(i / (values.length - 1)) * 400},${80 - ((v - min) / (max - min || 1)) * 70}`).join(" ")}"/></svg>`;
 }
 function alerts() {
   return `<section class="panel"><div class="panel-head"><h2>Price alerts</h2></div><div class="filters"><label>Symbol<select id="alert-symbol">${assets()
@@ -631,8 +745,27 @@ function alerts() {
       ),
   )}</section>`;
 }
+function keyRow(p, setupMode) {
+  const info = providers[p],
+    k = keyInfo?.[p];
+  const status = k?.configured
+    ? `<span class="pill on">Connected${k.source === "environment" ? " · environment variable" : ""}</span>`
+    : `<span class="pill">Not connected</span>`;
+  return `<div class="source-row"><div class="source-info"><h3>${info.name} ${setupMode ? "" : status}</h3><small>${info.provides}<br>${info.limits}</small>${!setupMode && lastError[p] ? `<small class="down">Last error: ${esc(lastError[p])}</small>` : ""}</div><div class="source-key"><input id="key-${p}" type="password" autocomplete="off" spellcheck="false" placeholder="${k?.configured ? "Replace saved key" : "Paste API key"}" aria-label="${info.name} API key">${!setupMode && k?.source === "saved" ? button("Remove", "key-remove", "icon", `data-value="${p}"`) : ""}${link(info.keyURL, "Get a free key")}</div></div>`;
+}
+function priceSelect() {
+  return `<label>Prices from<select id="price-source">${priceProviders.map((p) => `<option value="${p}" ${state.sources.prices === p ? "selected" : ""}>${providers[p].name}${hasKey(p) ? "" : " (no key)"}</option>`).join("")}</select></label>`;
+}
+function setup() {
+  return `<section class="panel setup"><p>Paste your free API keys once. They are saved on this computer, in a file only your user account can read, and the app loads data on its own from then on. One key is enough to start; all three gives you everything.</p>${["twelve", "alpha", "fred"].map((p) => keyRow(p, true)).join("")}${priceSelect()}<div class="setup-actions">${button("Connect and load data", "setup-connect", "primary")}${button("Explore demo data instead", "setup-demo")}</div><small>Shipping activity (IMF PortWatch) needs no key. Recommended: Twelve Data for prices, Alpha Vantage for company research, FRED for the economy.</small></section>`;
+}
 function settings() {
-  return `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Data connections</h2><span class="tag">SESSION-ONLY KEYS</span></div><label>Alpha Vantage API key<input id="alpha-key" type="password" autocomplete="off" placeholder="Your free key"></label><label>FRED API key<input id="fred-key" type="password" autocomplete="off" placeholder="Your free key"></label>${button("Connect for this session", "connect", "primary")}<p>Keys stay in Rust memory and are excluded from backups. You can also set ALPHA_VANTAGE_API_KEY and FRED_API_KEY before launching.</p>${link("https://www.alphavantage.co/support/#api-key", "Get Alpha Vantage key")} · ${link("https://fred.stlouisfed.org/docs/api/api_key.html", "Get FRED key")}<p>Requests are user initiated. Alpha budget: 25 per rolling 24 hours, ≥13 seconds apart; cache lifetime 6 hours. Your provider may impose additional limits or plan restrictions.</p></section><section class="panel"><div class="panel-head"><h2>Add market data</h2></div><label>Symbol<input id="import-symbol" placeholder="AAPL" maxlength="20"></label><label>Source / attribution<input id="import-source" placeholder="Provider name / exported from…"></label>${button("Download daily prices", "download-symbol", "primary")}<label class="file-label">Import OHLCV CSV<input id="csv-import" type="file" accept=".csv,text/csv"></label><p>Required columns: date, open, high, low, close. Optional: volume. Dates YYYY-MM-DD, USD prices. Use files you are permitted to access. Imports switch to My market data.</p>${button("Download CSV template", "template")}</section></div><section class="panel"><div class="panel-head"><h2>Workspace & portability</h2></div>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}<label class="file-label">Restore backup<input id="restore" type="file" accept=".json"></label><p>Restore replaces local research, accounts, and settings after confirmation. Backups exclude API keys and the raw Rust response cache. Native data is stored in your OS application-data folder in market-lens.sqlite.</p><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade.</small></section><section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>No scraping of gated pages, paywall bypass, credential sharing, proxy rotation, or quota evasion. Download only data available to your own provider account. Free access is not a redistribution license. Review provider and underlying exchange terms before sharing data or distributing a commercial version.</p><p>Initial coverage: USD stock / ETF daily OHLCV, company fundamentals, news, earnings calendar, FRED macro series, and user-owned CSV imports. Not included: tick data, options chains, corporate-action processing, live brokerage execution, tax accounting, or guaranteed free access to every endpoint.</p>${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  if (!native)
+    return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "alpha", "fred"].map((p) => keyRow(p, false)).join("")}<div class="source-row"><div class="source-info"><h3>IMF PortWatch <span class="pill on">No key needed</span></h3><small>Daily port calls and chokepoint transits</small></div></div>${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY and FRED_API_KEY override saved keys. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series and PortWatch shipping activity. Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+}
+function workspacePanel() {
+  return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in market-lens.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
 }
 function download(name, content, type = "text/plain") {
   if (native) {
@@ -652,41 +785,232 @@ function download(name, content, type = "text/plain") {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-async function getData(kind, s = symbol) {
-  if (state.mode === "sample")
-    throw Error("Switch to My market data before downloading real datasets.");
-  notify("Downloading " + kind + "…");
-  const d = await fetchData("alpha", kind, s);
-  if (kind === "TIME_SERIES_DAILY") {
-    const bars = normalizeAlpha(d.data);
-    const previous = activeMap()[s]?.origin !== "sample" ? activeMap()[s] : {};
-    activeMap()[s] = {
-      ...previous,
+// ---- Data loading -------------------------------------------------------
+// Every provider call goes through one queue so requests never pile up and
+// each free plan's per-minute limit is respected by the backend.
+let queue = Promise.resolve();
+const queued = new Map();
+function enqueue(key, job) {
+  if (queued.has(key)) return queued.get(key);
+  const run = queue.then(job);
+  queue = run.catch(() => {});
+  queued.set(key, run);
+  run.finally(() => queued.delete(key)).catch(() => {});
+  return run;
+}
+const message = (e) => String(e?.message || e);
+async function loadPrices(s) {
+  const p = priceSource(state.sources.prices, keyInfo);
+  if (!p) throw Error("Connect a price source in Settings → Data sources.");
+  try {
+    const d =
+      p === "twelve"
+        ? await fetchData("twelve", "TIME_SERIES", s)
+        : await fetchData("alpha", "TIME_SERIES_DAILY", s);
+    let bars;
+    try {
+      bars = p === "twelve" ? normalizeTwelve(d.data) : normalizeAlpha(d.data);
+    } catch {
+      throw Error(`${providers[p].name} has no daily prices for ${s}.`);
+    }
+    const map = (state.marketAssets ||= {}),
+      prev = map[s]?.origin === "sample" ? {} : map[s] || {};
+    map[s] = {
+      ...prev,
       symbol: s,
-      name: previous?.name || s,
+      name: prev.name || s,
       bars,
-      origin: "alpha",
-      source: "Alpha Vantage · daily unadjusted" + (d.stale ? " · STALE" : ""),
+      origin: p,
+      source: providers[p].name + " · daily" + (d.stale ? " · STALE" : ""),
       fetchedAt: d.fetchedAt,
     };
-    symbol = s;
-  } else {
-    state.datasets[`${s}:${kind}`] = d;
+    delete loadErrors["prices:" + s];
+    if (d.warning) lastError[p] = d.warning;
+    return d;
+  } catch (e) {
+    loadErrors["prices:" + s] = message(e);
+    lastError[p] = `${s}: ${message(e)}`;
+    throw e;
+  }
+}
+async function loadDataset(kind, s) {
+  const key = `${s}:${kind}`;
+  try {
+    const d = await fetchData("alpha", kind, s);
+    state.datasets[key] = d;
     if (kind === "OVERVIEW") {
-      if (!d.data.Symbol) throw Error("No company overview returned.");
-      activeMap()[s] = {
-        ...activeMap()[s],
-        name: d.data.Name,
-        sector: d.data.Sector,
-        overview: d.data,
-      };
+      if (!d.data.Symbol)
+        throw Error(`Alpha Vantage has no company profile for ${s} (funds and ETFs usually don't).`);
+      const map = (state.marketAssets ||= {});
+      if (map[s])
+        map[s] = { ...map[s], name: d.data.Name, sector: d.data.Sector, overview: d.data };
+    }
+    delete loadErrors[key];
+    if (d.warning) lastError.alpha = d.warning;
+  } catch (e) {
+    loadErrors[key] = message(e);
+    lastError.alpha = message(e);
+    throw e;
+  }
+}
+async function loadMacro(id) {
+  try {
+    state.macro[id] = await fetchData("fred", "observations", id);
+    delete loadErrors["fred:" + id];
+    delete lastError.fred;
+  } catch (e) {
+    loadErrors["fred:" + id] = lastError.fred = message(e);
+    throw e;
+  }
+}
+async function loadMaritime(id) {
+  const d = await fetchMaritime(id);
+  normalizeActivity(d.data, id);
+  (state.maritime ||= {})[id] = d;
+  if (d.warning) notify(d.warning, true);
+}
+// Pull whatever the current page needs and doesn't have yet.
+function autoLoad() {
+  if (!live()) return;
+  const once = (key, job) => {
+    if (attempted.has(key)) return;
+    attempted.add(key);
+    enqueue(key, async () => {
+      try {
+        await job();
+      } finally {
+        await persist();
+        refresh();
+      }
+    }).catch((e) => {
+      if (key.startsWith("pw:")) notify(message(e), true);
+    });
+  };
+  const a = asset();
+  if (page === "Research" && a && hasKey("alpha")) {
+    const s = a.symbol;
+    if (!a.overview) once(`${s}:OVERVIEW`, () => loadDataset("OVERVIEW", s));
+    if (!state.datasets[`${s}:${statement}`])
+      once(`${s}:${statement}`, () => loadDataset(statement, s));
+    if (!state.datasets[`${s}:NEWS_SENTIMENT`])
+      once(`${s}:NEWS_SENTIMENT`, () => loadDataset("NEWS_SENTIMENT", s));
+  }
+  if (page === "Economy" && hasKey("fred"))
+    for (const id of Object.keys(macroSeries))
+      if (stale(state.macro[id], 43200)) once("fred:" + id, () => loadMacro(id));
+  if (page === "Commodities" && stale(state.maritime?.[maritimeSelected], 21600)) {
+    const id = maritimeSelected;
+    once("pw:" + id, () => loadMaritime(id));
+  }
+}
+let syncing = null;
+async function syncWatchlist() {
+  if (!native || state.mode !== "market" || syncing) return syncing;
+  const p = priceSource(state.sources.prices, keyInfo);
+  if (!p) return;
+  const list = [...new Set(state.watchlist)];
+  const failed = [];
+  let done = 0;
+  syncing = (async () => {
+    for (const s of list)
+      enqueue("prices:" + s, async () => {
+        setSync(`Updating ${s} (${++done}/${list.length})…`);
+        try {
+          await loadPrices(s);
+          refresh();
+        } catch {
+          failed.push(s);
+        }
+      });
+    await queue;
+    state.lastSync = Date.now() / 1000;
+    syncLabel = failed.length ? `Couldn't update ${failed.join(", ")} · see Settings` : "";
+    await persist();
+    refresh();
+  })().finally(() => (syncing = null));
+  return syncing;
+}
+async function addTicker(s, openResearch) {
+  s = s.trim().toUpperCase();
+  if (!/^[A-Z0-9.^_-]{1,20}$/.test(s)) throw Error("Enter a ticker like AAPL.");
+  if (state.mode === "sample" && !activeMap()[s])
+    throw Error("Demo data only has its sample tickers. Switch to Live data to add " + s + ".");
+  if (live() && !activeMap()[s]) {
+    setSync(`Loading ${s}…`);
+    try {
+      await enqueue("prices:" + s, () => loadPrices(s));
+    } finally {
+      setSync("");
     }
   }
+  if (!state.watchlist.includes(s)) state.watchlist.push(s);
+  symbol = s;
+  if (openResearch) page = "Research";
   await persist();
-  notify(d.warning || "Saved dataset locally.");
   render();
 }
 function bind() {
+  const recenter = (id) => {
+    graphCenter = id;
+    render();
+  };
+  document.querySelectorAll("[data-entity]").forEach((el) => {
+    el.onclick = () => recenter(el.dataset.entity);
+    el.onkeydown = (event) => {
+      if (["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        recenter(el.dataset.entity);
+      }
+    };
+  });
+  if ($("#graph-center"))
+    $("#graph-center").onchange = (event) => recenter(event.target.value);
+  if ($("#graph-candidates"))
+    $("#graph-candidates").onchange = (event) => {
+      graphCandidates = event.target.value === "all";
+      render();
+    };
+  if ($("#graph-import"))
+    $("#graph-import").onchange = async (event) => {
+      try {
+        const file = event.target.files[0];
+        if (!file) return;
+        if (file.size > 5e6) throw Error("Graph import limit is 5 MB");
+        const next = mergeGraph(graph(), JSON.parse(await file.text()));
+        state.relationshipGraph = next;
+        await persist();
+        graphCandidates = true;
+        render();
+        notify(
+          "Evidence imported as unreviewed claims. Select an entity to inspect sources.",
+        );
+      } catch (error) {
+        notify(error.message, true);
+      }
+    };
+  if ($("#maritime-location"))
+    $("#maritime-location").onchange = (e) => {
+      maritimeSelected = e.target.value;
+      render();
+    };
+  if ($("#maritime-metric"))
+    $("#maritime-metric").onchange = (e) => {
+      maritimeMetric = e.target.value;
+      render();
+    };
+  document.querySelectorAll("[data-location]").forEach((el) => {
+    el.onclick = () => {
+      maritimeSelected = el.dataset.location;
+      render();
+    };
+    el.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        el.onclick();
+      }
+    };
+  });
+
   document.querySelectorAll("[data-screen-field]").forEach(
     (el) =>
       (el.onchange = async () => {
@@ -735,9 +1059,20 @@ function bind() {
   $("#mode").onchange = async (e) => {
     state.mode = e.target.value;
     compare = "";
+    if (page === "Setup") page = "Overview";
     await persist();
     render();
+    syncWatchlist();
   };
+  if ($("#price-source"))
+    $("#price-source").onchange = async (e) => {
+      state.sources.prices = e.target.value;
+      await persist();
+    };
+  if ($("#watch-input"))
+    $("#watch-input").onkeydown = (e) => {
+      if (e.key === "Enter") $('[data-action="watch-add"]').click();
+    };
   $("#search").onkeydown = (e) => {
     if (e.key === "Enter") {
       const q = e.target.value.toUpperCase(),
@@ -748,7 +1083,9 @@ function bind() {
         symbol = a.symbol;
         page = "Research";
         render();
-      } else notify("No local match. Add the symbol in Settings.", true);
+      } else if (live())
+        addTicker(q, true).catch((err) => notify(message(err), true));
+      else notify("No match in demo data. Switch to Live data to look up " + q + ".", true);
     }
   };
   if ($("#asset-select"))
@@ -793,34 +1130,6 @@ function bind() {
     calc();
   }
   if (page === "Valuation") calcDCF();
-  if ($("#csv-import"))
-    $("#csv-import").onchange = async (e) => {
-      try {
-        const file = e.target.files[0];
-        if (!file) return;
-        if (file.size > 10e6) throw Error("CSV limit is 10 MB");
-        const s = $("#import-symbol").value.trim().toUpperCase();
-        if (!/^[A-Z0-9.^_-]{1,20}$/.test(s))
-          throw Error("Enter a valid symbol first.");
-        const bars = validateBars(parseCSV(await file.text()));
-        state.mode = "market";
-        activeMap()[s] = {
-          symbol: s,
-          name: s,
-          bars,
-          origin: "import",
-          source: $("#import-source").value.trim() || "User CSV import",
-          fetchedAt: Date.now() / 1000,
-        };
-        state.mode = "market";
-        symbol = s;
-        await persist();
-        page = "Research";
-        render();
-      } catch (e) {
-        notify(e.message, true);
-      }
-    };
   if ($("#restore"))
     $("#restore").onchange = async (e) => {
       try {
@@ -828,6 +1137,8 @@ function bind() {
         if (!file) return;
         if (file.size > 20e6) throw Error("Backup limit is 20 MB");
         const restored = validateWorkspace(JSON.parse(await file.text()));
+        if (restored.relationshipGraph)
+          validateGraph(restored.relationshipGraph, { imported: true });
         if (
           !confirm(
             "Replace the entire current workspace with this backup? Export a backup first if needed.",
@@ -856,6 +1167,66 @@ function bind() {
 }
 async function action(act, value) {
   switch (act) {
+    case "graph-open": {
+      const entity = graph().nodes.find((n) => n.ticker === asset()?.symbol);
+      if (!entity) {
+        notify(
+          "No relationship coverage for this ticker yet. Open Relationships to import sourced evidence.",
+          true,
+        );
+        break;
+      }
+      graphCenter = entity.id;
+      page = "Relationships";
+      render();
+      break;
+    }
+    case "graph-export":
+      download(
+        "company-relationships.json",
+        JSON.stringify(graph(), null, 2),
+        "application/json",
+      );
+      break;
+    case "graph-review": {
+      const edge = graph().edges.find((x) => x.id === value);
+      if (!edge) throw Error("Relationship not found");
+      if (
+        !confirm(
+          "Have you read the source and verified the named supplier, customer, direction and disclosure date? This marks evidence reviewed, not the relationship currently active.",
+        )
+      )
+        return;
+      edge.review = "reviewed";
+      edge.reviewedOn = new Date().toISOString().slice(0, 10);
+      await persist();
+      render();
+      break;
+    }
+    case "maritime-fetch":
+      notify("Loading PortWatch observations…");
+      await enqueue("pw:" + maritimeSelected, () => loadMaritime(maritimeSelected));
+      await persist();
+      render();
+      notify("PortWatch observations updated.");
+      break;
+    case "maritime-export": {
+      const d = state.maritime?.[maritimeSelected];
+      if (!d) throw Error("Download a location first");
+      download(
+        "portwatch-" + maritimeSelected + ".csv",
+        csv(
+          normalizeActivity(d.data, maritimeSelected).map((r) => ({
+            ...r,
+            provider: "IMF PortWatch",
+            retrieved: new Date(d.fetchedAt * 1000).toISOString(),
+          })),
+        ),
+        "text/csv",
+      );
+      break;
+    }
+
     case "visual-screen-save":
       (state.savedVisualScreens ||= []).push({
         name: `${screenConfig().metric} / ${screenConfig().period} / ${screenConfig().sector || "All sectors"}`,
@@ -904,9 +1275,7 @@ async function action(act, value) {
       render();
       break;
     case "watch-add":
-      if (!state.watchlist.includes(symbol)) state.watchlist.push(symbol);
-      await persist();
-      render();
+      await addTicker($("#watch-input")?.value || symbol, false);
       break;
     case "watch-remove":
       state.watchlist = state.watchlist.filter((x) => x !== value);
@@ -918,32 +1287,84 @@ async function action(act, value) {
       await persist();
       notify("Thesis saved.");
       break;
-    case "prices":
-      await getData("TIME_SERIES_DAILY");
+    case "research-refresh": {
+      const s = symbol;
+      const jobs = [enqueue("prices:" + s, () => loadPrices(s))];
+      if (hasKey("alpha"))
+        for (const kind of ["OVERVIEW", statement, "NEWS_SENTIMENT"])
+          jobs.push(enqueue(`${s}:${kind}`, () => loadDataset(kind, s)));
+      notify("Refreshing " + s + "…");
+      const results = await Promise.allSettled(jobs);
+      await persist();
+      render();
+      const bad = results.find((r) => r.status === "rejected");
+      notify(bad ? message(bad.reason) : s + " is up to date.", !!bad);
       break;
-    case "overview-fetch":
-      await getData("OVERVIEW");
-      break;
-    case "statement-fetch":
-      await getData(statement);
-      break;
-    case "news-fetch":
-      await getData("NEWS_SENTIMENT");
-      break;
+    }
     case "calendar-fetch":
-      await getData("EARNINGS_CALENDAR");
+      try {
+        await enqueue(`${symbol}:EARNINGS_CALENDAR`, () =>
+          loadDataset("EARNINGS_CALENDAR", symbol),
+        );
+      } finally {
+        await persist();
+        render();
+      }
       break;
-    case "connect":
-      await keys($("#alpha-key").value.trim(), $("#fred-key").value.trim());
-      $("#alpha-key").value = "";
-      $("#fred-key").value = "";
-      notify("Keys set in Rust memory for this session.");
+    case "goto-settings":
+      page = "Settings";
+      render();
       break;
-    case "download-symbol": {
-      const s = $("#import-symbol").value.trim().toUpperCase();
-      if (!/^[A-Z0-9.^_-]{1,20}$/.test(s)) throw Error("Enter a valid symbol.");
-      state.mode = "market";
-      await getData("TIME_SERIES_DAILY", s);
+    case "setup-connect":
+    case "keys-save": {
+      const entered = Object.fromEntries(
+        ["twelve", "alpha", "fred"].map((p) => [p, $("#key-" + p).value.trim()]),
+      );
+      if (act === "setup-connect" && !Object.values(entered).some(Boolean))
+        throw Error("Paste at least one API key, or explore the demo data.");
+      keyInfo = await saveKeys(entered);
+      state.sources.prices = $("#price-source").value;
+      for (const p of Object.keys(entered)) if (entered[p]) delete lastError[p];
+      attempted.clear();
+      if (act === "setup-connect") {
+        state.setupDone = true;
+        state.mode = "market";
+        page = "Overview";
+      }
+      await persist();
+      render();
+      notify("Keys saved. Loading your data…");
+      syncWatchlist();
+      break;
+    }
+    case "key-remove":
+      keyInfo = await clearKey(value);
+      render();
+      notify(providers[value].name + " key removed.");
+      break;
+    case "setup-demo":
+      state.setupDone = true;
+      state.mode = "sample";
+      page = "Overview";
+      await persist();
+      render();
+      break;
+    case "sync":
+      attempted.clear();
+      notify("Syncing your watchlist…");
+      await syncWatchlist();
+      notify(syncLabel || "Watchlist up to date.", !!syncLabel);
+      break;
+    case "macro-refresh": {
+      const results = await Promise.allSettled(
+        Object.keys(macroSeries).map((id) =>
+          enqueue("fred:" + id, () => loadMacro(id)),
+        ),
+      );
+      await persist();
+      render();
+      const bad = results.find((r) => r.status === "rejected");
+      if (bad) notify(message(bad.reason), true);
       break;
     }
     case "buy":
@@ -999,7 +1420,7 @@ async function action(act, value) {
         "style",
       );
       style.textContent =
-        "text{fill:#8196a2;font:10px monospace}.gridline{stroke:#293b44}svg{background:#151f25}";
+        "text{fill:#929292;font:10px monospace}.gridline{stroke:#383838}svg{background:#1d1d1d}";
       svg.prepend(style);
       download(symbol + "-chart.svg", svg.outerHTML, "image/svg+xml");
       break;
@@ -1013,13 +1434,6 @@ async function action(act, value) {
         "market-lens-backup.json",
         JSON.stringify(state, null, 2),
         "application/json",
-      );
-      break;
-    case "template":
-      download(
-        "prices-template.csv",
-        "date,open,high,low,close,volume\n2026-01-02,100,103,99,102,1500000\n2026-01-05,102,104,101,103,1700000\n",
-        "text/csv",
       );
       break;
     case "cash":
@@ -1081,13 +1495,6 @@ async function action(act, value) {
         "application/json",
       );
       break;
-    case "macro-fetch": {
-      const s = $("#macro-series").value;
-      state.macro[s] = await fetchData("fred", "observations", s);
-      await persist();
-      render();
-      break;
-    }
     case "alert-add": {
       const target = +$("#alert-target").value,
         s = $("#alert-symbol").value;
@@ -1120,3 +1527,6 @@ state.alerts = state.alerts.map(
     )[0],
 );
 render();
+syncWatchlist();
+// Daily data: re-check every 30 minutes. Cached data costs no requests.
+setInterval(() => syncWatchlist(), 30 * 60 * 1000);
