@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "apple",
+      "name": "Apple Inc.",
+      "ticker": "AAPL"
+    },
+    {
+      "id": "broadcom",
+      "name": "Broadcom Inc.",
+      "ticker": "AVGO"
+    },
+    {
+      "id": "qualcomm-tech",
+      "name": "Qualcomm Technologies, Inc.",
+      "ticker": "",
+      "parent": "Qualcomm Incorporated (QCOM)"
+    },
+    {
+      "id": "td-synnex",
+      "name": "TD SYNNEX Corporation",
+      "ticker": "SNX"
+    },
+    {
+      "id": "microsoft",
+      "name": "Microsoft Corporation",
+      "ticker": "MSFT"
+    },
+    {
+      "id": "dell",
+      "name": "Dell Inc.",
+      "ticker": "",
+      "parent": "Dell Technologies (DELL)"
+    },
+    {
+      "id": "cisco",
+      "name": "Cisco Systems, Inc.",
+      "ticker": "CSCO"
+    }
+  ],
+  "edges": [
+    {
+      "id": "broadcom-apple-2023",
+      "supplier": "broadcom",
+      "customer": "apple",
+      "relationship": "Component supply agreement",
+      "product": "5G radio-frequency and wireless-connectivity components",
+      "observedOn": "2023-05-23",
+      "reviewedOn": "2026-11-05",
+      "review": "reviewed",
+      "sourceURL": "https://www.apple.com/newsroom/2023/05/apple-announces-multibillion-dollar-deal-with-broadcom/",
+      "sourceTitle": "Apple newsroom: Broadcom agreement",
+      "evidence": "Apple announced a multiyear agreement covering Broadcom radio-frequency and wireless components.",
+      "revenueShare": null,
+      "retrievedOn": "2026-11-05"
+    },
+    {
+      "id": "qualcomm-apple-2023",
+      "supplier": "qualcomm-tech",
+      "customer": "apple",
+      "relationship": "Component supply agreement",
+      "product": "Snapdragon 5G Modem-RF systems; announced launch coverage 2024\u20132026",
+      "observedOn": "2023-09-11",
+      "reviewedOn": "2026-11-05",
+      "review": "reviewed",
+      "sourceURL": "https://www.qualcomm.com/news/releases/2023/09/qualcomm-announces-agreement-with-apple-for-chip-supply",
+      "sourceTitle": "Qualcomm: agreement with Apple",
+      "evidence": "Qualcomm Technologies announced chip supply for Apple's smartphone launches in 2024, 2025 and 2026.",
+      "revenueShare": null,
+      "retrievedOn": "2026-11-05"
+    },
+    {
+      "id": "apple-snx-fy24",
+      "supplier": "apple",
+      "customer": "td-synnex",
+      "relationship": "OEM distribution supply",
+      "product": "Technology products (product-level mix undisclosed)",
+      "observedOn": "2025-01-24",
+      "reviewedOn": "2026-11-05",
+      "review": "reviewed",
+      "sourceURL": "https://www.sec.gov/Archives/edgar/data/1177394/000117739425000009/snx-20241130.htm",
+      "sourceTitle": "TD SYNNEX FY2024 Form 10-K \u00b7 Item 1, OEM Suppliers",
+      "evidence": "TD SYNNEX identifies Apple among its primary OEM suppliers for the reported fiscal year.",
+      "revenueShare": null,
+      "reportingPeriod": "Fiscal year ended 2024-11-30",
+      "retrievedOn": "2026-11-05"
+    },
+    {
+      "id": "msft-snx-fy24",
+      "supplier": "microsoft",
+      "customer": "td-synnex",
+      "relationship": "OEM distribution supply",
+      "product": "Technology products (product-level mix undisclosed)",
+      "observedOn": "2025-01-24",
+      "reviewedOn": "2026-11-05",
+      "review": "reviewed",
+      "sourceURL": "https://www.sec.gov/Archives/edgar/data/1177394/000117739425000009/snx-20241130.htm",
+      "sourceTitle": "TD SYNNEX FY2024 Form 10-K \u00b7 Item 1, OEM Suppliers",
+      "evidence": "TD SYNNEX lists Microsoft as a primary OEM supplier.",
+      "revenueShare": null,
+      "reportingPeriod": "Fiscal year ended 2024-11-30",
+      "retrievedOn": "2026-11-05"
+    },
+    {
+      "id": "dell-snx-fy24",
+      "supplier": "dell",
+      "customer": "td-synnex",
+      "relationship": "OEM distribution supply",
+      "product": "Technology products (product-level mix undisclosed)",
+      "observedOn": "2025-01-24",
+      "reviewedOn": "2026-11-05",
+      "review": "reviewed",
+      "sourceURL": "https://www.sec.gov/Archives/edgar/data/1177394/000117739425000009/snx-20241130.htm",
+      "sourceTitle": "TD SYNNEX FY2024 Form 10-K \u00b7 Item 1, OEM Suppliers",
+      "evidence": "TD SYNNEX lists Dell among its primary OEM suppliers.",
+      "revenueShare": null,
+      "reportingPeriod": "Fiscal year ended 2024-11-30",
+      "retrievedOn": "2026-11-05"
+    },
+    {
+      "id": "cisco-snx-fy24",
+      "supplier": "cisco",
+      "customer": "td-synnex",
+      "relationship": "OEM distribution supply",
+      "product": "Technology products (product-level mix undisclosed)",
+      "observedOn": "2025-01-24",
+      "reviewedOn": "2026-11-05",
+      "review": "reviewed",
+      "sourceURL": "https://www.sec.gov/Archives/edgar/data/1177394/000117739425000009/snx-20241130.htm",
+      "sourceTitle": "TD SYNNEX FY2024 Form 10-K \u00b7 Item 1, OEM Suppliers",
+      "evidence": "TD SYNNEX names Cisco as a primary OEM supplier.",
+      "revenueShare": null,
+      "reportingPeriod": "Fiscal year ended 2024-11-30",
+      "retrievedOn": "2026-11-05"
+    }
+  ]
+}

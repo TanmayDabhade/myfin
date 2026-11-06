@@ -735,3 +735,44 @@ footer {
   }
 }
 .screen-map{display:grid;gap:18px}.screen-sector h3{margin:5px 0 10px;color:#a9c6bc}.screen-sector h3 small{float:right}.screen-tiles{display:flex;gap:5px}.screen-tile{flex-basis:0;min-width:65px;overflow:hidden;height:122px;display:flex;flex-direction:column;justify-content:center;align-items:center;border:1px solid #ffffff15;color:#fff;padding:10px 4px}.screen-tile strong{font-size:14px}.screen-tile span{font-size:18px;margin:7px 0}.screen-tile small{width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c0d0ce;font-size:9px}.screen-tile:hover{outline:2px solid #a6e1cd;filter:brightness(1.15)}@media(max-width:1100px){.screen-tiles{flex-wrap:wrap}.screen-tile{flex-basis:90px}}
+
+.relationship-graph {
+  overflow: auto;
+  border: 1px solid #2d454c;
+  border-radius: 8px;
+  margin: 20px 0;
+  background: #10222a;
+}
+.relationship-graph svg {
+  display: block;
+  width: 100%;
+  min-width: 700px;
+}
+.relationship-graph g[role="button"] {
+  cursor: pointer;
+}
+.relationship-graph g[role="button"]:focus {
+  outline: none;
+}
+.relationship-graph g[role="button"]:focus rect,
+.relationship-graph g[role="button"]:hover rect {
+  stroke: #b7ffe1;
+  stroke-width: 3;
+}
+.evidence-card {
+  padding: 20px 0;
+  border-top: 1px solid #29434c;
+}
+.evidence-card h3 {
+  font-size: 15px;
+}
+.evidence-card a {
+  overflow-wrap: anywhere;
+}
+.evidence-card .metrics {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) 2fr;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.maritime-map svg{width:100%;max-height:430px;border:1px solid #344952;border-radius:8px}.maritime-map [role=button]{cursor:pointer}.maritime-map [role=button]:focus{outline:none}.maritime-map [role=button]:focus circle{stroke:#fff;stroke-width:4}.maritime-map small{display:block;margin-top:10px}
