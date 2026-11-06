@@ -28,10 +28,6 @@ export async function fetchData(provider, kind, symbol) {
   if (!native) throw Error("Live data connects in the desktop app.");
   return invoke("fetch_data", { provider, kind, symbol });
 }
-export async function fetchMaritime(id) {
-  if (!native) throw Error("Live data connects in the desktop app.");
-  return invoke("fetch_maritime", { id });
-}
 export async function fetchSEC(kind, cik = "", accession = "", doc = "") {
   if (!native) throw Error("Live data connects in the desktop app.");
   return invoke("fetch_sec", { kind, cik, accession, doc });
