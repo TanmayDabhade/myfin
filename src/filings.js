@@ -224,3 +224,44 @@ export function compareMentions(current, prior) {
     kept: current.filter((c) => before.has(key(c))),
   };
 }
+
+// SEC lists many names in capitals ("TAIWAN SEMICONDUCTOR MANUFACTURING CO
+// LTD"). Show them in normal case, keeping short acronyms like TD or HP.
+const NOT_ACRONYM = new Set(["INC", "CO", "LTD", "THE", "AND", "OF", "PLC", "LLC", "LP", "SA", "NV", "AG", "SE", "NEW", "CL"]);
+export function prettyName(name) {
+  const s = String(name ?? "").trim().replace(/\s*\/[A-Z]{2,3}\/?\s*$/, "");
+  if (s !== s.toUpperCase() || !/[A-Z]{2}/.test(s)) return s;
+  return s
+    .split(/(\s+)/)
+    .map((w) => {
+      const core = w.replace(/[^A-Z]/g, "");
+      if (!core || (core.length <= 3 && !NOT_ACRONYM.has(core))) return w;
+      return w.charAt(0) + w.slice(1).toLowerCase();
+    })
+    .join("");
+}
+
+// Phrases to look for in other companies' annual reports: the legal name,
+// plus the name without its legal suffix when that is distinctive enough
+// (one word like "Apple" also matches unrelated companies).
+export function searchPhrases(name) {
+  const clean = (x) => prettyName(x).replace(/[^A-Za-z0-9 .,&'-]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+  const legal = clean(name);
+  const short = normalizeName(name).trim();
+  const out = [legal];
+  if (short.split(" ").length >= 2) out.push(clean(short));
+  return [...new Set(out)].filter((x) => x.length >= 2);
+}
+
+const escapeRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Sentences in another company's filing that name `target` as its supplier
+// or customer. The filing must name the target with a legal suffix at least
+// once ("Apple Inc."), after which the short name ("Apple") counts too.
+export function mentionsOf(text, target, filer) {
+  const short = normalizeName(target.name);
+  if (short.trim().length < 3) return [];
+  const words = short.trim().split(" ").map(escapeRe).join("[\\s,]+");
+  if (!new RegExp(`\\b${words}\\b[,]?\\s+${LEGAL.source}`, "i").test(text)) return [];
+  const directory = [{ key: short, single: false, nodeId: target.id, name: target.name, ticker: target.ticker, cik: target.cik }];
+  return extractCandidates(text, directory, filer);
+}

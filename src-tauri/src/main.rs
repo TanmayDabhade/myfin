@@ -17,6 +17,8 @@ use tauri_plugin_dialog::DialogExt;
 struct Backend {
     db: Mutex<Connection>,
     gate: tokio::sync::Mutex<()>,
+    /// SEC has its own rate limit, so its requests don't wait behind other providers.
+    sec_gate: tokio::sync::Mutex<()>,
     env_keys: Credentials,
     saved_keys: Mutex<Credentials>,
     key_path: std::path::PathBuf,
@@ -255,9 +257,9 @@ async fn fetch_sec(
     if needs_contact && contact.is_empty() {
         return Err("SEC asks automated tools for a contact email before serving filing documents. Add yours in Settings → Data sources.".into());
     }
-    let _guard = b.gate.lock().await;
+    let _guard = b.sec_gate.lock().await;
     // SEC allows 10 requests per second; stay well under it.
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let result: Result<Value, String> = async {
         let resp = b
             .http
@@ -411,8 +413,8 @@ struct QuoteRuntime {
     session: u64,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
-/// Starts real-time trades for these symbols, or keeps the running stream
-/// when the list hasn't changed. Latest prices survive a list change.
+/// Sets the symbols to stream. One connection is kept open and its
+/// subscriptions follow the list, since Finnhub allows one connection per key.
 #[tauri::command]
 fn quotes_start(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), String> {
     let symbols = quotes::symbols(&symbols)?;
@@ -424,7 +426,10 @@ fn quotes_start(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), St
         return Err("Add a Finnhub key in Settings → Data sources for real-time prices.".into());
     }
     let mut rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
-    if rt.symbols == symbols && rt.task.is_some() {
+    rt.book.quotes.retain(|s, _| symbols.contains(s));
+    rt.symbols = symbols;
+    // A running stream picks up the new list within a second.
+    if rt.task.is_some() && rt.status != "error" {
         return Ok(());
     }
     if let Some(t) = rt.task.take() {
@@ -432,16 +437,10 @@ fn quotes_start(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), St
     }
     rt.session += 1;
     let session = rt.session;
-    rt.book.quotes.retain(|s, _| symbols.contains(s));
-    rt.symbols = symbols.clone();
     rt.status = "connecting".into();
     rt.error.clear();
-    if symbols.is_empty() {
-        rt.status = "idle".into();
-        return Ok(());
-    }
     let shared = b.quotes.clone();
-    rt.task = Some(tauri::async_runtime::spawn(run_quotes(shared, session, key, symbols)));
+    rt.task = Some(tauri::async_runtime::spawn(run_quotes(shared, session, key)));
     Ok(())
 }
 #[tauri::command]
@@ -453,6 +452,7 @@ fn quotes_stop(b: tauri::State<Backend>) -> Result<(), String> {
     rt.session += 1;
     rt.symbols.clear();
     rt.status = "stopped".into();
+    rt.error.clear();
     Ok(())
 }
 #[tauri::command]
@@ -460,7 +460,7 @@ fn quotes_snapshot(b: tauri::State<Backend>) -> Result<Value, String> {
     let rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
     Ok(json!({"status":rt.status,"error":rt.error,"lastMessage":rt.last_message,"symbols":rt.symbols,"quotes":rt.book.quotes}))
 }
-async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, key: String, symbols: Vec<String>) {
+async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, key: String) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{Error as WsError, Message};
     let update = |f: &mut dyn FnMut(&mut QuoteRuntime)| {
@@ -470,54 +470,72 @@ async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, k
             }
         }
     };
+    // The current symbol list, or None once this stream has been replaced.
+    let wanted = || shared.lock().ok().filter(|rt| rt.session == session).map(|rt| rt.symbols.clone());
     let mut attempt = 0u32;
     loop {
-        let mut fatal = false;
         match tokio_tungstenite::connect_async(quotes::url(&key)).await {
             Ok((mut ws, _)) => {
-                let mut ok = true;
-                for s in &symbols {
-                    if ws.send(Message::text(quotes::subscribe(s))).await.is_err() {
-                        ok = false;
+                update(&mut |rt| {
+                    rt.status = "subscribed".into();
+                    rt.error.clear();
+                });
+                let mut subscribed: Vec<String> = Vec::new();
+                loop {
+                    let Some(list) = wanted() else { return };
+                    let mut sent = true;
+                    for s in list.iter().filter(|s| !subscribed.contains(s)) {
+                        sent &= ws.send(Message::text(quotes::subscribe(s))).await.is_ok();
+                    }
+                    for s in subscribed.iter().filter(|s| !list.contains(s)) {
+                        sent &= ws.send(Message::text(quotes::unsubscribe(s))).await.is_ok();
+                    }
+                    if !sent {
                         break;
                     }
-                }
-                if ok {
-                    update(&mut |rt| rt.status = "subscribed".into());
-                    while let Some(frame) = ws.next().await {
-                        let bytes = match &frame {
-                            Ok(Message::Text(t)) => t.as_bytes().to_vec(),
-                            Ok(Message::Binary(b)) => b.to_vec(),
-                            Ok(Message::Close(_)) | Err(_) => break,
-                            _ => continue,
-                        };
-                        let Ok(msg) = serde_json::from_slice::<Value>(&bytes) else { continue };
-                        attempt = 0;
-                        let t = now();
-                        update(&mut |rt| match rt.book.apply(&msg, &symbols) {
-                            Ok(n) => {
-                                if n > 0 {
-                                    rt.last_message = t;
-                                }
-                                rt.status = "live".into();
-                                rt.error.clear();
+                    subscribed = list;
+                    let frame = match tokio::time::timeout(std::time::Duration::from_secs(1), ws.next()).await {
+                        Err(_) => continue, // nothing yet; re-check subscriptions
+                        Ok(Some(Ok(f))) => f,
+                        Ok(_) => break,
+                    };
+                    let bytes = match &frame {
+                        Message::Text(t) => t.as_bytes().to_vec(),
+                        Message::Binary(b) => b.to_vec(),
+                        Message::Close(_) => break,
+                        _ => continue,
+                    };
+                    let Ok(msg) = serde_json::from_slice::<Value>(&bytes) else { continue };
+                    attempt = 0;
+                    let t = now();
+                    update(&mut |rt| match rt.book.apply(&msg, &subscribed) {
+                        Ok(n) => {
+                            if n > 0 {
+                                rt.last_message = t;
                             }
-                            Err(e) => rt.error = format!("Finnhub: {}", e.replace(&key, "***")),
-                        });
-                    }
+                            rt.status = "live".into();
+                            rt.error.clear();
+                        }
+                        Err(e) => rt.error = format!("Finnhub: {}", e.replace(&key, "***")),
+                    });
                 }
             }
-            Err(WsError::Http(r)) if matches!(r.status().as_u16(), 401 | 403) => {
-                fatal = true;
+            Err(WsError::Http(r)) => {
+                let (text, retry) = quotes::handshake_error(r.status().as_u16());
                 update(&mut |rt| {
-                    rt.status = "error".into();
-                    rt.error = "Finnhub rejected the key. Check it in Settings → Data sources.".into();
+                    rt.error = text.clone();
+                    if !retry {
+                        rt.status = "error".into();
+                    }
                 });
+                if !retry {
+                    return; // A rejected key won't start working by retrying.
+                }
             }
-            Err(_) => update(&mut |rt| rt.error = "Could not reach Finnhub. Retrying…".into()),
-        }
-        if fatal {
-            return;
+            Err(e) => {
+                let detail: String = e.to_string().replace(&key, "***").chars().take(120).collect();
+                update(&mut |rt| rt.error = format!("Could not reach Finnhub ({detail}). Retrying…"));
+            }
         }
         update(&mut |rt| rt.status = "reconnecting".into());
         let jitter = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_millis() as u64;
@@ -527,5 +545,5 @@ async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, k
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,fetch_maritime,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,fetch_maritime,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

@@ -23,6 +23,10 @@ import {
   extractCandidates,
   candidatesToGraph,
   compareMentions,
+  prettyName,
+  searchPhrases,
+  mentionsOf,
+  filingURL,
 } from "./filings.js";
 import { REVENUE_TAGS } from "./sec-tags.js";
 import "./style.css";
@@ -118,6 +122,12 @@ let graphCenter = "apple",
   graphSymbol = "AAPL", // ticker the explorer last followed
   scanningId = null; // entity whose filings are being read right now
 const scanErrors = {};
+const scanProgress = {}; // entity -> { done, total } while other reports are read
+function scanText(id) {
+  if (scanningId === id) return "Reading its annual reports…";
+  const p = scanProgress[id];
+  return p ? `Checking other companies' reports that name it · ${p.done}/${p.total}` : "";
+}
 // Open a company in the explorer and remember the way back.
 function goToEntity(id) {
   id = resolveCenter(graph(), id);
@@ -364,7 +374,7 @@ function render() {
     Relationships: () =>
       relationshipsView(graph(), graphCenter, graphCandidates, {
         trail: graphTrail,
-        scanning: scanningId === graphCenter,
+        progress: scanText(graphCenter),
       }) + filingScan(),
     Trade: trade,
     Portfolio: portfolioPage,
@@ -872,6 +882,176 @@ async function scanFilings(id) {
     refresh();
   }
 }
+// SEC's company list (about 10,000 filers), loaded once per session.
+let secDir = null;
+async function secDirectory() {
+  if (secDir) return secDir;
+  const d = (await fetchSEC("tickers")).data;
+  const list = Object.values(d).map((c) => ({ cik: padCIK(c.cik_str), ticker: c.ticker, title: prettyName(c.title) }));
+  // The first listing per CIK is the primary share class.
+  secDir = { list, byCik: new Map([...list].reverse().map((x) => [x.cik, x])) };
+  return secDir;
+}
+// Scan a company in the background when it is opened: its own annual
+// reports, then other companies' reports that name it. Runs at most once a
+// week per company; leaving a company pauses the second part.
+const scanRuns = new Set();
+function autoScan(id) {
+  if (!live() || !hasKey("sec") || scanRuns.has(id)) return;
+  const n = graph().nodes.find((x) => x.id === id);
+  if (!n || !(n.ticker || n.cik) || scanErrors[id]) return;
+  const fresh = (x) => x?.at && Date.now() - Date.parse(x.at) < 7 * 864e5;
+  const done = state.filingScans?.[id];
+  if (fresh(done) && fresh(done.mentions)) return;
+  scanRuns.add(id);
+  (async () => {
+    if (!fresh(done)) await scanFilings(id).catch(() => {});
+    await scanMentions(id);
+  })()
+    .catch((e) => (scanErrors[id] = "Couldn't check other companies' reports: " + message(e)))
+    .finally(() => {
+      scanRuns.delete(id);
+      refresh();
+    });
+}
+// Other companies' annual reports from the last 18 months that name this
+// company as a supplier or customer. Suppliers rarely name customers in the
+// customer's own 10-K, but customers over 10% of revenue must be disclosed.
+async function scanMentions(id) {
+  const n = graph().nodes.find((x) => x.id === id);
+  const cik = n.cik ? padCIK(n.cik) : await resolveCIK(n.ticker);
+  n.cik ||= cik;
+  const since = new Date(Date.now() - 548 * 864e5).toISOString().slice(0, 10);
+  const hits = [];
+  for (const phrase of searchPhrases(n.name))
+    hits.push(...(await fetchSEC("search", "", since, phrase)).data.hits);
+  const own = new Set([cik]);
+  const filers = [];
+  for (const h of hits) {
+    const c = padCIK(h.cik);
+    if (own.has(c)) continue;
+    own.add(c);
+    filers.push(h);
+  }
+  const todo = filers.slice(0, 20);
+  const dir = await secDirectory();
+  const today = new Date().toISOString().slice(0, 10);
+  scanProgress[id] = { done: 0, total: todo.length };
+  refresh();
+  let found = 0,
+    added = 0;
+  try {
+    for (const f of todo) {
+      if (graphCenter !== id || !live()) return; // paused; resumes when reopened
+      try {
+        const c = padCIK(f.cik),
+          listed = dir.byCik.get(c);
+        const existing = graph().nodes.find((x) => x.cik === c || (listed?.ticker && x.ticker === listed.ticker));
+        const filer = { cik: c, name: existing?.name || listed?.title || prettyName(f.name), ticker: listed?.ticker || "", nodeId: existing?.id };
+        const text = (await fetchSEC("document", c, f.accession, f.doc)).data.text;
+        const named = mentionsOf(text, n, filer);
+        if (named.length) {
+          const filing = { accession: f.accession, filed: f.filed, form: f.form, period: f.period, url: filingURL(c, f.accession, f.doc) };
+          const out = candidatesToGraph(graph(), filer, filing, named, today);
+          state.relationshipGraph = validateGraph(out.graph);
+          found += named.length;
+          added += out.added;
+        }
+      } catch {
+        // One unreadable filing shouldn't stop the rest.
+      }
+      scanProgress[id].done++;
+      refresh();
+    }
+    const scans = (state.filingScans ||= {});
+    scans[id] = { ...scans[id], mentions: { at: today, checked: todo.length, found, added } };
+    await persist();
+  } finally {
+    delete scanProgress[id];
+  }
+}
+// Company search: entities already in the graph first, then every company
+// in SEC's list (live mode).
+function bindCompanySearch(recenter) {
+  const input = $("#graph-search"),
+    list = $("#graph-results");
+  let results = [],
+    active = 0;
+  const close = () => {
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+  };
+  const pick = async (r) => {
+    if (!r) return;
+    close();
+    if (r.node) return recenter(r.node.id);
+    const n = ensureCompany(graph(), r.ticker, r.title);
+    n.cik ||= r.cik;
+    await persist();
+    recenter(n.id);
+  };
+  const paint = () => {
+    list.innerHTML = results.length
+      ? results
+          .map(
+            (r, i) =>
+              `<button type="button" role="option" class="combo-item ${i === active ? "active" : ""}" data-i="${i}" aria-selected="${i === active}"><b>${esc(r.node ? prettyName(r.node.name) : r.title)}</b><small>${esc(r.ticker || "")}${r.node ? " · in your graph" : ""}</small></button>`,
+          )
+          .join("")
+      : `<div class="combo-empty">${!live() ? "Switch to Live data to search every SEC-listed company." : !hasKey("sec") ? "Add your SEC contact email in Settings to search every SEC-listed company." : "No matching company."}</div>`;
+    list.querySelectorAll(".combo-item").forEach((el) => (el.onmousedown = (e) => (e.preventDefault(), pick(results[+el.dataset.i]))));
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  };
+  const search = async () => {
+    const q = input.value.trim().toUpperCase();
+    if (!q) return close();
+    const score = (name, ticker) => (ticker === q ? 0 : ticker?.startsWith(q) ? 1 : name.toUpperCase().startsWith(q) ? 2 : name.toUpperCase().includes(q) ? 3 : 9);
+    const nodes = graph()
+      .nodes.map((n) => ({ node: n, ticker: n.ticker, s: score(n.name, n.ticker) }))
+      .filter((r) => r.s < 9);
+    let sec = [];
+    if (live() && hasKey("sec")) {
+      try {
+        const dir = await secDirectory();
+        const inGraph = new Set(graph().nodes.flatMap((n) => [n.ticker, n.cik].filter(Boolean)));
+        sec = dir.list
+          .map((c) => ({ ...c, s: score(c.title, c.ticker) }))
+          .filter((r) => r.s < 9 && !inGraph.has(r.ticker) && !inGraph.has(r.cik));
+      } catch (e) {
+        notify(message(e), true);
+      }
+    }
+    if (input.value.trim().toUpperCase() !== q) return; // a newer keystroke won
+    const seen = new Set();
+    results = [...nodes, ...sec]
+      .sort((a, b) => a.s - b.s || !!b.node - !!a.node)
+      .filter((r) => {
+        const k = r.node?.id || r.cik;
+        return !seen.has(k) && seen.add(k);
+      })
+      .slice(0, 10);
+    active = 0;
+    paint();
+  };
+  input.oninput = search;
+  input.onfocus = () => input.value && search();
+  input.onblur = close;
+  input.onkeydown = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!results.length) return;
+      active = (active + (e.key === "ArrowDown" ? 1 : results.length - 1)) % results.length;
+      paint();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      pick(results[active]);
+    } else if (e.key === "Escape") {
+      input.value = "";
+      close();
+    }
+  };
+}
 const loadErrors = {}; // dataset key -> message from the last failed load
 // What to show while a company dataset isn't loaded yet.
 function waiting(kind, label) {
@@ -1293,11 +1473,7 @@ function autoLoad() {
     const s = a.symbol;
     once("sec:" + s, () => loadSEC(s));
   }
-  if (page === "Relationships" && hasKey("sec")) {
-    const n = graph().nodes.find((x) => x.id === graphCenter);
-    if (n && (n.ticker || n.cik) && !state.filingScans?.[n.id])
-      once("scan:" + n.id, () => scanFilings(n.id));
-  }
+  if (page === "Relationships") autoScan(graphCenter);
   if (page === "Economy" && hasKey("fred"))
     for (const id of Object.keys(macroSeries))
       if (stale(state.macro[id], 43200)) once("fred:" + id, () => loadMacro(id));
@@ -1381,8 +1557,7 @@ function bind() {
       }
     };
   });
-  if ($("#graph-center"))
-    $("#graph-center").onchange = (event) => recenter(event.target.value);
+  if ($("#graph-search")) bindCompanySearch(recenter);
   if ($("#graph-candidates"))
     $("#graph-candidates").onchange = (event) => {
       graphCandidates = event.target.value === "all";

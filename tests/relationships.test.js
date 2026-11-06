@@ -91,7 +91,7 @@ test("a subsidiary without a ticker opens its listed parent with its links", () 
   assert.equal(resolveCenter(g, "apple"), "apple");
   const html = relationshipsView(g, id, false, { trail: ["apple", id] });
   assert.match(html, /data-action="graph-back"(?! disabled)/);
-  assert.match(html, /data-action="graph-crumb" data-value="0">Apple Inc\./);
+  assert.match(html, /data-action="graph-crumb" data-value="0" title="Apple Inc\.">Apple Inc\./);
 });
 test("ensureCompany reuses an existing ticker", () => {
   const g = seedGraph();
@@ -100,4 +100,12 @@ test("ensureCompany reuses an existing ticker", () => {
   assert.deepEqual(n, { id: "t-nvda", name: "NVIDIA Corporation", ticker: "NVDA" });
   assert.equal(parentTicker({ ticker: "", parent: "Dell Technologies (DELL)" }), "DELL");
   assert.equal(parentTicker({ ticker: "X", parent: "Y (Z)" }), "");
+});
+test("the trail keeps the last four companies on one line", () => {
+  const g = seedGraph();
+  const trail = ["cisco", "td-synnex", "dell", "microsoft", "broadcom", "apple"];
+  const html = relationshipsView(g, "apple", true, { trail });
+  assert.equal((html.match(/class="crumb"/g) || []).length, 4, "three earlier companies plus the ellipsis");
+  assert.match(html, /data-value="1" title="Earlier companies">…/);
+  assert.doesNotMatch(html, /title="Cisco Systems/);
 });

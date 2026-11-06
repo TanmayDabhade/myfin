@@ -31,11 +31,25 @@ pub fn symbols(requested: &[String]) -> Result<Vec<String>, String> {
 
 /// Finnhub takes the key in the URL; it only travels over the encrypted socket.
 pub fn url(key: &str) -> String {
-    format!("{STREAM_URL}?token={key}")
+    format!("{STREAM_URL}/?token={key}")
 }
 
 pub fn subscribe(symbol: &str) -> String {
     json!({ "type": "subscribe", "symbol": symbol }).to_string()
+}
+
+pub fn unsubscribe(symbol: &str) -> String {
+    json!({ "type": "unsubscribe", "symbol": symbol }).to_string()
+}
+
+/// What to tell the user when the handshake is refused, and whether
+/// retrying could help.
+pub fn handshake_error(status: u16) -> (String, bool) {
+    match status {
+        401 | 403 => ("Finnhub rejected the key. Check it in Settings → Data sources.".into(), false),
+        429 => ("Finnhub allows one live connection per key. Close other apps using this key; retrying…".into(), true),
+        s => (format!("Finnhub returned HTTP {s}. Retrying…"), true),
+    }
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -90,6 +104,9 @@ mod tests {
         let many: Vec<String> = (0..80).map(|i| format!("S{i}")).collect();
         assert_eq!(symbols(&many).unwrap().len(), MAX_SYMBOLS);
         assert_eq!(subscribe("AAPL"), r#"{"symbol":"AAPL","type":"subscribe"}"#);
+        assert_eq!(unsubscribe("AAPL"), r#"{"symbol":"AAPL","type":"unsubscribe"}"#);
+        assert!(!handshake_error(401).1 && handshake_error(429).1);
+        assert!(url("K").starts_with("wss://ws.finnhub.io/?token="));
     }
     #[test]
     fn keeps_latest_trade_per_wanted_symbol() {
@@ -105,5 +122,23 @@ mod tests {
         assert!(!b.quotes.contains_key("MSFT") && !b.quotes.contains_key("QCOM"));
         assert_eq!(b.apply(&json!({"type":"ping"}), &wanted()), Ok(0));
         assert!(b.apply(&json!({"type":"error","msg":"Invalid symbol"}), &wanted()).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod contract_tests {
+    /// Proves the handshake URL is well-formed: Finnhub must answer a bad
+    /// key with HTTP 401, not a connection or request error.
+    #[test]
+    #[ignore = "Live Finnhub handshake check; requires network"]
+    fn live_finnhub_handshake() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            match tokio_tungstenite::connect_async(super::url("invalidkey123")).await {
+                Err(tokio_tungstenite::tungstenite::Error::Http(r)) => assert_eq!(r.status().as_u16(), 401),
+                Err(e) => panic!("unexpected error: {e}"),
+                Ok(_) => panic!("bad key accepted"),
+            }
+        });
     }
 }
