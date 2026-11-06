@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 [features]
 default = ["desktop"]
-desktop = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog"]
+desktop = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-plugin-dialog", "dep:tokio-tungstenite", "dep:futures-util"]
 [[bin]]
 name = "market-lens"
 path = "src/main.rs"
@@ -22,3 +22,5 @@ tokio = { version = "1", features = ["sync", "time"] }
 tauri-plugin-opener = { version = "2", optional = true }
 
 tauri-plugin-dialog = { version = "2", optional = true }
+tokio-tungstenite = { version = "0.30", optional = true, default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }

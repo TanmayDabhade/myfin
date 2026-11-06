@@ -20,6 +20,12 @@ export const providers = {
     limits: "Free, generous limits",
     keyURL: "https://fredaccount.stlouisfed.org/apikeys",
   },
+  ais: {
+    name: "AISStream",
+    provides: "Live vessel positions near the selected port or chokepoint",
+    limits: "Free key. Streams only while Commodities is open",
+    keyURL: "https://aisstream.io/authenticate",
+  },
   sec: {
     name: "SEC EDGAR",
     provides: "Filing list and revenue history need nothing. Add your contact email to also scan 10-K text for suppliers and customers.",

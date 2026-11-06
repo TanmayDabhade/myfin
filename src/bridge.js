@@ -36,6 +36,9 @@ export async function fetchSEC(kind, cik = "", accession = "", doc = "") {
   if (!native) throw Error("Live data connects in the desktop app.");
   return invoke("fetch_sec", { kind, cik, accession, doc });
 }
+export const aisStart = (area, lat, lon) => invoke("ais_start", { area, lat, lon });
+export const aisStop = () => (native ? invoke("ais_stop") : Promise.resolve());
+export const aisSnapshot = () => invoke("ais_snapshot");
 export async function nativeTrade(mode, order) {
   return invoke("paper_trade", { mode, order });
 }

@@ -816,3 +816,9 @@ input:focus, textarea:focus, select:focus { outline-color: #fff; }
 .advanced summary { cursor: pointer; color: #9a9a9a; font-size: 12px; }
 .empty .primary { margin-top: 14px; }
 @media (max-width: 850px) { .source-row { grid-template-columns: 1fr; } }
+
+.commodity-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.vessel-map svg { width: 100%; aspect-ratio: 1; border: 1px solid #222; border-radius: 8px; display: block; }
+.vessel { fill: #9a9a9a; }
+.vessel.tanker { fill: #ffffff; }
+.vessel.cargo { fill: #bdbdbd; }

@@ -3,6 +3,7 @@ mod ledger;
 mod maritime;
 mod providers;
 mod sec;
+mod ais;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -18,6 +19,7 @@ struct Backend {
     env_keys: Credentials,
     saved_keys: Mutex<Credentials>,
     key_path: std::path::PathBuf,
+    ais: std::sync::Arc<Mutex<AisRuntime>>,
     http: reqwest::Client,
 }
 fn now() -> i64 {
@@ -279,7 +281,125 @@ async fn fetch_sec(
         },
     }
 }
+#[derive(Default)]
+struct AisRuntime {
+    store: ais::Store,
+    area: String,
+    status: String,
+    error: String,
+    last_message: i64,
+    session: u64,
+    task: Option<tauri::async_runtime::JoinHandle<()>>,
+}
+/// Starts (or moves) the live vessel stream to a box around one location.
+#[tauri::command]
+fn ais_start(b: tauri::State<Backend>, area: String, lat: f64, lon: f64) -> Result<(), String> {
+    if area.len() > 40 || !area.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("Invalid area".into());
+    }
+    let bbox = ais::BBox::around(lat, lon, 1.0)?;
+    let key = {
+        let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+        providers::resolve(&b.env_keys, &saved, "ais").0.to_string()
+    };
+    if key.is_empty() {
+        return Err("Add an AISStream key in Settings → Data sources for live vessels.".into());
+    }
+    let mut rt = b.ais.lock().map_err(|_| "Vessel stream unavailable")?;
+    if rt.area == area && rt.task.is_some() {
+        return Ok(());
+    }
+    if let Some(t) = rt.task.take() {
+        t.abort();
+    }
+    rt.session += 1;
+    let session = rt.session;
+    rt.store = ais::Store::default();
+    rt.area = area;
+    rt.status = "connecting".into();
+    rt.error.clear();
+    rt.last_message = 0;
+    let shared = b.ais.clone();
+    rt.task = Some(tauri::async_runtime::spawn(run_ais(shared, session, key, bbox)));
+    Ok(())
+}
+#[tauri::command]
+fn ais_stop(b: tauri::State<Backend>) -> Result<(), String> {
+    let mut rt = b.ais.lock().map_err(|_| "Vessel stream unavailable")?;
+    if let Some(t) = rt.task.take() {
+        t.abort();
+    }
+    rt.session += 1;
+    rt.status = "stopped".into();
+    Ok(())
+}
+#[tauri::command]
+fn ais_snapshot(b: tauri::State<Backend>) -> Result<Value, String> {
+    let mut rt = b.ais.lock().map_err(|_| "Vessel stream unavailable")?;
+    rt.store.prune(now());
+    let mut vessels: Vec<&ais::Vessel> = rt.store.vessels.values().collect();
+    vessels.sort_by(|a, b| b.seen.cmp(&a.seen));
+    Ok(json!({"area":rt.area,"status":rt.status,"error":rt.error,"lastMessage":rt.last_message,"vessels":vessels}))
+}
+async fn run_ais(shared: std::sync::Arc<Mutex<AisRuntime>>, session: u64, key: String, bbox: ais::BBox) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    // Every update checks the session so a replaced stream can't write.
+    let update = |f: &mut dyn FnMut(&mut AisRuntime)| {
+        if let Ok(mut rt) = shared.lock() {
+            if rt.session == session {
+                f(&mut rt);
+            }
+        }
+    };
+    let mut attempt = 0u32;
+    loop {
+        let mut fatal = false;
+        match tokio_tungstenite::connect_async(ais::STREAM_URL).await {
+            Ok((mut ws, _)) => {
+                if ws.send(Message::text(ais::subscription(&key, &bbox))).await.is_ok() {
+                    update(&mut |rt| rt.status = "subscribed".into());
+                    while let Some(frame) = ws.next().await {
+                        let bytes = match &frame {
+                            Ok(Message::Text(t)) => t.as_bytes().to_vec(),
+                            Ok(Message::Binary(b)) => b.to_vec(),
+                            Ok(Message::Close(_)) | Err(_) => break,
+                            _ => continue,
+                        };
+                        let Ok(msg) = serde_json::from_slice::<Value>(&bytes) else { continue };
+                        if let Some(err) = msg.get("error").and_then(Value::as_str) {
+                            let clean: String = err.replace(&key, "***").chars().take(200).collect();
+                            fatal = clean.to_ascii_lowercase().contains("api key");
+                            update(&mut |rt| {
+                                rt.error = format!("AISStream: {clean}");
+                                rt.status = "error".into();
+                            });
+                            break;
+                        }
+                        attempt = 0;
+                        let t = now();
+                        update(&mut |rt| {
+                            if rt.store.apply(&msg, &bbox, t) {
+                                rt.last_message = t;
+                            }
+                            rt.status = "live".into();
+                            rt.error.clear();
+                        });
+                    }
+                }
+            }
+            Err(_) => update(&mut |rt| rt.error = "Could not reach AISStream. Retrying…".into()),
+        }
+        if fatal {
+            return; // A rejected key won't start working by retrying.
+        }
+        update(&mut |rt| rt.status = "reconnecting".into());
+        let jitter = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_millis() as u64;
+        tokio::time::sleep(ais::backoff(attempt, jitter)).await;
+        attempt += 1;
+    }
+}
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,fetch_maritime]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,fetch_maritime,ais_start,ais_stop,ais_snapshot]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }
