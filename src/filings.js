@@ -140,6 +140,7 @@ export function extractCandidates(text, directory, filer) {
     for (const d of pool) {
       if (d.cik && d.cik === filer.cik) continue;
       if (filer.nodeId && d.nodeId === filer.nodeId) continue;
+      if (d.nodeId && filer.skip?.includes(d.nodeId)) continue;
       if (!norm.includes(d.key)) continue;
       // One-word names ("Target", "Block") need a legal suffix right after
       // them in the original sentence to count as a company mention.

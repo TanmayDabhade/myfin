@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub const PROVIDERS: [&str; 5] = ["alpha", "twelve", "fred", "sec", "ais"];
+pub const PROVIDERS: [&str; 6] = ["alpha", "twelve", "fred", "sec", "ais", "finnhub"];
 
 const ALPHA_KINDS: [&str; 8] = [
     "TIME_SERIES_DAILY",
@@ -41,6 +41,7 @@ pub fn env_name(provider: &str) -> &'static str {
         "twelve" => "TWELVE_DATA_API_KEY",
         "sec" => "SEC_CONTACT_EMAIL",
         "ais" => "AISSTREAM_API_KEY",
+        "finnhub" => "FINNHUB_API_KEY",
         _ => "FRED_API_KEY",
     }
 }
@@ -58,6 +59,8 @@ pub struct Credentials {
     pub sec: String,
     #[serde(default)]
     pub ais: String,
+    #[serde(default)]
+    pub finnhub: String,
 }
 
 impl Credentials {
@@ -68,6 +71,7 @@ impl Credentials {
             "fred" => &self.fred,
             "sec" => &self.sec,
             "ais" => &self.ais,
+            "finnhub" => &self.finnhub,
             _ => "",
         }
     }
@@ -88,13 +92,14 @@ impl Credentials {
             "twelve" => self.twelve = key,
             "fred" => self.fred = key,
             "ais" => self.ais = key,
+            "finnhub" => self.finnhub = key,
             _ => return Err("Unknown provider".into()),
         }
         Ok(())
     }
     pub fn from_env() -> Self {
         let read = |p: &str| std::env::var(env_name(p)).unwrap_or_default().trim().to_string();
-        Credentials { alpha: read("alpha"), twelve: read("twelve"), fred: read("fred"), sec: read("sec"), ais: read("ais") }
+        Credentials { alpha: read("alpha"), twelve: read("twelve"), fred: read("fred"), sec: read("sec"), ais: read("ais"), finnhub: read("finnhub") }
     }
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
