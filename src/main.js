@@ -62,6 +62,7 @@ import {
   csv,
   checkAlerts,
   validateWorkspace,
+  migrate,
   number,
 } from "./engine.js";
 const $ = (s) => document.querySelector(s),
@@ -93,7 +94,7 @@ const pct = (x) => (x == null ? "—" : fmt(x * 100) + "%"),
           notation: "compact",
           maximumFractionDigits: 2,
         }).format(x);
-let state = await load(),
+let state = migrate(await load()),
   page = "Overview",
   keyInfo = await keyStatus().catch(() => null),
   symbol = "AAPL",
@@ -1352,7 +1353,7 @@ function bind() {
         const file = e.target.files[0];
         if (!file) return;
         if (file.size > 20e6) throw Error("Backup limit is 20 MB");
-        const restored = validateWorkspace(JSON.parse(await file.text()));
+        const restored = migrate(validateWorkspace(JSON.parse(await file.text())));
         if (restored.relationshipGraph)
           validateGraph(restored.relationshipGraph, { imported: true });
         if (
