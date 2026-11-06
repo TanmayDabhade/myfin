@@ -2,6 +2,7 @@
 mod ledger;
 mod maritime;
 mod providers;
+mod sec;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -220,7 +221,65 @@ async fn fetch_data(
         },
     }
 }
+/// SEC EDGAR data. Keyless; documents and the company directory need the
+/// user's contact email, which is sent only to sec.gov.
+#[tauri::command]
+async fn fetch_sec(
+    b: tauri::State<'_, Backend>,
+    kind: String,
+    cik: String,
+    accession: String,
+    doc: String,
+) -> Result<Value, String> {
+    let (url, needs_contact, ttl) = sec::resource(&kind, &cik, &accession, &doc)?;
+    let cache_key = format!("sec:{url}");
+    let cached: Option<(String, i64)> = {
+        let db = b.db.lock().map_err(|_| "Database unavailable")?;
+        db.query_row("SELECT body,stamp FROM cache WHERE id=?1", [&cache_key], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .map_err(|e| e.to_string())?
+    };
+    if let Some((body, stamp)) = &cached {
+        if now() - stamp < ttl {
+            return Ok(json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"provider":"sec"}));
+        }
+    }
+    let contact = {
+        let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+        providers::resolve(&b.env_keys, &saved, "sec").0.to_string()
+    };
+    if needs_contact && contact.is_empty() {
+        return Err("SEC asks automated tools for a contact email before serving filing documents. Add yours in Settings → Data sources.".into());
+    }
+    let _guard = b.gate.lock().await;
+    // SEC allows 10 requests per second; stay well under it.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let result: Result<Value, String> = async {
+        let resp = b
+            .http
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, sec::user_agent(&contact))
+            .send()
+            .await
+            .map_err(|_| "Could not reach SEC EDGAR. Check your internet connection.".to_string())?;
+        let http = resp.status().as_u16();
+        let body = resp.text().await.map_err(|_| "Could not read SEC response".to_string())?;
+        sec::interpret(&kind, http, &body)
+    }
+    .await;
+    let ts = now();
+    match result {
+        Ok(data) => {
+            b.db.lock().map_err(|_|"Database unavailable")?.execute("INSERT INTO cache(id,body,stamp) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body,stamp=excluded.stamp",params![cache_key,data.to_string(),ts]).map_err(|e|e.to_string())?;
+            Ok(json!({"data":data,"fetchedAt":ts,"cached":false,"provider":"sec"}))
+        }
+        Err(error) => match cached {
+            Some((body, stamp)) => Ok(json!({"data":serde_json::from_str::<Value>(&body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"stale":true,"warning":error,"provider":"sec"})),
+            None => Err(error),
+        },
+    }
+}
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,paper_trade,export_file,fetch_maritime]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,fetch_maritime]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

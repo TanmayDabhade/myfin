@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub const PROVIDERS: [&str; 3] = ["alpha", "twelve", "fred"];
+pub const PROVIDERS: [&str; 4] = ["alpha", "twelve", "fred", "sec"];
 
 const ALPHA_KINDS: [&str; 8] = [
     "TIME_SERIES_DAILY",
@@ -39,6 +39,7 @@ pub fn env_name(provider: &str) -> &'static str {
     match provider {
         "alpha" => "ALPHA_VANTAGE_API_KEY",
         "twelve" => "TWELVE_DATA_API_KEY",
+        "sec" => "SEC_CONTACT_EMAIL",
         _ => "FRED_API_KEY",
     }
 }
@@ -51,6 +52,9 @@ pub struct Credentials {
     pub twelve: String,
     #[serde(default)]
     pub fred: String,
+    /// Contact email SEC asks automated tools to declare. Not a secret key.
+    #[serde(default)]
+    pub sec: String,
 }
 
 impl Credentials {
@@ -59,11 +63,19 @@ impl Credentials {
             "alpha" => &self.alpha,
             "twelve" => &self.twelve,
             "fred" => &self.fred,
+            "sec" => &self.sec,
             _ => "",
         }
     }
     pub fn set(&mut self, provider: &str, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
+        if provider == "sec" {
+            if !key.is_empty() && !crate::sec::valid_contact(&key) {
+                return Err("Enter a valid contact email for SEC EDGAR.".into());
+            }
+            self.sec = key;
+            return Ok(());
+        }
         if key.len() > 200 || !key.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
             return Err("That key has unexpected characters. Paste only the key itself.".into());
         }
@@ -77,7 +89,7 @@ impl Credentials {
     }
     pub fn from_env() -> Self {
         let read = |p: &str| std::env::var(env_name(p)).unwrap_or_default().trim().to_string();
-        Credentials { alpha: read("alpha"), twelve: read("twelve"), fred: read("fred") }
+        Credentials { alpha: read("alpha"), twelve: read("twelve"), fred: read("fred"), sec: read("sec") }
     }
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
@@ -221,6 +233,9 @@ mod tests {
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
         assert!(c.set("alpha", "bad key&x=1".into()).is_err());
+        assert!(c.set("sec", "not an email".into()).is_err());
+        c.set("sec", "analyst@example.com".into()).unwrap();
+        assert_eq!(c.get("sec"), "analyst@example.com");
         std::fs::remove_dir_all(dir).ok();
     }
     #[test]

@@ -20,6 +20,14 @@ export const providers = {
     limits: "Free, generous limits",
     keyURL: "https://fredaccount.stlouisfed.org/apikeys",
   },
+  sec: {
+    name: "SEC EDGAR",
+    provides: "Filing list and revenue history need nothing. Add your contact email to also scan 10-K text for suppliers and customers.",
+    limits: "No key. SEC asks automated tools for a contact email; it is sent only to sec.gov",
+    keyURL: "https://www.sec.gov/os/accessing-edgar-data",
+    label: "About SEC access",
+    email: true,
+  },
 };
 
 export const priceProviders = ["twelve", "alpha"];

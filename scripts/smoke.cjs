@@ -16,7 +16,7 @@ function fakeBackend() {
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
       const k = store("native-keys") || {};
-      return Object.fromEntries(["alpha", "twelve", "fred"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
+      return Object.fromEntries(["alpha", "twelve", "fred", "sec"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
     },
     set_keys: ({ keys }) => {
       const k = store("native-keys") || {};
@@ -34,6 +34,37 @@ function fakeBackend() {
       if (kind === "NEWS_SENTIMENT")
         return wrap({ feed: [{ title: "Fixture headline", url: "https://example.com/n", source: "Fixture", time_published: "20261105T120000", summary: "Test" }] });
       return wrap({ annualReports: [{ fiscalDateEnding: "2025-12-31", reportedCurrency: "USD", totalRevenue: "1000" }] });
+    },
+    fetch_sec: ({ kind, accession }) => {
+      if (kind !== "submissions" && kind !== "revenue" && !(store("native-keys") || {}).sec)
+        throw "SEC contact email required";
+      const wrap = (data) => ({ data, fetchedAt: Date.now() / 1000, provider: "sec" });
+      if (kind === "tickers")
+        return wrap({
+          0: { cik_str: 320193, ticker: "AAPL", title: "Apple Inc." },
+          1: { cik_str: 1046179, ticker: "TSM", title: "Taiwan Semiconductor Manufacturing Co Ltd" },
+          2: { cik_str: 1018724, ticker: "AMZN", title: "Amazon.com, Inc." },
+        });
+      if (kind === "submissions")
+        return wrap({
+          cik: "320193",
+          name: "Apple Inc.",
+          filings: { recent: {
+            form: ["10-K", "8-K", "10-K"],
+            filingDate: ["2026-11-03", "2026-08-01", "2025-10-31"],
+            reportDate: ["2026-09-26", "", "2025-09-27"],
+            accessionNumber: ["0000320193-26-000026", "0000320193-26-000020", "0000320193-25-000079"],
+            primaryDocument: ["cur.htm", "e.htm", "prior.htm"],
+          } },
+        });
+      if (kind === "revenue")
+        return wrap({ units: { USD: [
+          { start: "2024-09-29", end: "2025-09-27", val: 400e9, form: "10-K", filed: "2025-10-31", accn: "b" },
+          { start: "2025-09-28", end: "2026-09-26", val: 440e9, form: "10-K", filed: "2026-11-03", accn: "c" },
+        ] } });
+      return wrap({ text: accession.endsWith("026")
+        ? "The Company relies on Taiwan Semiconductor Manufacturing Company Limited as a sole-source supplier of processors."
+        : "Net sales to Amazon.com, Inc., a reseller, accounted for 11% of total net sales in 2025." });
     },
     fetch_maritime: ({ id }) => ({
       data: { features: Array.from({ length: 20 }, (_, i) => ({ attributes: { portid: id, date: new Date(Date.UTC(2026, 9, 1 + i)).toISOString().slice(0, 10), n_tanker: 10 + i, n_cargo: 5, n_total: 20, n_container: 1, n_dry_bulk: 2 } })) },
@@ -60,6 +91,7 @@ async function liveFlow(browser, errors) {
   await page.fill("#key-twelve", "FAKEKEY1");
   await page.fill("#key-alpha", "FAKEKEY2");
   await page.fill("#key-fred", "FAKEKEY3");
+  await page.fill("#key-sec", "analyst@example.com");
   await page.click('[data-action="setup-connect"]');
   await page.waitForSelector(".watch-row");
   await page.waitForFunction(() => document.querySelectorAll(".watch-row").length === 5);
@@ -69,6 +101,17 @@ async function liveFlow(browser, errors) {
   await page.waitForSelector("text=Fixture company profile");
   await page.waitForSelector("text=Fixture headline");
   await page.waitForSelector("td:has-text('totalRevenue')");
+  await page.waitForSelector("h2:has-text('CIK 0000320193')");
+  if (!(await page.locator("body").innerText()).includes("10.00%")) throw Error("SEC revenue growth missing");
+  await page.click('[data-action="graph-open"]');
+  await page.click('[data-action="sec-scan"]');
+  await page.waitForSelector("text=New since prior report");
+  const scanText = await page.locator("body").innerText();
+  if (!scanText.includes("Named as supplier in filing (candidate)")) throw Error("Scan candidate missing");
+  if (!/New since prior report\s+Taiwan Semiconductor/.test(scanText)) throw Error("Filing comparison missing");
+  await page.selectOption("#graph-candidates", "reviewed");
+  if ((await page.locator("text=Named as supplier in filing").count()) !== 0)
+    throw Error("Scanned candidate treated as reviewed");
   await page.click('[data-page="Economy"]');
   await page.waitForFunction(() => [...document.querySelectorAll(".macro-card strong")].every((x) => x.textContent === "4.10"));
   await page.click('[data-page="Commodities"]');
