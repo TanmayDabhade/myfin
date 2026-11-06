@@ -1,5 +1,89 @@
 const { chromium } = require("playwright");
 const { spawn } = require("child_process");
+// Stand-in for the Rust backend with fixed fake responses, so the desktop
+// data flow can be exercised in a browser without network or real keys.
+function fakeBackend() {
+  const store = (k, v) =>
+    v === undefined ? JSON.parse(localStorage.getItem(k) || "null") : localStorage.setItem(k, JSON.stringify(v));
+  const bars = (n) =>
+    Array.from({ length: n }, (_, i) => {
+      const d = new Date(Date.UTC(2026, 6, 1) + i * 864e5).toISOString().slice(0, 10);
+      const c = 100 + Math.sin(i / 5) * 8 + i * 0.2;
+      return { datetime: d, open: String(c - 1), high: String(c + 2), low: String(c - 2), close: String(c), volume: "1000000" };
+    }).reverse();
+  const handlers = {
+    load_state: () => store("native-state"),
+    save_state: ({ state }) => store("native-state", state),
+    key_status: () => {
+      const k = store("native-keys") || {};
+      return Object.fromEntries(["alpha", "twelve", "fred"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
+    },
+    set_keys: ({ keys }) => {
+      const k = store("native-keys") || {};
+      for (const [p, v] of Object.entries(keys)) if (v) k[p] = v;
+      store("native-keys", k);
+      return handlers.key_status();
+    },
+    fetch_data: ({ provider, kind, symbol }) => {
+      const wrap = (data) => ({ data, fetchedAt: Date.now() / 1000, cached: false, provider });
+      if (provider === "twelve") return wrap({ status: "ok", values: bars(80) });
+      if (provider === "fred")
+        return wrap({ observations: [{ date: "2026-10-01", value: "4.1" }, { date: "2026-09-01", value: "4.3" }] });
+      if (kind === "OVERVIEW")
+        return wrap({ Symbol: symbol, Name: symbol + " Test Corp", Sector: "TECHNOLOGY", Description: "Fixture company profile for " + symbol, PERatio: "20" });
+      if (kind === "NEWS_SENTIMENT")
+        return wrap({ feed: [{ title: "Fixture headline", url: "https://example.com/n", source: "Fixture", time_published: "20261105T120000", summary: "Test" }] });
+      return wrap({ annualReports: [{ fiscalDateEnding: "2025-12-31", reportedCurrency: "USD", totalRevenue: "1000" }] });
+    },
+    fetch_maritime: ({ id }) => ({
+      data: { features: Array.from({ length: 20 }, (_, i) => ({ attributes: { portid: id, date: new Date(Date.UTC(2026, 9, 1 + i)).toISOString().slice(0, 10), n_tanker: 10 + i, n_cargo: 5, n_total: 20, n_container: 1, n_dry_bulk: 2 } })) },
+      fetchedAt: Date.now() / 1000,
+      provider: "IMF PortWatch",
+    }),
+  };
+  window.__TAURI__ = {
+    core: {
+      invoke: async (cmd, args) => {
+        if (!handlers[cmd]) throw "Unsupported in fake backend: " + cmd;
+        return handlers[cmd](args || {});
+      },
+    },
+  };
+}
+async function liveFlow(browser, errors) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await context.addInitScript(fakeBackend);
+  const page = await context.newPage();
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto("http://127.0.0.1:1420");
+  await page.waitForSelector("h1:has-text('Connect your data')");
+  await page.fill("#key-twelve", "FAKEKEY1");
+  await page.fill("#key-alpha", "FAKEKEY2");
+  await page.fill("#key-fred", "FAKEKEY3");
+  await page.click('[data-action="setup-connect"]');
+  await page.waitForSelector(".watch-row");
+  await page.waitForFunction(() => document.querySelectorAll(".watch-row").length === 5);
+  if (!(await page.locator(".source-line").innerText()).includes("Twelve Data"))
+    throw Error("Prices did not come from the selected source");
+  await page.click('[data-page="Research"]');
+  await page.waitForSelector("text=Fixture company profile");
+  await page.waitForSelector("text=Fixture headline");
+  await page.waitForSelector("td:has-text('totalRevenue')");
+  await page.click('[data-page="Economy"]');
+  await page.waitForFunction(() => [...document.querySelectorAll(".macro-card strong")].every((x) => x.textContent === "4.10"));
+  await page.click('[data-page="Commodities"]');
+  await page.waitForSelector(".maritime-map");
+  await page.waitForFunction(() => document.body.innerText.includes("Retrieved"));
+  await page.fill("#search", "TSLA");
+  await page.press("#search", "Enter");
+  await page.waitForSelector("h2:has-text('TSLA')");
+  await page.reload();
+  await page.waitForSelector("h1");
+  if ((await page.locator("h1").innerText()).includes("Connect")) throw Error("Keys were not remembered");
+  await page.click('[data-page="Settings"]');
+  if ((await page.locator(".pill.on").count()) < 3) throw Error("Connected sources not shown");
+  await context.close();
+}
 const server = spawn(
   "node",
   ["node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", "1420"],
@@ -49,27 +133,6 @@ const server = spawn(
   await page.keyboard.press("Enter");
   if ((await page.locator("#graph-center").inputValue()) !== "broadcom")
     throw Error("Graph keyboard traversal failed");
-  const candidate = require("../src/data/relationships.json");
-  candidate.edges = [{ ...candidate.edges[0], id: "test-import" }];
-  await page.setInputFiles("#graph-import", {
-    name: "evidence.json",
-    mimeType: "application/json",
-    buffer: Buffer.from(JSON.stringify(candidate)),
-  });
-  await page.waitForSelector('[data-action="graph-review"]');
-  await page.selectOption("#graph-candidates", "reviewed");
-  if ((await page.locator(".evidence-card").count()) !== 1)
-    throw Error("Import self-certified review");
-  await page.selectOption("#graph-candidates", "all");
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.click('[data-action="graph-review"]');
-  await page.waitForFunction(
-    () => !document.querySelector('[data-action="graph-review"]'),
-  );
-  await page.reload();
-  await page.click('[data-page="Relationships"]');
-  if ((await page.locator(".evidence-card").count()) !== 4)
-    throw Error("Reviewed graph not persisted");
   await page.click('[data-page="Trade"]');
   await page.click('[data-action="buy"]');
   await page.waitForTimeout(100);
@@ -101,37 +164,27 @@ const server = spawn(
       .then((t) => t.includes("Triggered")))
   )
     throw Error("Alert not triggered");
-  await page.selectOption("#mode", "market");
-  await page.click('[data-page="Settings"]');
-  await page.fill("#import-symbol", "AAPL");
-  await page.setInputFiles("#csv-import", {
-    name: "prices.csv",
-    mimeType: "text/csv",
-    buffer: Buffer.from(
-      "date,open,high,low,close,volume\n2026-01-02,100,102,99,101,10000\n2026-01-05,101,104,100,103,20000",
-    ),
-  });
-  await page.waitForTimeout(200);
-  if (
-    !(await page
-      .locator(".source-line")
-      .innerText()
-      .then((t) => t.includes("User CSV")))
-  )
-    throw Error("Import failed");
-  await page.selectOption("#mode", "sample");
-  if (
-    await page
-      .locator(".source-line")
-      .innerText()
-      .then((t) => t.includes("User CSV"))
-  )
-    throw Error("Workspace contamination");
+  await page.click('[data-page="Valuation"]');
+  await page.fill("#terminal", "11");
+  await page.click('[data-action="dcf"]');
+  if (!(await page.locator("#dcf-results").innerText()).includes("discount rate above"))
+    throw Error("Invalid DCF assumptions not rejected");
+  await page.click('[data-page="Trade"]');
+  await page.fill("#fee", "2");
+  if (!(await page.locator("#order-total").innerText()).includes("$"))
+    throw Error("Order total did not compute");
+  // No upload controls anywhere outside the collapsed Advanced section.
+  for (const name of ["Overview", "Research", "Relationships", "Economy", "Commodities", "Settings"]) {
+    await page.click(`[data-page="${name}"]`);
+    if ((await page.locator('input[type="file"]:visible').count()) !== 0)
+      throw Error("Visible upload control on " + name);
+  }
+  await liveFlow(browser, errors);
   console.log(
     JSON.stringify({
       errors,
       result:
-        "UI navigation, graph traversal/import/review, trades, persistence, alerts, CSV import, sample isolation passed",
+        "UI navigation, graph traversal, trades, persistence, alerts, no uploads, first-run setup and automatic live loading passed",
     }),
   );
   await browser.close();

@@ -78,11 +78,11 @@ export function screenRows(assets, options = {}) {
     });
 }
 export function shade(v, key) {
-  if (v === null || !Number.isFinite(v)) return "#29353e";
+  if (v === null || !Number.isFinite(v)) return "#333333";
   const percent =
     key === "pe" ? Math.min(v / 60, 1) : Math.min(Math.abs(v) / 0.15, 1);
-  if (key === "pe") return `hsl(210 28% ${22 + percent * 18}%)`;
-  return `hsl(${v >= 0 ? 155 : 350} ${30 + percent * 20}% ${20 + percent * 13}%)`;
+  if (key === "pe") return `hsl(0 0% ${16 + percent * 22}%)`;
+  return `hsl(${v >= 0 ? 148 : 4} ${22 + percent * 28}% ${14 + percent * 16}%)`;
 }
 const e = (x) =>
   String(x ?? "").replace(

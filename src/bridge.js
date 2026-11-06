@@ -13,21 +13,25 @@ export async function save(state) {
   if (native) await invoke("save_state", { state });
   else localStorage.setItem("market-lens-v1", JSON.stringify(state));
 }
-export async function keys(alpha, fred) {
-  if (!native)
-    throw Error(
-      "API connections are available in the native desktop app. Browser preview is offline.",
-    );
-  await invoke("set_keys", { alpha, fred });
+// Which providers have a key. Never returns the keys themselves.
+export async function keyStatus() {
+  return native ? invoke("key_status") : null;
+}
+export async function saveKeys(keys) {
+  if (!native) throw Error("Live data connects in the desktop app.");
+  return invoke("set_keys", { keys });
+}
+export async function clearKey(provider) {
+  return invoke("clear_key", { provider });
 }
 export async function fetchData(provider, kind, symbol) {
-  if (!native)
-    throw Error(
-      "Run the Tauri desktop app to connect providers. You can import CSV data here.",
-    );
+  if (!native) throw Error("Live data connects in the desktop app.");
   return invoke("fetch_data", { provider, kind, symbol });
 }
-
+export async function fetchMaritime(id) {
+  if (!native) throw Error("Live data connects in the desktop app.");
+  return invoke("fetch_maritime", { id });
+}
 export async function nativeTrade(mode, order) {
   return invoke("paper_trade", { mode, order });
 }

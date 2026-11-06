@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-test("research, trading, persistence, imports, and workspace separation", async ({
+test("research, trading, persistence, and workspace separation", async ({
   page,
 }) => {
   const errors = [];
@@ -33,21 +33,14 @@ test("research, trading, persistence, imports, and workspace separation", async 
   await page.click('[data-action="alert-add"]');
   await expect(page.locator("tbody")).toContainText("Triggered");
   await page.selectOption("#mode", "market");
-  await page.click('[data-page="Settings"]');
-  await page.fill("#import-symbol", "AAPL");
-  await page.setInputFiles("#csv-import", {
-    name: "prices.csv",
-    mimeType: "text/csv",
-    buffer: Buffer.from(
-      "date,open,high,low,close,volume\n2026-01-02,100,102,99,101,10000\n2026-01-05,101,104,100,103,20000",
-    ),
-  });
-  await expect(page.locator(".source-line")).toContainText("User CSV");
+  await page.click('[data-page="Overview"]');
+  await expect(page.locator(".empty")).toContainText("desktop app");
   await page.click('[data-page="Trade"]');
-  await expect(page.locator("tbody")).not.toContainText("BUY");
+  await expect(page.locator("body")).not.toContainText("BUY");
   await page.selectOption("#mode", "sample");
   await expect(page.locator(".source-line")).toContainText("Synthetic");
   await expect(page.locator("tbody")).toContainText("BUY");
+  await expect(page.locator('input[type="file"]:visible')).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 test("DCF invalid assumptions and overspending are rejected", async ({

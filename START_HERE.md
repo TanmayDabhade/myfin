@@ -13,6 +13,6 @@ npm run tauri dev
 
 A native application window opens. For an installable application, run `npm run tauri build` on your own operating system.
 
-The sample workspace is synthetic and works without keys. Switch to **My market data**, then open **Settings** to import a CSV or add your free API keys. Download company statements/news individually from Research to conserve the free request budget.
+On first launch, paste your free Twelve Data, Alpha Vantage and/or FRED keys. They are saved, and data loads on its own from then on. Choose **Explore demo data** to look around without keys.
 
 Read `README.md` for provider setup, supported workflows, calculation assumptions, and current boundaries. Read `VALIDATION.md` for exactly what has and has not been tested.
