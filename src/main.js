@@ -5,6 +5,9 @@ import {
   validateGraph,
   mergeGraph,
   relationshipsView,
+  resolveCenter,
+  ensureCompany,
+  companyGroup,
 } from "./relationships.js";
 import {
   screenerView,
@@ -35,6 +38,9 @@ import {
   aisStart,
   aisStop,
   aisSnapshot,
+  quotesStart,
+  quotesStop,
+  quotesSnapshot,
   native,
   nativeTrade,
 } from "./bridge.js";
@@ -46,6 +52,7 @@ import {
   stale,
 } from "./sources.js";
 import { sample } from "./sample.js";
+import { applyTrade } from "./live.js";
 import {
   risk,
   equityCurve,
@@ -106,7 +113,31 @@ let state = migrate(await load()),
   statement = "INCOME_STATEMENT",
   period = "annualReports";
 let graphCenter = "apple",
-  graphCandidates = false;
+  graphCandidates = true,
+  graphTrail = ["apple"], // companies visited, for Back and the breadcrumb
+  graphSymbol = "AAPL", // ticker the explorer last followed
+  scanningId = null; // entity whose filings are being read right now
+const scanErrors = {};
+// Open a company in the explorer and remember the way back.
+function goToEntity(id) {
+  id = resolveCenter(graph(), id);
+  if (id === graphCenter) return;
+  graphCenter = id;
+  graphTrail = [...graphTrail.filter((x) => x !== id), id].slice(-12);
+}
+// Open the company behind a ticker, adding it in live mode so its filings
+// can be scanned. Returns false when there is nothing to show.
+function centerOnTicker(s, name) {
+  const g = graph();
+  const known = g.nodes.some((x) => x.ticker === s || x.parent?.endsWith(`(${s})`));
+  if (!known && !live()) return false;
+  const n = ensureCompany(g, s, name);
+  if (!n.cik && cikFor(s)) n.cik = cikFor(s);
+  graphSymbol = s;
+  goToEntity(n.id);
+  if (!known) persist();
+  return true;
+}
 state.sources ||= { prices: "twelve" };
 const lastError = {}; // provider -> latest failure message, shown in Settings
 const attempted = new Set(); // automatic loads tried this session
@@ -265,6 +296,13 @@ function change(a) {
   const b = a.bars;
   return b.length > 1 ? b.at(-1).close / b.at(-2).close - 1 : null;
 }
+// Price and change cells that the real-time stream updates in place.
+function livePrice(a) {
+  return `<span data-live-price="${esc(a.symbol)}">${money(price(a))}</span>`;
+}
+function liveChange(a, suffix = "") {
+  return `<span data-live-change="${esc(a.symbol)}" data-suffix="${esc(suffix)}" class="${tone(change(a))}">${pct(change(a))}${suffix}</span>`;
+}
 function tone(x) {
   return x >= 0 ? "up" : "down";
 }
@@ -324,7 +362,10 @@ function render() {
     Overview: overview,
     Research: research,
     Relationships: () =>
-      relationshipsView(graph(), graphCenter, graphCandidates) + filingScan(),
+      relationshipsView(graph(), graphCenter, graphCandidates, {
+        trail: graphTrail,
+        scanning: scanningId === graphCenter,
+      }) + filingScan(),
     Trade: trade,
     Portfolio: portfolioPage,
     Screener: screener,
@@ -334,19 +375,109 @@ function render() {
     Commodities: commodities,
     Settings: settings,
   };
-  const notice =
-    page === "Relationships"
-      ? "SOURCED RELATIONSHIPS · Dated historical disclosures. Coverage is limited; current status is unverified."
-      : state.mode === "sample"
-        ? "DEMO DATA · Prices and company metrics here are synthetic. Switch to Live data in the top right."
-        : "LIVE DATA · Daily prices from your connected sources. Paper trades only; no broker execution.";
+  const demo = page !== "Setup" && state.mode === "sample";
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="workspace-label">PERSONAL TERMINAL</div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⋈", "⇄", "◉", "☷", "ƒ", "◎", "◇", "≋", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><span class="dot ${live() ? "on" : ""}"></span>${native ? (live() ? "Live data" : "Demo data") : "Browser preview"}<small id="sync-status">${esc(syncText())}</small></div></aside><main><header><div class="breadcrumb">Workspace <span>/</span> ${page}</div><input id="search" placeholder="Ticker, e.g. AAPL — press Enter" aria-label="Search or add a ticker"><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></header>${page === "Setup" ? "" : `<div class="notice">${notice}</div>`}<section class="content"><div class="title-row"><div><p class="eyebrow">MARKET INTELLIGENCE / ${page === "Setup" ? "FIRST RUN" : page === "Relationships" ? "COMPANY RELATIONSHIPS" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<span class="tag">${assets().length} assets in workspace</span>`}</div>${views[page]()}</section><footer>Market Lens 0.2 · USD equity workspace · Daily, unadjusted prices · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="side-search"><input id="search" placeholder="${page === "Relationships" ? "Find a company…" : "Search ticker…"}" aria-label="Search or add a ticker" autocomplete="off" spellcheck="false"><kbd>↵</kbd></div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⋈", "⇄", "◉", "☷", "ƒ", "◎", "◇", "≋", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content"><div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Relationships" ? "COMPANY RELATIONSHIPS · DATED SOURCED DISCLOSURES" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>${views[page]()}</section><footer>Market Lens 0.2 · USD equity workspace · Daily prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
   bind();
   bindVessel();
   drawCharts();
   autoLoad();
   syncVesselStream();
+  syncPriceStream();
+}
+// ---- Real-time prices (Finnhub) -------------------------------------------
+let quoteTimer = null,
+  quoteSnap = null,
+  quoteError = "",
+  streamList = "";
+function streamSymbols() {
+  const map = activeMap();
+  return [...new Set([...state.watchlist, symbol, compare, ...state.alerts.filter((x) => x.mode === "market").map((x) => x.symbol)])]
+    .filter((s) => s && map[s])
+    .slice(0, 50);
+}
+function streamText() {
+  if (!live()) return "";
+  if (!hasKey("finnhub"))
+    return `<button class="stream-cta" data-action="goto-settings">Add a free Finnhub key for real-time prices</button>`;
+  const err = quoteError || quoteSnap?.error;
+  if (err) return `<span class="stream down" title="${esc(err)}">● ${esc(err.length > 48 ? err.slice(0, 47) + "…" : err)}</span>`;
+  const n = quoteSnap?.symbols?.length || 0;
+  if (!quoteSnap || ["connecting", "reconnecting"].includes(quoteSnap.status))
+    return `<span class="stream">● Connecting to real-time prices…</span>`;
+  const last = quoteSnap.lastMessage;
+  const recent = last && Date.now() / 1000 - last < 120;
+  return `<span class="stream ${recent ? "on" : ""}">● ${recent ? "Real-time" : "Streaming · no trades right now"} · ${n} symbol${n === 1 ? "" : "s"}${last ? " · " + new Date(last * 1000).toLocaleTimeString() : ""}</span>`;
+}
+function syncPriceStream() {
+  if (!live() || !hasKey("finnhub")) {
+    if (quoteTimer) {
+      clearInterval(quoteTimer);
+      quoteTimer = null;
+      quoteSnap = null;
+      streamList = "";
+      quotesStop().catch(() => {});
+    }
+    return;
+  }
+  const list = streamSymbols();
+  if (list.join(",") !== streamList) {
+    streamList = list.join(",");
+    quotesStart(list)
+      .then(() => (quoteError = ""))
+      .catch((e) => (quoteError = message(e)));
+  }
+  if (!quoteTimer) quoteTimer = setInterval(pollQuotes, 1000);
+}
+let chartPaintedAt = 0;
+async function pollQuotes() {
+  try {
+    quoteSnap = await quotesSnapshot();
+  } catch {
+    return;
+  }
+  const map = activeMap(),
+    changed = [];
+  if (live())
+    for (const [s, q] of Object.entries(quoteSnap.quotes || {}))
+      if (map[s] && applyTrade(map[s], q)) changed.push(s);
+  if (changed.length) paintLive(changed);
+  const el = $("#stream-status");
+  if (el) el.innerHTML = streamText();
+}
+// Update prices where they are shown, without re-rendering the page.
+function paintLive(symbols) {
+  const map = activeMap();
+  for (const s of symbols) {
+    const a = map[s];
+    document.querySelectorAll(`[data-live-price="${CSS.escape(s)}"]`).forEach((el) => {
+      const before = number(el.textContent.replace(/[$,]/g, ""));
+      el.textContent = money(price(a));
+      if (before != null && before !== price(a)) {
+        el.classList.remove("tick-up", "tick-down");
+        void el.offsetWidth; // restart the flash animation
+        el.classList.add(price(a) > before ? "tick-up" : "tick-down");
+      }
+    });
+    document.querySelectorAll(`[data-live-change="${CSS.escape(s)}"]`).forEach((el) => {
+      el.textContent = pct(change(a)) + (el.dataset.suffix || "");
+      el.className = tone(change(a));
+    });
+    document.querySelectorAll(`.heat[data-symbol="${CSS.escape(s)}"]`).forEach((el) => {
+      el.classList.remove("up", "down");
+      el.classList.add(tone(change(a)));
+      const span = el.querySelector("span");
+      if (span) span.textContent = pct(change(a));
+    });
+  }
+  // Redraw affected charts at most every 2 seconds, and never under the cursor.
+  if (Date.now() - chartPaintedAt > 2000) {
+    const hit = new Set(symbols);
+    if ([...document.querySelectorAll("[data-chart]")].some((el) => (hit.has(el.dataset.chart) || hit.has(compare)) && !el.matches(":hover"))) {
+      chartPaintedAt = Date.now();
+      drawCharts(hit);
+    }
+  }
 }
 function syncText() {
   if (syncLabel) return syncLabel;
@@ -377,19 +508,19 @@ function overview() {
     .map((a) =>
       stat(
         a.symbol,
-        money(price(a)),
-        `<span class="${tone(change(a))}">${pct(change(a))} last session</span>`,
+        livePrice(a),
+        liveChange(a, " vs prior close"),
       ),
     )
     .join(
       "",
-    )}</div><div class="grid main-grid"><section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${button("Research →", "research")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><section class="panel"><div class="panel-head"><h2>Watchlist</h2></div><div class="watch-add"><input id="watch-input" placeholder="Add ticker" maxlength="20" aria-label="Add ticker to watchlist">${button("Add", "watch-add")}</div>${
+    )}</div><div class="grid main-grid"><section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small><span class="head-price">${livePrice(a)}${liveChange(a)}</span></h2>${button("Research →", "research")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><section class="panel"><div class="panel-head"><h2>Watchlist</h2></div><div class="watch-add"><input id="watch-input" placeholder="Add ticker" maxlength="20" aria-label="Add ticker to watchlist">${button("Add", "watch-add")}</div>${
     state.watchlist
       .map((s) => all.find((a) => a.symbol === s))
       .filter(Boolean)
       .map(
         (a) =>
-          `<div class="watch-row">${ticker(a)}<div>${money(price(a))}<small class="${tone(change(a))}">${pct(change(a))}</small></div>${button("×", "watch-remove", "icon", `data-value="${esc(a.symbol)}"`)}</div>`,
+          `<div class="watch-row">${ticker(a)}<div>${livePrice(a)}<small>${liveChange(a)}</small></div>${button("×", "watch-remove", "icon", `data-value="${esc(a.symbol)}"`)}</div>`,
       )
       .join("") || empty("Add an asset to your watchlist.")
   }</section></div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Workspace performance map</h2><small>Last session · not the full market</small></div><div class="heatmap">${all.map((a) => `<button data-symbol="${a.symbol}" class="heat ${tone(change(a))}"><b>${a.symbol}</b><span>${pct(change(a))}</span><small>${esc(a.sector || "Unclassified")}</small></button>`).join("")}</div></section><section class="panel"><div class="panel-head"><h2>Movers in your universe</h2></div>${table(
@@ -399,7 +530,7 @@ function overview() {
       .slice(0, 5)
       .map(
         (a) =>
-          `<tr><td>${ticker(a)}</td><td>${money(price(a))}</td><td class="${tone(change(a))}">${pct(change(a))}</td></tr>`,
+          `<tr><td>${ticker(a)}</td><td>${livePrice(a)}</td><td>${liveChange(a)}</td></tr>`,
       ),
   )}</section></div>`;
 }
@@ -436,8 +567,9 @@ function chartTools() {
 function chart(a, id = "price-chart") {
   return `<div class="chart" id="${id}" data-chart="${esc(a.symbol)}"></div><div class="chart-legend">${compare ? "Comparison normalized to first common date · " : ""}Hover to inspect · mouse wheel to zoom · trade markers show executions</div>`;
 }
-function drawCharts() {
+function drawCharts(only) {
   document.querySelectorAll("[data-chart]").forEach((el) => {
+    if (only && ((!only.has(el.dataset.chart) && !only.has(compare)) || el.matches(":hover"))) return;
     const a = activeMap()[el.dataset.chart];
     let bars = a.bars.slice(-range);
     if (!bars.length) return;
@@ -559,7 +691,7 @@ function research() {
         : null;
   const news =
     state.mode === "market" ? state.datasets[`${symbol}:NEWS_SENTIMENT`] : null;
-  return `<section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small></h2>${state.mode === "market" ? button("Refresh", "research-refresh") : ""}${button("Supplier / customer graph", "graph-open")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || waiting("OVERVIEW", "the company profile"))}</p><div class="metrics"><span>Sector</span><b>${esc(a.sector || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div>${link("https://www.sec.gov/edgar/search/", "SEC filings search")}<p><small>Search company name or ticker on EDGAR. Metrics retain provider definitions and reported currencies.</small></p></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="8" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div><section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select></div>${
+  return `<section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small><span class="head-price">${livePrice(a)}${liveChange(a)}</span></h2>${state.mode === "market" ? button("Refresh", "research-refresh") : ""}${button("Supplier / customer graph", "graph-open")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || waiting("OVERVIEW", "the company profile"))}</p><div class="metrics"><span>Sector</span><b>${esc(a.sector || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div>${link("https://www.sec.gov/edgar/search/", "SEC filings search")}<p><small>Search company name or ticker on EDGAR. Metrics retain provider definitions and reported currencies.</small></p></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="8" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div><section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select></div>${
     data?.length
       ? table(
           ["Metric", ...data.slice(0, 4).map((r) => esc(r.fiscalDateEnding))],
@@ -678,16 +810,67 @@ function filingScan() {
       ? "Add your SEC contact email in Settings → Data sources to scan filings."
       : !n.ticker && !n.cik
         ? "This entity has no ticker or CIK to look up on EDGAR."
-        : "";
+        : scanErrors[n.id] || "";
   const list = (items) =>
     items?.length
       ? items.map((c) => `${esc(c.name)} <small>(${esc(c.role)})</small>`).join(", ")
       : "None";
-  return `<section class="panel"><div class="panel-head"><h2>Find suppliers & customers in SEC filings</h2>${blocker ? "" : button("Scan " + esc(n.name) + "'s annual reports", "sec-scan", "primary")}</div><p>Reads the two most recent annual reports (10-K or 20-F) on EDGAR, matches company names against SEC's company list, and adds sentences that name a supplier or customer as <b>unreviewed candidates</b>. Revenue shares are kept only when the same sentence discloses them. A candidate is not a relationship until you read the source and mark it reviewed.</p>${blocker ? `<p><b>${esc(blocker)}</b></p>` : ""}${
+  return `<section class="panel"><div class="panel-head"><h2>Find suppliers & customers in SEC filings</h2>${blocker && !scanErrors[n.id] ? "" : button((scan ? "Rescan " : "Scan ") + esc(n.name) + "'s annual reports", "sec-scan", scan ? "" : "primary")}</div><p>Reads the two most recent annual reports (10-K or 20-F) on EDGAR, matches company names against SEC's company list, and adds sentences that name a supplier or customer as <b>unreviewed candidates</b>. Revenue shares are kept only when the same sentence discloses them. A candidate is not a relationship until you read the source and mark it reviewed.</p>${blocker ? `<p><b>${esc(blocker)}</b></p>` : ""}${
     scan
       ? `<div class="metrics"><span>Latest report</span><b>${esc(scan.current.form)} filed ${esc(scan.current.filed)} · ${scan.current.count} mention${scan.current.count === 1 ? "" : "s"}</b><span>Prior report</span><b>${scan.prior ? `${esc(scan.prior.form)} filed ${esc(scan.prior.filed)} · ${scan.prior.count} mention${scan.prior.count === 1 ? "" : "s"}` : "None found"}</b><span>New since prior report</span><b>${scan.prior ? list(scan.added) : "—"}</b><span>No longer mentioned</span><b>${scan.prior ? list(scan.dropped) : "—"}</b></div><small>Scanned ${esc(scan.at)}. Mentions are matched names in sentences with supplier or customer wording; absence from a filing does not mean a relationship ended.</small>`
       : ""
   }</section>`;
+}
+// Read a company's two latest annual reports and add named suppliers and
+// customers as unreviewed candidates.
+async function scanFilings(id) {
+  const n = graph().nodes.find((x) => x.id === id);
+  if (!n) throw Error("Company not found");
+  scanningId = id;
+  refresh();
+  try {
+    const cik = n.cik ? padCIK(n.cik) : await resolveCIK(n.ticker);
+    const sub = (await fetchSEC("submissions", cik)).data;
+    const reports = annualReports(sub, 2);
+    if (!reports.length) throw Error(n.name + " has no 10-K or 20-F on EDGAR.");
+    const directory = buildDirectory((await fetchSEC("tickers")).data, graph());
+    // The company's own subsidiaries are not its suppliers or customers.
+    const filer = { cik, name: n.name, ticker: n.ticker, nodeId: n.id, skip: [...companyGroup(graph(), n.id)] };
+    const results = [];
+    for (const f of reports) {
+      const text = (await fetchSEC("document", cik, f.accession, f.doc)).data.text;
+      results.push({ filing: f, found: extractCandidates(text, directory, filer) });
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    let g = graph(),
+      added = 0;
+    for (const r of results) {
+      const out = candidatesToGraph(g, filer, r.filing, r.found, today);
+      g = out.graph;
+      added += out.added;
+    }
+    state.relationshipGraph = validateGraph(g);
+    graph().nodes.find((x) => x.id === n.id).cik ||= cik;
+    const label = (c) => ({ name: c.counterparty.name, role: c.role });
+    const cmp = results[1] ? compareMentions(results[0].found, results[1].found) : null;
+    const summary = (r) => r && { form: r.filing.form, filed: r.filing.filed, count: r.found.length };
+    (state.filingScans ||= {})[n.id] = {
+      at: today,
+      current: summary(results[0]),
+      prior: summary(results[1]),
+      added: cmp?.added.map(label) || [],
+      dropped: cmp?.dropped.map(label) || [],
+    };
+    delete scanErrors[n.id];
+    await persist();
+    return { found: results[0].found.length, added };
+  } catch (e) {
+    scanErrors[n.id] = "Couldn't scan filings: " + message(e);
+    throw e;
+  } finally {
+    scanningId = null;
+    refresh();
+  }
 }
 const loadErrors = {}; // dataset key -> message from the last failed load
 // What to show while a company dataset isn't loaded yet.
@@ -967,12 +1150,12 @@ function priceSelect() {
   return `<label>Prices from<select id="price-source">${priceProviders.map((p) => `<option value="${p}" ${state.sources.prices === p ? "selected" : ""}>${providers[p].name}${hasKey(p) ? "" : " (no key)"}</option>`).join("")}</select></label>`;
 }
 function setup() {
-  return `<section class="panel setup"><p>Paste your free API keys once. They are saved on this computer, in a file only your user account can read, and the app loads data on its own from then on. One key is enough to start; all three gives you everything.</p>${["twelve", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, true)).join("")}${priceSelect()}<div class="setup-actions">${button("Connect and load data", "setup-connect", "primary")}${button("Explore demo data instead", "setup-demo")}</div><small>Shipping activity (IMF PortWatch) needs no key. Recommended: Twelve Data for prices, Alpha Vantage for company research, FRED for the economy.</small></section>`;
+  return `<section class="panel setup"><p>Paste your free API keys once. They are saved on this computer, in a file only your user account can read, and the app loads data on its own from then on. One key is enough to start; all three gives you everything.</p>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, true)).join("")}${priceSelect()}<div class="setup-actions">${button("Connect and load data", "setup-connect", "primary")}${button("Explore demo data instead", "setup-demo")}</div><small>Shipping activity (IMF PortWatch) needs no key. Recommended: Twelve Data for price history, Finnhub for real-time prices, Alpha Vantage for company research, FRED for the economy.</small></section>`;
 }
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}<div class="source-row"><div class="source-info"><h3>IMF PortWatch <span class="pill on">No key needed</span></h3><small>Daily port calls and chokepoint transits</small></div></div>${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series and PortWatch shipping activity. Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}<div class="source-row"><div class="source-info"><h3>IMF PortWatch <span class="pill on">No key needed</span></h3><small>Daily port calls and chokepoint transits</small></div></div>${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series and PortWatch shipping activity. Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in market-lens.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -1031,8 +1214,9 @@ async function loadPrices(s) {
       name: prev.name || s,
       bars,
       origin: p,
-      source: providers[p].name + " · daily" + (d.stale ? " · STALE" : ""),
+      source: providers[p].name + " · daily" + (d.stale ? " · STALE" : "") + (hasKey("finnhub") ? " · real-time trades from Finnhub" : ""),
       fetchedAt: d.fetchedAt,
+      live: undefined,
     };
     delete loadErrors["prices:" + s];
     if (d.warning) lastError[p] = d.warning;
@@ -1109,6 +1293,11 @@ function autoLoad() {
     const s = a.symbol;
     once("sec:" + s, () => loadSEC(s));
   }
+  if (page === "Relationships" && hasKey("sec")) {
+    const n = graph().nodes.find((x) => x.id === graphCenter);
+    if (n && (n.ticker || n.cik) && !state.filingScans?.[n.id])
+      once("scan:" + n.id, () => scanFilings(n.id));
+  }
   if (page === "Economy" && hasKey("fred"))
     for (const id of Object.keys(macroSeries))
       if (stale(state.macro[id], 43200)) once("fred:" + id, () => loadMacro(id));
@@ -1168,9 +1357,21 @@ async function addTicker(s, openResearch) {
 }
 function bind() {
   const recenter = (id) => {
-    graphCenter = id;
+    goToEntity(id);
     render();
   };
+  // Highlight a company's links while the pointer is over it.
+  document.querySelectorAll(".g-node:not(.center)").forEach((el) => {
+    const svg = el.ownerSVGElement;
+    el.onmouseenter = () => {
+      svg.classList.add("hovering");
+      svg.querySelectorAll(`[data-edge-for="${CSS.escape(el.dataset.entity)}"]`).forEach((p) => p.classList.add("hot"));
+    };
+    el.onmouseleave = () => {
+      svg.classList.remove("hovering");
+      svg.querySelectorAll(".hot").forEach((p) => p.classList.remove("hot"));
+    };
+  });
   document.querySelectorAll("[data-entity]").forEach((el) => {
     el.onclick = () => recenter(el.dataset.entity);
     el.onkeydown = (event) => {
@@ -1245,6 +1446,11 @@ function bind() {
     (el) =>
       (el.onclick = () => {
         page = el.dataset.page;
+        // The explorer follows the company you were last looking at.
+        if (page === "Relationships" && symbol !== graphSymbol) {
+          const a = activeMap()[symbol];
+          if (!centerOnTicker(symbol, a?.overview?.Name)) graphSymbol = symbol;
+        }
         render();
       }),
   );
@@ -1292,7 +1498,15 @@ function bind() {
     };
   $("#search").onkeydown = (e) => {
     if (e.key === "Enter") {
-      const q = e.target.value.toUpperCase(),
+      const q = e.target.value.trim().toUpperCase();
+      if (page === "Relationships" && q) {
+        const hit = graph().nodes.find((n) => n.ticker === q || n.name.toUpperCase().includes(q));
+        if (hit) goToEntity(hit.id);
+        else if (!centerOnTicker(q)) return notify("No relationship coverage for " + q + " in demo data.", true);
+        e.target.value = "";
+        return render();
+      }
+      const
         a =
           assets().find((a) => a.symbol === q) ||
           assets().find((a) => a.name.toUpperCase().includes(q));
@@ -1386,62 +1600,31 @@ async function action(act, value) {
   switch (act) {
     case "graph-open": {
       const a = asset();
-      let entity = graph().nodes.find((n) => n.ticker === a?.symbol);
-      if (!entity && a && state.mode === "market") {
-        // Start an entity for this ticker so its filings can be scanned.
-        entity = { id: "t-" + a.symbol.toLowerCase().replace(/[^a-z0-9]/g, "-"), name: a.overview?.Name || state.secData?.[a.symbol]?.name || a.symbol, ticker: a.symbol };
-        if (cikFor(a.symbol)) entity.cik = cikFor(a.symbol);
-        graph().nodes.push(entity);
-        await persist();
-      }
-      if (!entity) {
+      if (!a || !centerOnTicker(a.symbol, a.overview?.Name || state.secData?.[a.symbol]?.name)) {
         notify("No relationship coverage for this ticker in demo data.", true);
         break;
       }
-      graphCenter = entity.id;
       page = "Relationships";
       render();
       break;
     }
-    case "sec-scan": {
-      const n = graph().nodes.find((x) => x.id === graphCenter) || graph().nodes[0];
-      if (!hasKey("sec")) throw Error("Add your SEC contact email in Settings → Data sources first.");
-      const cik = n.cik ? padCIK(n.cik) : await resolveCIK(n.ticker);
-      notify("Reading " + n.name + "'s annual reports on EDGAR…");
-      const sub = (await fetchSEC("submissions", cik)).data;
-      const reports = annualReports(sub, 2);
-      if (!reports.length) throw Error(n.name + " has no 10-K or 20-F on EDGAR.");
-      const directory = buildDirectory((await fetchSEC("tickers")).data, graph());
-      const filer = { cik, name: n.name, ticker: n.ticker, nodeId: n.id };
-      const results = [];
-      for (const f of reports) {
-        const text = (await fetchSEC("document", cik, f.accession, f.doc)).data.text;
-        results.push({ filing: f, found: extractCandidates(text, directory, filer) });
+    case "graph-back":
+      if (graphTrail.length > 1) {
+        graphTrail = graphTrail.slice(0, -1);
+        graphCenter = graphTrail.at(-1);
+        render();
       }
-      const today = new Date().toISOString().slice(0, 10);
-      let g = graph(),
-        added = 0;
-      for (const r of results) {
-        const out = candidatesToGraph(g, filer, r.filing, r.found, today);
-        g = out.graph;
-        added += out.added;
-      }
-      state.relationshipGraph = validateGraph(g);
-      graph().nodes.find((x) => x.id === n.id).cik ||= cik;
-      const label = (c) => ({ name: c.counterparty.name, role: c.role });
-      const cmp = results[1] ? compareMentions(results[0].found, results[1].found) : null;
-      const summary = (r) => r && { form: r.filing.form, filed: r.filing.filed, count: r.found.length };
-      (state.filingScans ||= {})[n.id] = {
-        at: today,
-        current: summary(results[0]),
-        prior: summary(results[1]),
-        added: cmp?.added.map(label) || [],
-        dropped: cmp?.dropped.map(label) || [],
-      };
-      graphCandidates = true;
-      await persist();
+      break;
+    case "graph-crumb":
+      graphTrail = graphTrail.slice(0, +value + 1);
+      graphCenter = graphTrail.at(-1);
       render();
-      notify(`Found ${results[0].found.length} candidate mention(s) in the latest report; ${added} new to the graph. Review each source before relying on it.`);
+      break;
+    case "sec-scan": {
+      if (!hasKey("sec")) throw Error("Add your SEC contact email in Settings → Data sources first.");
+      notify("Reading annual reports on EDGAR…");
+      const r = await scanFilings(graphCenter);
+      notify(`Found ${r.found} candidate mention(s) in the latest report; ${r.added} new to the graph. Review each source before relying on it.`);
       break;
     }
     case "graph-export":
@@ -1581,11 +1764,16 @@ async function action(act, value) {
     case "setup-connect":
     case "keys-save": {
       const entered = Object.fromEntries(
-        ["twelve", "alpha", "fred", "ais", "sec"].map((p) => [p, $("#key-" + p).value.trim()]),
+        ["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => [p, $("#key-" + p).value.trim()]),
       );
       if (act === "setup-connect" && !Object.values(entered).some(Boolean))
         throw Error("Paste at least one API key, or explore the demo data.");
       keyInfo = await saveKeys(entered);
+      if (entered.finnhub) {
+        // Reconnect the price stream with the new key.
+        streamList = quoteError = "";
+        await quotesStop().catch(() => {});
+      }
       state.sources.prices = $("#price-source").value;
       for (const p of Object.keys(entered)) if (entered[p]) delete lastError[p];
       attempted.clear();

@@ -16,7 +16,7 @@ function fakeBackend() {
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
       const k = store("native-keys") || {};
-      return Object.fromEntries(["alpha", "twelve", "fred", "sec", "ais"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
+      return Object.fromEntries(["alpha", "twelve", "fred", "sec", "ais", "finnhub"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
     },
     set_keys: ({ keys }) => {
       const k = store("native-keys") || {};
@@ -38,6 +38,25 @@ function fakeBackend() {
     ais_start: ({ area }) => {
       if (!(store("native-keys") || {}).ais) throw "No AISStream key";
       window.__aisArea = area;
+    },
+    quotes_start: ({ symbols }) => {
+      if (!(store("native-keys") || {}).finnhub) throw "No Finnhub key";
+      window.__quoteSymbols = symbols;
+    },
+    quotes_stop: () => {
+      window.__quoteSymbols = [];
+    },
+    // A price that moves every second, like a real trade feed.
+    quotes_snapshot: () => {
+      const now = Date.now();
+      const symbols = window.__quoteSymbols || [];
+      return {
+        status: "live",
+        error: "",
+        lastMessage: now / 1000,
+        symbols,
+        quotes: Object.fromEntries(symbols.map((s) => [s, { price: 150 + (Math.floor(now / 1000) % 7), time: now }])),
+      };
     },
     ais_stop: () => {
       window.__aisArea = null;
@@ -110,11 +129,22 @@ async function liveFlow(browser, errors) {
   await page.fill("#key-fred", "FAKEKEY3");
   await page.fill("#key-sec", "analyst@example.com");
   await page.fill("#key-ais", "FAKEKEY4");
+  await page.fill("#key-finnhub", "FAKEKEY5");
   await page.click('[data-action="setup-connect"]');
   await page.waitForSelector(".watch-row");
   await page.waitForFunction(() => document.querySelectorAll(".watch-row").length === 5);
   if (!(await page.locator(".source-line").innerText()).includes("Twelve Data"))
     throw Error("Prices did not come from the selected source");
+  // Real-time prices update in place, without a refresh or re-render.
+  await page.waitForSelector("#stream-status .stream.on");
+  const firstRow = await page.locator(".watch-row").first().elementHandle();
+  const before = await page.locator('.watch-row [data-live-price]').first().innerText();
+  await page.waitForFunction(
+    (b) => document.querySelector(".watch-row [data-live-price]").innerText !== b,
+    before,
+    { timeout: 5000 },
+  );
+  if (!(await firstRow.evaluate((el) => el.isConnected))) throw Error("Live tick re-rendered the page");
   await page.click('[data-page="Research"]');
   await page.waitForSelector("text=Fixture company profile");
   await page.waitForSelector("text=Fixture headline");
@@ -122,7 +152,7 @@ async function liveFlow(browser, errors) {
   await page.waitForSelector("h2:has-text('CIK 0000320193')");
   if (!(await page.locator("body").innerText()).includes("10.00%")) throw Error("SEC revenue growth missing");
   await page.click('[data-action="graph-open"]');
-  await page.click('[data-action="sec-scan"]');
+  // Opening a company scans its filings without a click.
   await page.waitForSelector("text=New since prior report");
   const scanText = await page.locator("body").innerText();
   if (!scanText.includes("Named as supplier in filing (candidate)")) throw Error("Scan candidate missing");
@@ -191,14 +221,24 @@ const server = spawn(
   await page.click('[data-action="graph-open"]');
   if ((await page.locator(".evidence-card").count()) !== 3)
     throw Error("Apple neighborhood absent");
-  await page.click('[data-entity="td-synnex"]');
+  await page.click('g[data-entity="td-synnex"]');
   if ((await page.locator(".evidence-card").count()) !== 4)
     throw Error("Graph recenter failed");
   await page.selectOption("#graph-center", "apple");
-  await page.locator('[data-entity="broadcom"]').focus();
+  await page.locator('g[data-entity="broadcom"]').focus();
   await page.keyboard.press("Enter");
   if ((await page.locator("#graph-center").inputValue()) !== "broadcom")
     throw Error("Graph keyboard traversal failed");
+  // A subsidiary opens its listed parent; Back returns to the previous company.
+  await page.selectOption("#graph-center", "apple");
+  await page.click('g[data-entity="qualcomm-tech"]');
+  if ((await page.locator("#graph-center").inputValue()) !== "t-qcom")
+    throw Error("Subsidiary did not open its parent company");
+  if (!(await page.locator(".evidence-card").first().innerText()).includes("Qualcomm Technologies"))
+    throw Error("Parent view lost the subsidiary's evidence");
+  await page.click('[data-action="graph-back"]');
+  if ((await page.locator("#graph-center").inputValue()) !== "apple" || (await page.locator(".evidence-card").count()) !== 3)
+    throw Error("Back did not restore Apple's relationships");
   await page.click('[data-page="Trade"]');
   await page.click('[data-action="buy"]');
   await page.waitForTimeout(100);

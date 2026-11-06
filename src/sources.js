@@ -8,6 +8,12 @@ export const providers = {
     limits: "Free plan: 800 requests/day, 8/minute",
     keyURL: "https://twelvedata.com/register",
   },
+  finnhub: {
+    name: "Finnhub",
+    provides: "Real-time US stock trades, streamed live while the app is open",
+    limits: "Free plan: up to 50 symbols streaming at once",
+    keyURL: "https://finnhub.io/register",
+  },
   alpha: {
     name: "Alpha Vantage",
     provides: "Company fundamentals, statements, news, earnings; prices",

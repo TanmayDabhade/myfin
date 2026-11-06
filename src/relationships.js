@@ -91,18 +91,55 @@ export function validateGraph(g, { imported = false } = {}) {
   }
   return g;
 }
+// A subsidiary listed without its own ticker, e.g. parent "Qualcomm
+// Incorporated (QCOM)", belongs to that listed parent.
+export function parentTicker(node) {
+  return node?.ticker ? "" : node?.parent?.match(/\(([A-Z][A-Z0-9.]{0,9})\)\s*$/)?.[1] || "";
+}
+// Entity IDs shown together as one company: the entity plus any subsidiaries
+// whose parent ticker is the entity's ticker.
+export function companyGroup(graph, center) {
+  const n = graph.nodes.find((x) => x.id === center);
+  if (!n) return new Set([center]);
+  return new Set([
+    n.id,
+    ...(n.ticker ? graph.nodes.filter((x) => parentTicker(x) === n.ticker).map((x) => x.id) : []),
+  ]);
+}
+// The listed company for a ticker, created if the graph doesn't have it yet.
+// Returns the node; mutates graph.nodes when adding one.
+export function ensureCompany(graph, ticker, name) {
+  let n = graph.nodes.find((x) => x.ticker === ticker);
+  if (n) return n;
+  const sub = graph.nodes.find((x) => parentTicker(x) === ticker);
+  n = {
+    id: "t-" + ticker.toLowerCase().replace(/[^a-z0-9]/g, "-"),
+    name: name || sub?.parent.replace(/\s*\([^)]*\)\s*$/, "") || ticker,
+    ticker,
+  };
+  graph.nodes.push(n);
+  return n;
+}
+// Where clicking an entity should land: a subsidiary without a ticker opens
+// its listed parent, so the whole company's relationships show together.
+export function resolveCenter(graph, id) {
+  const n = graph.nodes.find((x) => x.id === id);
+  const t = parentTicker(n);
+  return t ? ensureCompany(graph, t).id : id;
+}
 export function neighborhood(
   graph,
   center,
   { includeUnreviewed = false, asOf = "9999-12-31" } = {},
 ) {
+  const group = companyGroup(graph, center);
   const valid = graph.edges.filter(
     (a) =>
       (includeUnreviewed || a.review === "reviewed") && a.observedOn <= asOf,
   );
   return {
-    suppliers: valid.filter((a) => a.customer === center),
-    customers: valid.filter((a) => a.supplier === center),
+    suppliers: valid.filter((a) => group.has(a.customer) && !group.has(a.supplier)),
+    customers: valid.filter((a) => group.has(a.supplier) && !group.has(a.customer)),
   };
 }
 export function mergeGraph(existing, incoming) {
@@ -124,42 +161,97 @@ export function mergeGraph(existing, incoming) {
   }
   return validateGraph(merged);
 }
+const short = (x, n) => (x.length > n ? x.slice(0, n - 1) + "…" : x);
+// One graph node per counterparty, however many evidence records link them.
+function counterparties(edges, side, group, nodeMap) {
+  const by = new Map();
+  for (const a of edges) {
+    const other = side === "supplier" ? a.supplier : a.customer;
+    const own = side === "supplier" ? a.customer : a.supplier;
+    const entry = by.get(other) || { entity: nodeMap[other], edges: [], via: new Set() };
+    entry.edges.push(a);
+    if (group.size > 1) entry.via.add(own);
+    by.set(other, entry);
+  }
+  return [...by.values()]
+    .filter((x) => x.entity)
+    .map((x) => ({ ...x, reviewed: x.edges.some((a) => a.review === "reviewed") }))
+    .sort((a, b) => b.reviewed - a.reviewed || b.edges.length - a.edges.length || a.entity.name.localeCompare(b.entity.name));
+}
+const MAX_PER_SIDE = 14;
 export function relationshipsView(
   graph,
   center = "apple",
   showCandidates = false,
+  { trail = [], scanning = false } = {},
 ) {
   const n = graph.nodes.find((x) => x.id === center) || graph.nodes[0];
   if (!n) return '<div class="empty">No entities. Import a graph.</div>';
-  const around = neighborhood(graph, n.id, {
-    includeUnreviewed: showCandidates,
-  });
+  const around = neighborhood(graph, n.id, { includeUnreviewed: showCandidates });
+  const group = companyGroup(graph, n.id);
   const nodeMap = Object.fromEntries(graph.nodes.map((x) => [x.id, x]));
   const all = [...around.suppliers, ...around.customers];
-  const height = Math.max(
-    320,
-    Math.max(around.suppliers.length, around.customers.length) * 90 + 80,
-  );
-  const centerY = height / 2;
-  const lines = [];
-  const node = (entity, x, y, edge) =>
-    `<g role="button" tabindex="0" data-entity="${e(entity.id)}" aria-label="Explore ${e(entity.name)}"><rect x="${x}" y="${y - 27}" width="210" height="54" rx="8" fill="${entity.id === n.id ? "#4b4b4b" : "#2c2c2c"}" stroke="#747474"/><text x="${x + 12}" y="${y - 6}" fill="#f3f3f3" font-size="12">${e(entity.name.length > 27 ? entity.name.slice(0, 25) + "…" : entity.name)}</text><text x="${x + 12}" y="${y + 14}" fill="#b9b9b9" font-size="10">${e(entity.ticker || entity.parent || "Entity")} ${edge?.review === "unreviewed" ? "· CANDIDATE" : ""}</text><title>${e(entity.name)}${edge ? " · " + e(edge.relationship) + " · " + e(edge.observedOn) : ""}</title></g>`;
-  const branch = (edges, left) =>
-    edges
-      .map((a, i) => {
-        const y = 70 + i * 90;
-        lines.push(
-          `<path d="M${left ? 230 : 560},${left ? y : centerY} C${left ? 290 : 620},${left ? y : centerY} ${left ? 290 : 620},${left ? centerY : y} ${left ? 350 : 680},${left ? centerY : y}" fill="none" stroke="${a.review === "reviewed" ? "#b1b1b1" : "#b8b8b8"}" stroke-width="1.5" ${a.review === "unreviewed" ? 'stroke-dasharray="5 4"' : ""} marker-end="url(#edge-arrow)"/>`,
-        );
-        return node(
-          nodeMap[left ? a.supplier : a.customer],
-          left ? 20 : 680,
-          y,
-          a,
-        );
-      })
-      .join("");
-  const suppliers = branch(around.suppliers, true),
-    customers = branch(around.customers, false);
-  return `<section class="panel"><div class="panel-head"><h2>Company relationship explorer</h2><span class="tag">DATED PRIMARY-SOURCE DISCLOSURES</span><button data-action="graph-export">Export evidence graph</button></div><div class="filters"><label>Company<select id="graph-center">${graph.nodes.map((x) => `<option value="${e(x.id)}" ${x.id === n.id ? "selected" : ""}>${e(x.name)} ${e(x.ticker || "")}</option>`).join("")}</select></label><label>Evidence filter<select id="graph-candidates"><option value="reviewed" ${!showCandidates ? "selected" : ""}>Reviewed historical disclosures</option><option value="all" ${showCandidates ? "selected" : ""}>Include unreviewed claims</option></select></label></div><p>Click a company to recenter and explore another tier. A reviewed source establishes what was disclosed on its date; it does not establish that the relationship is still active. This is a small curated evidence set, not comprehensive coverage.</p><div class="relationship-graph"><svg viewBox="0 0 920 ${height}" role="group" aria-label="Suppliers to ${e(n.name)} to customers"><defs><marker id="edge-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#b1b1b1"/></marker></defs><text x="20" y="22" fill="#acacac">SUPPLIERS →</text><text x="350" y="22" fill="#acacac">SELECTED COMPANY</text><text x="680" y="22" fill="#acacac">→ CUSTOMERS / DISTRIBUTORS</text>${lines.join("")}${suppliers}${customers}${node(n, 350, centerY)}</svg></div>${!all.length ? '<div class="empty">No reviewed relationships in this dataset. This does not mean the company has no suppliers or customers.</div>' : ""}<div class="stats"><div class="stat"><span>Supplier evidence records</span><strong>${around.suppliers.length}</strong></div><div class="stat"><span>Customer evidence records</span><strong>${around.customers.length}</strong></div><div class="stat"><span>Unreviewed records in dataset</span><strong>${graph.edges.filter((x) => x.review !== "reviewed").length}</strong></div><div class="stat"><span>Concentration evidence</span><strong>${all.filter((a) => a.revenueShare != null).length} disclosed</strong><small>No inferred weights</small></div></div></section><section class="panel"><div class="panel-head"><h2>Evidence & relationship details</h2></div>${all.map((a) => `<article class="evidence-card"><div class="panel-head"><h3>${e(nodeMap[a.supplier].name)} → ${e(nodeMap[a.customer].name)}</h3><span class="tag">${a.review === "reviewed" ? "HISTORICAL DISCLOSURE" : "UNREVIEWED CLAIM"}</span></div><p><b>${e(a.relationship)}</b> · ${e(a.product || "Product not specified")}</p><p>${e(a.evidence)}</p><div class="metrics"><span>Disclosure date</span><b>${e(a.observedOn)}</b><span>Reporting period</span><b>${e(a.reportingPeriod || "Not specified")}</b><span>Source retrieved</span><b>${e(a.retrievedOn || "Not recorded")}</b><span>Evidence reviewed</span><b>${e(a.reviewedOn || "Pending")}</b><span>Revenue concentration</span><b>${a.revenueShare == null ? "Not disclosed" : (a.revenueShare * 100).toFixed(1) + "% · " + e(a.revenuePeriod) + " · " + e(a.revenueBasis)}</b><span>Current relationship status</span><b>Not independently verified</b></div><a href="${e(a.sourceURL)}" target="_blank" rel="noreferrer">${e(a.sourceTitle || "Open evidence source")} ↗</a>${a.review !== "reviewed" ? `<button data-action="graph-review" data-value="${e(a.id)}">Mark source reviewed</button>` : ""}</article>`).join("") || "<p>No evidence to display for this entity.</p>"}</section><section class="panel"><h2>Coverage and interpretation</h2><p>Edges run from the legal entity identified as supplier to the customer or distributor. Listed parent tickers are context, not a claim that the parent directly signed the agreement. No unnamed customers are assigned identities. Procurement values, revenue shares and relationship strength are unknown unless explicitly sourced.</p><small>Seed sources: Apple/Broadcom announcement (2023), Qualcomm Technologies/Apple announcement (2023), TD SYNNEX FY2024 annual report.</small></section>`;
+  const sup = counterparties(around.suppliers, "supplier", group, nodeMap);
+  const cus = counterparties(around.customers, "customer", group, nodeMap);
+  const shownSup = sup.slice(0, MAX_PER_SIDE),
+    shownCus = cus.slice(0, MAX_PER_SIDE);
+  const ROW = 66,
+    TOP = 56,
+    W = 220;
+  const rows = Math.max(shownSup.length, shownCus.length, 1) + (Math.max(sup.length, cus.length) > MAX_PER_SIDE ? 1 : 0);
+  const height = Math.max(260, rows * ROW + TOP + 20);
+  const cy = TOP + (height - TOP - 20) / 2;
+  const colX = { sup: 20, mid: 370, cus: 720 };
+  const yFor = (i, count) => {
+    const block = count * ROW;
+    return TOP + (height - TOP - 20 - block) / 2 + i * ROW + ROW / 2;
+  };
+  const sublabel = (entity) => entity.ticker || parentTicker(entity) || "Private / unlisted";
+  const card = (c, x, y, side) => {
+    const entity = c.entity;
+    const candidate = !c.reviewed;
+    const via = [...c.via].filter((v) => v !== n.id).map((v) => nodeMap[v]?.name).filter(Boolean);
+    const meta = `${sublabel(entity)}${via.length ? " · via " + via[0].replace(/,? (Inc|Corp|Corporation|Ltd)\.?$/, "") : ""}${c.edges.length > 1 ? ` · ${c.edges.length} sources` : ""}${candidate ? " · candidate" : ""}`;
+    const tip = `${entity.name}${via.length ? " · via " + via.join(", ") : ""}\n${c.edges.map((a) => `${a.relationship} · ${a.observedOn}`).join("\n")}`;
+    return `<g class="g-node ${side}${candidate ? " candidate" : ""}" role="button" tabindex="0" data-entity="${e(entity.id)}" aria-label="Explore ${e(entity.name)}"><rect x="${x}" y="${y - 24}" width="${W}" height="48" rx="10"/><text class="g-name" x="${x + 14}" y="${y - 3}">${e(short(entity.name, 28))}</text><text class="g-meta" x="${x + 14}" y="${y + 14}">${e(short(meta, 36))}</text><title>${e(tip)}</title></g>`;
+  };
+  const edgePath = (c, y, side) => {
+    const cls = `g-edge${c.reviewed ? "" : " candidate"}`;
+    const [x1, y1, x2, y2] = side === "sup" ? [colX.sup + W, y, colX.mid, cy] : [colX.mid + W, cy, colX.cus, y];
+    const mx = (x1 + x2) / 2;
+    return `<path class="${cls}" data-edge-for="${e(c.entity.id)}" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 6},${y2}" marker-end="url(#edge-arrow)"/>`;
+  };
+  const side = (list, full, key) => {
+    const paths = [],
+      cards = [];
+    list.forEach((c, i) => {
+      const y = yFor(i, list.length + (full.length > list.length ? 1 : 0));
+      paths.push(edgePath(c, y, key));
+      cards.push(card(c, colX[key], y, key));
+    });
+    if (full.length > list.length) {
+      const y = yFor(list.length, list.length + 1);
+      cards.push(`<text class="g-more" x="${colX[key] + 14}" y="${y + 4}">+${full.length - list.length} more · see evidence below</text>`);
+    }
+    return { paths: paths.join(""), cards: cards.join("") };
+  };
+  const left = side(shownSup, sup, "sup"),
+    right = side(shownCus, cus, "cus");
+  const subs = [...group].filter((id) => id !== n.id).map((id) => nodeMap[id]?.name).filter(Boolean);
+  const centerCard = `<g class="g-node center" role="button" tabindex="0" data-entity="${e(n.id)}" aria-label="${e(n.name)} (selected)"><rect x="${colX.mid}" y="${cy - 34}" width="${W}" height="68" rx="12"/><text class="g-name" x="${colX.mid + 16}" y="${cy - 9}">${e(short(n.name, 27))}</text><text class="g-meta" x="${colX.mid + 16}" y="${cy + 10}">${e(sublabel(n))}</text><text class="g-meta" x="${colX.mid + 16}" y="${cy + 25}">${sup.length} supplier${sup.length === 1 ? "" : "s"} · ${cus.length} customer${cus.length === 1 ? "" : "s"}</text><title>${e(n.name)}${subs.length ? " · includes " + e(subs.join(", ")) : ""}</title></g>`;
+  const crumbs = trail
+    .map((id, i) => nodeMap[id])
+    .map((x, i) =>
+      x
+        ? i === trail.length - 1
+          ? `<span class="crumb current" aria-current="page">${e(short(x.name, 24))}</span>`
+          : `<button class="crumb" data-action="graph-crumb" data-value="${i}">${e(short(x.name, 24))}</button>`
+        : "",
+    )
+    .join('<span class="crumb-sep">›</span>');
+  const sorted = [...graph.nodes].sort((a, b) => a.name.localeCompare(b.name));
+  const card2 = (a) => `<article class="evidence-card${a.review === "reviewed" ? "" : " candidate"}"><div class="panel-head"><h3><button class="link-button" data-entity="${e(a.supplier)}">${e(nodeMap[a.supplier].name)}</button> → <button class="link-button" data-entity="${e(a.customer)}">${e(nodeMap[a.customer].name)}</button></h3><span class="tag">${a.review === "reviewed" ? "HISTORICAL DISCLOSURE" : "UNREVIEWED CLAIM"}</span></div><p><b>${e(a.relationship)}</b> · ${e(a.product || "Product not specified")}</p><p>${e(a.evidence)}</p><div class="metrics"><span>Disclosure date</span><b>${e(a.observedOn)}</b><span>Reporting period</span><b>${e(a.reportingPeriod || "Not specified")}</b><span>Source retrieved</span><b>${e(a.retrievedOn || "Not recorded")}</b><span>Evidence reviewed</span><b>${e(a.reviewedOn || "Pending")}</b><span>Revenue concentration</span><b>${a.revenueShare == null ? "Not disclosed" : (a.revenueShare * 100).toFixed(1) + "% · " + e(a.revenuePeriod) + " · " + e(a.revenueBasis)}</b><span>Current relationship status</span><b>Not independently verified</b></div><a href="${e(a.sourceURL)}" target="_blank" rel="noreferrer">${e(a.sourceTitle || "Open evidence source")} ↗</a>${a.review !== "reviewed" ? `<button data-action="graph-review" data-value="${e(a.id)}">Mark source reviewed</button>` : ""}</article>`;
+  const evidence = (title, list) =>
+    list.length ? `<h3 class="evidence-group">${title} <small>${list.length}</small></h3>${list.map(card2).join("")}` : "";
+  return `<section class="panel graph-panel"><div class="graph-toolbar"><button class="icon-btn" data-action="graph-back" ${trail.length < 2 ? "disabled" : ""} aria-label="Back to previous company">←</button><div class="trail" aria-label="Companies visited">${crumbs || `<span class="crumb current">${e(n.name)}</span>`}</div>${scanning ? '<span class="pill live">Reading SEC filings…</span>' : ""}<div class="toolbar-spacer"></div><label class="inline-field">Company<select id="graph-center">${sorted.map((x) => `<option value="${e(x.id)}" ${x.id === n.id ? "selected" : ""}>${e(x.name)}${x.ticker ? " · " + e(x.ticker) : ""}</option>`).join("")}</select></label><label class="inline-field">Show<select id="graph-candidates"><option value="all" ${showCandidates ? "selected" : ""}>All links (incl. candidates)</option><option value="reviewed" ${!showCandidates ? "selected" : ""}>Reviewed only</option></select></label><button data-action="graph-export">Export</button></div><div class="relationship-graph"><svg viewBox="0 0 960 ${height}" role="group" aria-label="Suppliers to ${e(n.name)} to customers"><defs><marker id="edge-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" class="g-arrow"/></marker></defs><text class="g-col" x="${colX.sup}" y="26">SUPPLIERS · ${sup.length}</text><text class="g-col" x="${colX.mid}" y="26">SELECTED COMPANY</text><text class="g-col" x="${colX.cus}" y="26">CUSTOMERS / DISTRIBUTORS · ${cus.length}</text>${left.paths}${right.paths}${left.cards}${right.cards}${centerCard}${!sup.length ? `<text class="g-more" x="${colX.sup + 14}" y="${cy + 4}">No suppliers on record</text>` : ""}${!cus.length ? `<text class="g-more" x="${colX.cus + 14}" y="${cy + 4}">No customers on record</text>` : ""}</svg></div><div class="graph-legend"><span><i class="lg solid"></i>Reviewed disclosure</span><span><i class="lg dashed"></i>Unreviewed candidate</span><span>Click any company to explore its relationships · ← to go back</span></div>${!all.length ? '<div class="empty">No relationships on record for this company yet. This does not mean the company has no suppliers or customers.</div>' : ""}<div class="stats"><div class="stat"><span>Supplier evidence records</span><strong>${around.suppliers.length}</strong></div><div class="stat"><span>Customer evidence records</span><strong>${around.customers.length}</strong></div><div class="stat"><span>Unreviewed records in dataset</span><strong>${graph.edges.filter((x) => x.review !== "reviewed").length}</strong></div><div class="stat"><span>Concentration evidence</span><strong>${all.filter((a) => a.revenueShare != null).length} disclosed</strong><small>No inferred weights</small></div></div></section><section class="panel"><div class="panel-head"><h2>Evidence & relationship details</h2></div>${evidence("Suppliers", around.suppliers) + evidence("Customers & distributors", around.customers) || "<p>No evidence to display for this company.</p>"}<p class="muted">A reviewed source establishes what was disclosed on its date; it does not establish that the relationship is still active. Edges run from the legal entity named as supplier to the customer or distributor; subsidiaries without their own ticker are shown under their listed parent. Procurement values, revenue shares and relationship strength are unknown unless explicitly sourced.</p></section>`;
 }

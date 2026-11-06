@@ -42,3 +42,6 @@ export const aisSnapshot = () => invoke("ais_snapshot");
 export async function nativeTrade(mode, order) {
   return invoke("paper_trade", { mode, order });
 }
+export const quotesStart = (symbols) => invoke("quotes_start", { symbols });
+export const quotesStop = () => (native ? invoke("quotes_stop") : Promise.resolve());
+export const quotesSnapshot = () => invoke("quotes_snapshot");

@@ -6,6 +6,10 @@ import {
   neighborhood,
   mergeGraph,
   relationshipsView,
+  resolveCenter,
+  companyGroup,
+  ensureCompany,
+  parentTicker,
 } from "../src/relationships.js";
 
 test("curated evidence preserves supply direction and disclosure dates", () => {
@@ -71,4 +75,29 @@ test("rendering escapes imported text and distinguishes absence of coverage", ()
     relationshipsView(g),
     /does not mean the company has no suppliers/,
   );
+});
+test("a subsidiary without a ticker opens its listed parent with its links", () => {
+  const g = seedGraph();
+  const id = resolveCenter(g, "qualcomm-tech");
+  const parent = g.nodes.find((x) => x.id === id);
+  assert.equal(parent.ticker, "QCOM");
+  assert.equal(parent.name, "Qualcomm Incorporated");
+  assert.equal(resolveCenter(g, "qualcomm-tech"), id, "parent is created once");
+  assert.deepEqual([...companyGroup(g, id)], [id, "qualcomm-tech"]);
+  const q = neighborhood(g, id);
+  assert.deepEqual(q.customers.map((x) => x.customer), ["apple"]);
+  // Apple's own view is unchanged by the parent node.
+  assert.equal(neighborhood(g, "apple").suppliers.length, 2);
+  assert.equal(resolveCenter(g, "apple"), "apple");
+  const html = relationshipsView(g, id, false, { trail: ["apple", id] });
+  assert.match(html, /data-action="graph-back"(?! disabled)/);
+  assert.match(html, /data-action="graph-crumb" data-value="0">Apple Inc\./);
+});
+test("ensureCompany reuses an existing ticker", () => {
+  const g = seedGraph();
+  assert.equal(ensureCompany(g, "AAPL").id, "apple");
+  const n = ensureCompany(g, "NVDA", "NVIDIA Corporation");
+  assert.deepEqual(n, { id: "t-nvda", name: "NVIDIA Corporation", ticker: "NVDA" });
+  assert.equal(parentTicker({ ticker: "", parent: "Dell Technologies (DELL)" }), "DELL");
+  assert.equal(parentTicker({ ticker: "X", parent: "Y (Z)" }), "");
 });
