@@ -186,6 +186,22 @@ test("partial, duplicate, expired or oversized artifacts cannot create releases"
     assert.equal(f.state.releases.length, 0);
   }
 });
+test("a missing Linux or Windows build does not block the Mac release and tap", async () => {
+  for (const name of ["Market-Lens-linux-x64", "Market-Lens-windows-x64"]) {
+    const f = fixture();
+    f.state.artifacts = f.state.artifacts.filter((a) => a.name !== name);
+    await publish(f);
+    assert.equal(f.state.published, 1);
+    assert.equal(f.state.uploads.length, 2);
+    assert.equal(f.state.tap.length, 1);
+  }
+});
+test("the Mac build is required", async () => {
+  const f = fixture();
+  f.state.artifacts = f.state.artifacts.filter((a) => a.name !== "Market-Lens-macos-universal");
+  await assert.rejects(publish(f), /macos-universal artifact/);
+  assert.equal(f.state.releases.length, 0);
+});
 test("failed uploads stay draft and cannot update the tap", async () => {
   const f = fixture();
   f.state.uploadError = true;

@@ -27,7 +27,7 @@ cask "market-lens-preview" do
     skip "Updated by successful PR release builds"
   end
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
   container nested: "Market-Lens-macos-universal.dmg"
   app "Market Lens.app"
 
@@ -40,11 +40,21 @@ end
 `;
 }
 
+// Only the Mac build feeds Homebrew, so it is the one required artifact. A
+// slow or failed Linux/Windows build must not hold back the Homebrew update.
+const required = new Set(["macos-universal"]);
+const labels = {
+  "macos-universal": "universal Mac (Intel + Apple Silicon)",
+  "windows-x64": "Windows x64 installer",
+  "linux-x64": "Linux x64 DEB and AppImage",
+};
+
 function selectArtifacts(artifacts) {
-  return platforms.map((platform) => {
+  return platforms.flatMap((platform) => {
     const matches = artifacts.filter(
       (a) => a.name === `Market-Lens-${platform}`,
     );
+    if (!matches.length && !required.has(platform)) return [];
     if (
       matches.length !== 1 ||
       matches[0].expired ||
@@ -54,7 +64,7 @@ function selectArtifacts(artifacts) {
       throw Error(
         `Missing, duplicate, expired or oversized ${platform} artifact`,
       );
-    return matches[0];
+    return [matches[0]];
   });
 }
 
@@ -257,7 +267,7 @@ async function publish({ github, context, core, runId }) {
         `Preview of [PR #${pr.number}](https://github.com/${repository}/pull/${pr.number}). Contains unmerged code; not a stable release.`,
         `Built commit: \`${run.head_sha}\``,
         `Build: https://github.com/${repository}/actions/runs/${run.id}`,
-        "Downloads: universal Mac (Intel + Apple Silicon), Windows x64 installer, Linux x64 DEB and AppImage. Unzip the archive for your OS.",
+        `Downloads: ${artifacts.map((a) => labels[a.name.replace("Market-Lens-", "")]).join(", ")}. Unzip the archive for your OS.`,
         "Builds are unsigned/not notarized. Operating systems may warn or block installation. No security settings are changed by this workflow.",
         "SHA-256 checksums:\n```text\n" + hashes.join("\n") + "\n```",
         `<!-- macos-sha256: ${checksum} -->`,

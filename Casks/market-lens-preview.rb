@@ -13,7 +13,7 @@ cask "market-lens-preview" do
     skip "Updated by successful PR release builds"
   end
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
   container nested: "Market-Lens-macos-universal.dmg"
   app "Market Lens.app"
 
