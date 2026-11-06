@@ -183,7 +183,11 @@ const pages = [
   "Commodities",
   "Settings",
 ];
-let maritimeSelected = "chokepoint6";
+// Dover Strait by default: AISStream's coverage is strong there and thin in
+// some Middle East and open-ocean areas. The last pick is remembered.
+let maritimeSelected = locations.some((x) => x.id === state.vesselLocation)
+  ? state.vesselLocation
+  : "chokepoint9";
 function commodities() {
   return (
     `<section class="panel" id="vessel-panel">${vesselPanel()}</section>` +
@@ -289,7 +293,8 @@ function refreshVessels() {
 }
 function pickVesselLocation(id) {
   if (id === maritimeSelected) return;
-  maritimeSelected = id;
+  maritimeSelected = state.vesselLocation = id;
+  persist().catch(() => {});
   ais = null;
   clearVessels();
   const sel = $("#vessel-location");
@@ -418,6 +423,24 @@ function notify(message, error = false) {
   document.body.append(el);
   setTimeout(() => el.remove(), 7000);
 }
+// Pixel width available to the relationship graph, measured from the last
+// render (or estimated on the first), so the SVG is drawn 1:1 and its text
+// stays the same size on any monitor.
+let lastGraphWidth = 0,
+  fixingWidth = false;
+function graphWidth() {
+  const el = document.querySelector(".relationship-graph") || document.querySelector(".content");
+  const w = el?.clientWidth || window.innerWidth - 320;
+  return (lastGraphWidth = Math.max(760, Math.round(w) - 2));
+}
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (page === "Relationships") render();
+    else drawCharts();
+  }, 150);
+});
 function render() {
   const a = asset();
   if (a) symbol = a.symbol;
@@ -427,6 +450,7 @@ function render() {
     Research: research,
     Relationships: () =>
       relationshipsView(graph(), graphCenter, graphCandidates, {
+        width: graphWidth(),
         trail: graphTrail,
         progress: scanText(graphCenter),
       }) + filingScan(),
@@ -445,6 +469,14 @@ function render() {
   bind();
   bindVessel();
   drawCharts();
+  // One corrective pass at most (a scrollbar appearing could otherwise loop).
+  const g = document.querySelector(".relationship-graph");
+  if (!fixingWidth && g && Math.abs(Math.max(760, g.clientWidth - 2) - lastGraphWidth) > 4) {
+    fixingWidth = true;
+    render();
+    fixingWidth = false;
+    return;
+  }
   autoLoad();
   syncVesselStream();
   syncPriceStream();
@@ -637,7 +669,8 @@ function drawCharts(only) {
     const a = activeMap()[el.dataset.chart];
     let bars = a.bars.slice(-range);
     if (!bars.length) return;
-    const W = 1000,
+    // Draw at the element's real pixel width so text never scales with the screen.
+    const W = Math.max(480, Math.round(el.clientWidth || 1000)),
       H = 330,
       left = 18,
       right = 80,
@@ -1355,7 +1388,7 @@ function spark(values) {
   if (values.length < 2) return "";
   let min = Math.min(...values),
     max = Math.max(...values);
-  return `<svg class="spark" viewBox="0 0 400 90"><polyline fill="none" stroke="#e5e5e5" stroke-width="2" points="${values.map((v, i) => `${(i / (values.length - 1)) * 400},${80 - ((v - min) / (max - min || 1)) * 70}`).join(" ")}"/></svg>`;
+  return `<svg class="spark" viewBox="0 0 400 90" preserveAspectRatio="none"><polyline fill="none" stroke="#e5e5e5" stroke-width="2" points="${values.map((v, i) => `${(i / (values.length - 1)) * 400},${80 - ((v - min) / (max - min || 1)) * 70}`).join(" ")}"/></svg>`;
 }
 function alerts() {
   return `<section class="panel"><div class="panel-head"><h2>Price alerts</h2></div><div class="filters"><label>Symbol<select id="alert-symbol">${assets()

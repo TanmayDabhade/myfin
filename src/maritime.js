@@ -69,6 +69,8 @@ export function mountVesselMap(slot, loc, onPick) {
       maxZoom: 18,
     }).addTo(map);
     L.tileLayer(LABELS, { maxNativeZoom: 16, maxZoom: 18 }).addTo(map);
+    // Re-measure whenever the panel changes size (window resize, layout shifts).
+    new ResizeObserver(() => map.invalidateSize()).observe(el);
     sites = L.layerGroup().addTo(map);
     ships = L.layerGroup().addTo(map);
     map.setView([loc.lat, loc.lon], ZOOM);
