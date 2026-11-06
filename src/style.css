@@ -775,7 +775,6 @@ footer {
   gap: 10px;
   margin-bottom: 16px;
 }
-.maritime-map svg{width:100%;max-height:430px;border:1px solid #454545;border-radius:8px}.maritime-map [role=button]{cursor:pointer}.maritime-map [role=button]:focus{outline:none}.maritime-map [role=button]:focus circle{stroke:#ffffff;stroke-width:4}.maritime-map small{display:block;margin-top:10px}
 
 /* Theme: black and white; green/red only for gains, losses, buys and sells. */
 :root { color: #ededed; background: #000; }
@@ -818,10 +817,24 @@ input:focus, textarea:focus, select:focus { outline-color: #fff; }
 @media (max-width: 850px) { .source-row { grid-template-columns: 1fr; } }
 
 .commodity-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-.vessel-map svg { width: 100%; aspect-ratio: 1; border: 1px solid #222; border-radius: 8px; display: block; }
-.vessel { fill: #9a9a9a; }
-.vessel.tanker { fill: #ffffff; }
-.vessel.cargo { fill: #bdbdbd; }
+.vessel-controls { display: flex; gap: 8px; }
+.vessel-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; margin: 12px 0; }
+.vessel-layout #vessel-list .table-wrap { max-height: 520px; overflow: auto; }
+.vessel-layout tr[data-mmsi] { cursor: pointer; }
+.vessel-leaflet { height: 520px; border: 1px solid #222; border-radius: 8px; background: #0e0e0e; }
+.vessel-leaflet .leaflet-control-attribution { background: rgba(10, 10, 10, 0.7); color: #8a8a8a; }
+.vessel-leaflet .leaflet-control-attribution a { color: #b5b5b5; }
+.vessel-leaflet .leaflet-bar a { background: #1a1a1a; color: #ddd; border-color: #333; }
+.vessel-leaflet .leaflet-tooltip { background: #161616; color: #e6e6e6; border: 1px solid #333; box-shadow: none; }
+.vessel-leaflet .leaflet-tooltip-top::before { border-top-color: #333; }
+/* Ship markers: arrow along course when moving, dot when stopped. Colour = AIS hull class. */
+.ship { --c: #8c8c8c; width: 0; height: 0; margin: 0 auto; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 14px solid var(--c); filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9)); }
+.ship.dot { width: 9px; height: 9px; margin: 2px auto; border: 1px solid #000; border-radius: 50%; background: var(--c); }
+.ship.tanker, .ship-key.tanker { --c: #f2a541; }
+.ship.cargo, .ship-key.cargo { --c: #5fb3f0; }
+.ship.passenger, .ship-key.passenger { --c: #c58af9; }
+.ship-key { --c: #8c8c8c; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--c); margin-right: 6px; }
+@media (max-width: 1200px) { .vessel-layout { grid-template-columns: 1fr; } }
 
 /* ---- Layout without the top bar: search and data mode live in the sidebar. */
 aside { padding: 26px 14px 18px; gap: 0; }

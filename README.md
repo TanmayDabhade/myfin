@@ -53,7 +53,7 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 
    One key is enough to start. Choose where prices come from and press **Connect and load data**.
 2. That's it. Your watchlist loads right away and refreshes every 30 minutes while the app is open. Type any ticker in the search box (or the watchlist's **Add** field) and it is pulled from your price source.
-3. **Research** loads the company profile, financial statements and news automatically for the selected ticker. **Economy** loads all six FRED series, and **Commodities** loads IMF PortWatch shipping activity, which needs no key.
+3. **Research** loads the company profile, financial statements and news automatically for the selected ticker. **Economy** loads all six FRED series, and **Commodities** loads FRED commodity prices and, with an AISStream key, a live vessel map.
 4. Keys are saved once, in `credentials.json` in the app-data folder with owner-only file permissions. Change or remove them in **Settings → Data sources**, where each provider's last error is also shown. `TWELVE_DATA_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `FRED_API_KEY`, `AISSTREAM_API_KEY` and `SEC_CONTACT_EMAIL` environment variables override saved values.
 5. **Demo data** (top-right switch) is a synthetic workspace with its own paper account. Use it to explore without keys.
 6. Use **Trade** to record simulated fills at the last daily close or your own price, including fees.
@@ -61,8 +61,7 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 ## Commodities and shipping
 
 - **Commodity prices**: WTI and Brent crude, Henry Hub natural gas, US gasoline and copper from FRED (series DCOILWTICO, DCOILBRENTEU, DHHNGSP, GASREGW, PCOPPUSDM), loaded automatically with your FRED key.
-- **Port and chokepoint activity**: IMF PortWatch daily counts (no key).
-- **Live vessels**: with an AISStream key, the app streams AIS positions within about 1° of the selected location while the Commodities page is open, and stops when you leave. Vessels are classed from their broadcast ship type (70–79 cargo, 80–89 tanker); a tanker class describes the hull, not its cargo or load. At most 2,000 vessels are kept, for 2 hours. The connection reconnects with exponential backoff and jitter, and stops for good if AISStream rejects the key. The key is only sent inside the encrypted subscription message and never reaches the UI.
+- **Live vessels**: with an AISStream key, the app streams AIS positions within about 1° of the selected port or chokepoint while the Commodities page is open, on a zoomable map (Leaflet, Esri dark gray tiles; no tile key needed). Moving ships point along their course and are coloured by class; click a table row to find the ship, or another location marker to move there. The stream stops when you leave the page. Vessels are classed from their broadcast ship type (70–79 cargo, 80–89 tanker); a tanker class describes the hull, not its cargo or load. At most 2,000 vessels are kept, for 2 hours. The connection reconnects with exponential backoff and jitter, and stops for good if AISStream rejects the key. The key is only sent inside the encrypted subscription message and never reaches the UI.
 
 ## SEC filing discovery
 
@@ -92,7 +91,6 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 - SQLite uses WAL mode. Tables contain the versioned workspace, raw response cache, and request timestamps. The database is in the OS application-data directory for `com.marketlens.desktop`.
 - API keys are stored only in `credentials.json` (owner-only permissions) in the app-data folder, never in localStorage, SQLite, JSON backups or log messages. Provider error messages are shown with any key text masked. Keys are sent only to fixed HTTPS provider endpoints. Requests have a 20-second timeout and do not follow redirects.
 - Free-plan limits are enforced locally and requests are queued rather than rejected: Alpha Vantage 25/day, 13 s apart, reused for 6 h; Twelve Data 800/day, 8 s apart, reused for 1 h; FRED reused for 12 h. Failed calls count toward the budget. When a provider fails or the daily budget is spent, saved data is shown and marked stale.
-- IMF PortWatch's ArcGIS host intermittently rejects valid queries (observed November 2026); the app retries up to six times with backoff.
 - Data loads automatically only from your own provider accounts and public APIs, within their free limits. No scraping, proxy rotation, key sharing, paywall bypass or quota evasion.
 - Source provenance and dates are visible. Missing ratios display “—”; absence is not zero. Every price series is labeled with its provider.
 

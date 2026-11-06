@@ -1,5 +1,10 @@
-import { maritimeView, normalizeActivity, locations } from "./maritime.js";
-import land from "./world-land.js";
+import {
+  locations,
+  mountVesselMap,
+  updateVessels,
+  clearVessels,
+  focusVessel,
+} from "./maritime.js";
 import {
   seedGraph,
   validateGraph,
@@ -37,7 +42,6 @@ import {
   saveKeys,
   clearKey,
   fetchData,
-  fetchMaritime,
   fetchSEC,
   aisStart,
   aisStop,
@@ -149,6 +153,7 @@ function centerOnTicker(s, name) {
   return true;
 }
 state.sources ||= { prices: "twelve" };
+delete state.maritime; // old PortWatch cache, no longer used
 const lastError = {}; // provider -> latest failure message, shown in Settings
 const attempted = new Set(); // automatic loads tried this session
 let syncLabel = "";
@@ -178,13 +183,11 @@ const pages = [
   "Commodities",
   "Settings",
 ];
-let maritimeSelected = "chokepoint6",
-  maritimeMetric = "tanker";
+let maritimeSelected = "chokepoint6";
 function commodities() {
   return (
-    commodityPrices() +
-    maritimeView(state.maritime || {}, maritimeSelected, maritimeMetric) +
-    `<section class="panel" id="vessel-panel">${vesselPanel()}</section>`
+    `<section class="panel" id="vessel-panel">${vesselPanel()}</section>` +
+    commodityPrices()
   );
 }
 const commoditySeries = {
@@ -213,41 +216,87 @@ function commodityPrices() {
       : "";
   return `<section class="panel"><div class="panel-head"><h2>Commodity prices</h2><small>FRED · original units</small></div>${note ? `<p><b>${esc(note)}</b></p>` : ""}<div class="macro-grid commodity-grid">${Object.entries(commoditySeries)
     .map(([s, label]) => seriesCard(s, label, note))
-    .join("")}</div><small>Spot and benchmark prices as published by FRED's sources (EIA, IMF). Daily series lag by a few days. Prices give market context; they are not linked to any vessel below.</small></section>`;
+    .join("")}</div><small>Spot and benchmark prices as published by FRED's sources (EIA, IMF). Daily series lag by a few days. Prices give market context; they are not linked to any vessel above.</small></section>`;
 }
 // ---- Live vessels (AISStream) --------------------------------------------
 let vesselClass = "all",
   ais = null, // latest snapshot
   aisTimer = null;
-function vesselPanel() {
-  const loc = locations.find((x) => x.id === maritimeSelected) || locations[0];
-  const head = `<div class="panel-head"><h2>Live vessels near ${esc(loc.name)}</h2><select id="vessel-class" aria-label="Vessel class"><option value="all" ${vesselClass === "all" ? "selected" : ""}>All vessels</option><option value="tanker" ${vesselClass === "tanker" ? "selected" : ""}>Tankers</option><option value="cargo" ${vesselClass === "cargo" ? "selected" : ""}>Cargo</option></select></div>`;
-  const blocker = !native
+const vesselLoc = () =>
+  locations.find((x) => x.id === maritimeSelected) || locations[0];
+function vesselBlocker() {
+  return !native
     ? "Live vessels stream in the desktop app."
     : state.mode !== "market"
       ? "Switch to Live data for vessel positions."
       : !hasKey("ais")
         ? "Add a free AISStream key in Settings → Data sources to see vessels moving here."
         : "";
-  if (blocker) return head + empty(esc(blocker));
-  const all = ais?.area === loc.id ? ais.vessels : [];
-  const shown = all.filter((v) => vesselClass === "all" || v.class === vesselClass);
-  const status = !ais || ais.area !== loc.id
-    ? "Connecting to AISStream…"
-    : ais.error || { live: "Live", subscribed: "Connected; waiting for vessel reports…", connecting: "Connecting…", reconnecting: "Reconnecting…" }[ais.status] || ais.status;
-  // Zoom the world map to a 2°×2° box: the land path uses x=(lon+180)*2, y=(90-lat)*2.
-  const vx = (loc.lon - 1 + 180) * 2,
-    vy = (90 - loc.lat - 1) * 2;
-  const dots = shown
-    .map((v) => `<circle cx="${(v.lon + 180) * 2}" cy="${(90 - v.lat) * 2}" r="0.045" class="vessel ${esc(v.class)}"><title>${esc(v.name)} · ${esc(v.class)} · ${v.sog == null ? "speed n/a" : fmt(v.sog, 1) + " kn"}</title></circle>`)
-    .join("");
-  return `${head}<p class="muted">${esc(status)}${ais?.lastMessage ? " · last report " + new Date(ais.lastMessage * 1000).toLocaleTimeString() : ""} · ${shown.length} of ${all.length} vessels shown</p><div class="grid halves"><div class="vessel-map"><svg viewBox="${vx} ${vy} 4 4" role="img" aria-label="Vessel positions near ${esc(loc.name)}"><rect x="${vx}" y="${vy}" width="4" height="4" fill="#0a0a0a"/><path d="${land}" fill="#262626" stroke="#3a3a3a" stroke-width="0.01"/>${dots}</svg></div><div>${table(
+}
+function shownVessels() {
+  const all = ais?.area === vesselLoc().id ? ais.vessels : [];
+  return {
+    all,
+    shown: all.filter((v) => vesselClass === "all" || v.class === vesselClass),
+  };
+}
+// Static frame: header, controls and the map slot. Rebuilt only on page render.
+function vesselPanel() {
+  const loc = vesselLoc();
+  return `<div class="panel-head"><h2>Live vessels</h2><div class="vessel-controls"><select id="vessel-location" aria-label="Location">${locations.map((x) => `<option value="${x.id}" ${x.id === loc.id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select><select id="vessel-class" aria-label="Vessel class"><option value="all" ${vesselClass === "all" ? "selected" : ""}>All vessels</option><option value="tanker" ${vesselClass === "tanker" ? "selected" : ""}>Tankers</option><option value="cargo" ${vesselClass === "cargo" ? "selected" : ""}>Cargo</option></select></div></div><p class="muted" id="vessel-status">${esc(vesselStatus())}</p><div class="vessel-layout"><div id="vessel-map-slot" class="vessel-leaflet"></div><div id="vessel-list">${vesselList()}</div></div><small>AIS positions within about 1° of the selected location (dashed box), kept for 2 hours (at most 2,000 vessels). Click another marker on the map to move there. Class comes from the vessel's broadcast ship type: "tanker" describes the hull, not whether it carries petroleum, what it carries, or whether it is loaded. "Unknown" means no type report has been received yet. Positions are self-reported and can be missing or wrong. Map tiles © Esri, HERE, Garmin, © OpenStreetMap contributors.</small>`;
+}
+function vesselStatus() {
+  const blocker = vesselBlocker();
+  if (blocker) return blocker;
+  const { all, shown } = shownVessels();
+  const status =
+    !ais || ais.area !== vesselLoc().id
+      ? "Connecting to AISStream…"
+      : ais.error ||
+        {
+          live: "Live",
+          subscribed: "Connected; waiting for vessel reports…",
+          connecting: "Connecting…",
+          reconnecting: "Reconnecting…",
+        }[ais.status] ||
+        ais.status;
+  return `${status}${ais?.lastMessage ? " · last report " + new Date(ais.lastMessage * 1000).toLocaleTimeString() : ""} · ${shown.length} of ${all.length} vessels shown`;
+}
+function vesselList() {
+  const blocker = vesselBlocker();
+  if (blocker) return empty(esc(blocker));
+  const { shown } = shownVessels();
+  if (!shown.length) return empty("Waiting for vessel reports…");
+  return table(
     ["Vessel", "Class", "Speed", "Status", "Destination", "Seen"],
-    shown.slice(0, 60).map(
+    shown.slice(0, 80).map(
       (v) =>
-        `<tr><td>${esc(v.name)}<small> · ${esc(v.mmsi)}</small></td><td>${esc(v.class)}</td><td>${v.sog == null ? "—" : fmt(v.sog, 1) + " kn"}</td><td>${esc(v.status)}</td><td>${esc(v.destination || "—")}</td><td>${new Date(v.seen * 1000).toLocaleTimeString()}</td></tr>`,
+        `<tr data-mmsi="${v.mmsi}"><td>${esc(v.name)}<small> · ${esc(v.mmsi)}</small></td><td><span class="ship-key ${esc(v.class)}"></span>${esc(v.class)}</td><td>${v.sog == null ? "—" : fmt(v.sog, 1) + " kn"}</td><td>${esc(v.status)}</td><td>${esc(v.destination || "—")}</td><td>${new Date(v.seen * 1000).toLocaleTimeString()}</td></tr>`,
     ),
-  )}</div></div><small>AIS positions within about 1° of the location, kept for 2 hours (at most 2,000 vessels). Class comes from the vessel's broadcast ship type: "tanker" describes the hull, not whether it carries petroleum, what it carries, or whether it is loaded. "Unknown" means no type report has been received yet. Positions are self-reported and can be missing or wrong.</small>`;
+  );
+}
+// Update status, table and markers in place; the map itself is never rebuilt.
+function refreshVessels() {
+  const status = $("#vessel-status"),
+    list = $("#vessel-list");
+  if (!status || !list) return;
+  status.textContent = vesselStatus();
+  const scroll = list.querySelector(".table-wrap")?.scrollTop || 0;
+  list.innerHTML = vesselList();
+  const wrap = list.querySelector(".table-wrap");
+  if (wrap) wrap.scrollTop = scroll;
+  updateVessels(vesselBlocker() ? [] : shownVessels().shown);
+}
+function pickVesselLocation(id) {
+  if (id === maritimeSelected) return;
+  maritimeSelected = id;
+  ais = null;
+  clearVessels();
+  const sel = $("#vessel-location");
+  if (sel) sel.value = id;
+  mountVesselMap($("#vessel-map-slot"), vesselLoc(), pickVesselLocation);
+  refreshVessels();
+  syncVesselStream();
 }
 // Run the stream only while Commodities is open in live mode.
 function syncVesselStream() {
@@ -261,29 +310,34 @@ function syncVesselStream() {
     }
     return;
   }
-  const loc = locations.find((x) => x.id === maritimeSelected) || locations[0];
+  const loc = vesselLoc();
   aisStart(loc.id, loc.lat, loc.lon).catch((e) => notify(message(e), true));
-  if (!aisTimer)
-    aisTimer = setInterval(async () => {
-      try {
-        ais = await aisSnapshot();
-      } catch {
-        return;
-      }
-      const el = $("#vessel-panel");
-      if (el && document.activeElement?.id !== "vessel-class") {
-        el.innerHTML = vesselPanel();
-        bindVessel();
-      }
-    }, 4000);
+  const poll = async () => {
+    try {
+      ais = await aisSnapshot();
+    } catch {
+      return;
+    }
+    refreshVessels();
+  };
+  if (!aisTimer) {
+    poll();
+    aisTimer = setInterval(poll, 2000);
+  }
 }
 function bindVessel() {
-  if ($("#vessel-class"))
-    $("#vessel-class").onchange = (e) => {
-      vesselClass = e.target.value;
-      $("#vessel-panel").innerHTML = vesselPanel();
-      bindVessel();
-    };
+  if (!$("#vessel-panel")) return;
+  mountVesselMap($("#vessel-map-slot"), vesselLoc(), pickVesselLocation);
+  updateVessels(vesselBlocker() ? [] : shownVessels().shown);
+  $("#vessel-class").onchange = (e) => {
+    vesselClass = e.target.value;
+    refreshVessels();
+  };
+  $("#vessel-location").onchange = (e) => pickVesselLocation(e.target.value);
+  $("#vessel-list").onclick = (e) => {
+    const row = e.target.closest("tr[data-mmsi]");
+    if (row) focusVessel(Number(row.dataset.mmsi));
+  };
 }
 function activeMap() {
   return state.mode === "sample" ? state.assets : (state.marketAssets ||= {});
@@ -1330,12 +1384,12 @@ function priceSelect() {
   return `<label>Prices from<select id="price-source">${priceProviders.map((p) => `<option value="${p}" ${state.sources.prices === p ? "selected" : ""}>${providers[p].name}${hasKey(p) ? "" : " (no key)"}</option>`).join("")}</select></label>`;
 }
 function setup() {
-  return `<section class="panel setup"><p>Paste your free API keys once. They are saved on this computer, in a file only your user account can read, and the app loads data on its own from then on. One key is enough to start; all three gives you everything.</p>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, true)).join("")}${priceSelect()}<div class="setup-actions">${button("Connect and load data", "setup-connect", "primary")}${button("Explore demo data instead", "setup-demo")}</div><small>Shipping activity (IMF PortWatch) needs no key. Recommended: Twelve Data for price history, Finnhub for real-time prices, Alpha Vantage for company research, FRED for the economy.</small></section>`;
+  return `<section class="panel setup"><p>Paste your free API keys once. They are saved on this computer, in a file only your user account can read, and the app loads data on its own from then on. One key is enough to start; all three gives you everything.</p>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, true)).join("")}${priceSelect()}<div class="setup-actions">${button("Connect and load data", "setup-connect", "primary")}${button("Explore demo data instead", "setup-demo")}</div><small>Recommended: Twelve Data for price history, Finnhub for real-time prices, Alpha Vantage for company research, FRED for the economy.</small></section>`;
 }
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}<div class="source-row"><div class="source-info"><h3>IMF PortWatch <span class="pill on">No key needed</span></h3><small>Daily port calls and chokepoint transits</small></div></div>${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series and PortWatch shipping activity. Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in market-lens.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -1437,12 +1491,6 @@ async function loadMacro(id) {
     throw e;
   }
 }
-async function loadMaritime(id) {
-  const d = await fetchMaritime(id);
-  normalizeActivity(d.data, id);
-  (state.maritime ||= {})[id] = d;
-  if (d.warning) notify(d.warning, true);
-}
 // Pull whatever the current page needs and doesn't have yet.
 function autoLoad() {
   if (!live()) return;
@@ -1456,9 +1504,7 @@ function autoLoad() {
         await persist();
         refresh();
       }
-    }).catch((e) => {
-      if (key.startsWith("pw:")) notify(message(e), true);
-    });
+    }).catch(() => {});
   };
   const a = asset();
   if (page === "Research" && a && hasKey("alpha")) {
@@ -1480,10 +1526,6 @@ function autoLoad() {
   if (page === "Commodities" && hasKey("fred"))
     for (const id of Object.keys(commoditySeries))
       if (stale(state.macro[id], 43200)) once("fred:" + id, () => loadMacro(id));
-  if (page === "Commodities" && stale(state.maritime?.[maritimeSelected], 21600)) {
-    const id = maritimeSelected;
-    once("pw:" + id, () => loadMaritime(id));
-  }
 }
 let syncing = null;
 async function syncWatchlist() {
@@ -1581,28 +1623,6 @@ function bind() {
         notify(error.message, true);
       }
     };
-  if ($("#maritime-location"))
-    $("#maritime-location").onchange = (e) => {
-      maritimeSelected = e.target.value;
-      render();
-    };
-  if ($("#maritime-metric"))
-    $("#maritime-metric").onchange = (e) => {
-      maritimeMetric = e.target.value;
-      render();
-    };
-  document.querySelectorAll("[data-location]").forEach((el) => {
-    el.onclick = () => {
-      maritimeSelected = el.dataset.location;
-      render();
-    };
-    el.onkeydown = (e) => {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        el.onclick();
-      }
-    };
-  });
 
   document.querySelectorAll("[data-screen-field]").forEach(
     (el) =>
@@ -1824,30 +1844,6 @@ async function action(act, value) {
       render();
       break;
     }
-    case "maritime-fetch":
-      notify("Loading PortWatch observations…");
-      await enqueue("pw:" + maritimeSelected, () => loadMaritime(maritimeSelected));
-      await persist();
-      render();
-      notify("PortWatch observations updated.");
-      break;
-    case "maritime-export": {
-      const d = state.maritime?.[maritimeSelected];
-      if (!d) throw Error("Download a location first");
-      download(
-        "portwatch-" + maritimeSelected + ".csv",
-        csv(
-          normalizeActivity(d.data, maritimeSelected).map((r) => ({
-            ...r,
-            provider: "IMF PortWatch",
-            retrieved: new Date(d.fetchedAt * 1000).toISOString(),
-          })),
-        ),
-        "text/csv",
-      );
-      break;
-    }
-
     case "visual-screen-save":
       (state.savedVisualScreens ||= []).push({
         name: `${screenConfig().metric} / ${screenConfig().period} / ${screenConfig().sector || "All sectors"}`,
