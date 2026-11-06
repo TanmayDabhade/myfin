@@ -111,11 +111,6 @@ function fakeBackend() {
         ? "The Company relies on Taiwan Semiconductor Manufacturing Company Limited as a sole-source supplier of processors."
         : "Net sales to Amazon.com, Inc., a reseller, accounted for 11% of total net sales in 2025." });
     },
-    fetch_maritime: ({ id }) => ({
-      data: { features: Array.from({ length: 20 }, (_, i) => ({ attributes: { portid: id, date: new Date(Date.UTC(2026, 9, 1 + i)).toISOString().slice(0, 10), n_tanker: 10 + i, n_cargo: 5, n_total: 20, n_container: 1, n_dry_bulk: 2 } })) },
-      fetchedAt: Date.now() / 1000,
-      provider: "IMF PortWatch",
-    }),
   };
   window.__TAURI__ = {
     core: {
@@ -187,13 +182,19 @@ async function liveFlow(browser, errors) {
   await page.click('[data-page="Economy"]');
   await page.waitForFunction(() => [...document.querySelectorAll(".macro-card strong")].every((x) => x.textContent === "4.10"));
   await page.click('[data-page="Commodities"]');
-  await page.waitForSelector(".maritime-map");
-  await page.waitForFunction(() => document.body.innerText.includes("Retrieved"));
+  await page.waitForSelector("#vessel-panel .leaflet-container");
   await page.waitForFunction(() => document.querySelectorAll(".commodity-grid .macro-card strong").length === 5 && [...document.querySelectorAll(".commodity-grid .macro-card strong")].every((x) => x.textContent === "4.10"));
   await page.waitForSelector("#vessel-panel td:has-text('FIXTURE TANKER')", { timeout: 10000 });
   await page.selectOption("#vessel-class", "tanker");
   if ((await page.locator("#vessel-panel td:has-text('FIXTURE CARGO')").count()) !== 0) throw Error("Vessel class filter failed");
-  if ((await page.locator("#vessel-panel circle.vessel").count()) !== 1) throw Error("Vessel map markers wrong");
+  if ((await page.locator("#vessel-panel .ship").count()) !== 1) throw Error("Vessel map markers wrong");
+  if ((await page.locator("#vessel-panel .ship.tanker").count()) !== 1) throw Error("Tanker marker missing");
+  if (/PortWatch/.test(await page.locator("body").innerText())) throw Error("PortWatch still shown");
+  await page.selectOption("#vessel-location", "chokepoint1");
+  await page.waitForFunction(() => document.querySelector("#vessel-location").value === "chokepoint1");
+  // Switching location restarts the stream there and keeps the same map.
+  await page.waitForFunction(() => window.__aisArea === "chokepoint1");
+  if ((await page.locator("#vessel-panel .leaflet-container").count()) !== 1) throw Error("Map lost after location change");
   await page.fill("#search", "TSLA");
   await page.press("#search", "Enter");
   await page.waitForSelector("h2:has-text('TSLA')");

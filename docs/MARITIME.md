@@ -1,26 +1,21 @@
-# Commodity / maritime intelligence
+# Commodities and live vessels
 
-This feature is a first vertical slice, not a vessel-tracking terminal. It adds a geospatial explorer for 28 chokepoints and four selected ports, cargo/tanker/container/dry-bulk counts, 90-observation history, 7-observation comparisons, caching, provenance, and CSV exports.
+The Commodities page has two parts:
 
-Sources:
-- IMF PortWatch: https://portwatch.imf.org/
-- Catalogs: `PortWatch_chokepoints_database` and `PortWatch_ports_database` under https://services9.arcgis.com/weJ1QsnbMYJlCHdG/arcgis/rest/services
-- Daily schemas: `Daily_Chokepoints_Data` and `Daily_Ports_Data`, FeatureServer table 0.
-- Source terms: https://www.imf.org/external/terms.htm
-- Map geography: Natural Earth 1:110m land via world-atlas 2.0.2. Natural Earth geographic data is public domain; this project's static SVG path was generated from that dataset, not copied from WorldMonitor code.
+- **Live vessels** (top): AIS positions from AISStream within about 1° of a selected port or chokepoint, on a Leaflet map. Needs an AISStream key.
+- **Commodity prices**: WTI, Brent, Henry Hub, US gasoline and copper from FRED. Needs a FRED key.
 
-Catalog metadata and table fields were retrieved on 2026-11-05. Chokepoint transit fields use `n_*`; port calls use `portcalls_*`. The UI preserves those category definitions rather than assuming cargo and tanker counts are disjoint. Null stays unknown; zero stays zero. A tanker is not necessarily carrying petroleum.
+## Live vessels
 
-The Rust provider is fixed to the documented public ArcGIS host and rejects malformed IDs. It makes a bounded query for the latest 90 records and caches responses for six hours; provider failures may return a distinctly labeled stale cache. No token is needed for these documented public layers. User API requests are not background-polled.
+- The Rust backend holds the AISStream websocket; the key goes only into the subscription message and never reaches the UI. AISStream does not allow direct browser clients.
+- The stream runs only while the Commodities page is open in Live data mode. It reconnects with exponential backoff and jitter, and stops for good if the key is rejected.
+- At most 2,000 vessels are kept, each for 2 hours after its last report.
+- The UI polls the backend snapshot every 2 seconds and moves map markers in place. The map element is created once and reused across page renders, so tiles and zoom are kept.
+- Class comes from the broadcast AIS ship type (70–79 cargo, 80–89 tanker). A tanker class describes the hull, not its cargo or whether it is loaded.
+- Locations come from `src/maritime-locations.json` (28 chokepoints and four ports; coordinates originally taken from the IMF PortWatch catalog on 2026-11-05).
 
-## Validation and blocking issue
+Map tiles: Esri World Dark Gray Canvas (base and labels), no key required. Attribution "Esri, HERE, Garmin, © OpenStreetMap contributors" is shown on the map. CARTO basemaps were tried first, but they now return "API key required" tiles. The tile host is allowed in the Tauri CSP (`img-src`).
 
-Unit and browser tests exercise normalization, null handling, rolling summaries, input restrictions, maps, controls and empty states. The Rust library has an explicit ignored live contract test:
+## IMF PortWatch (removed)
 
-```
-cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib live_portwatch_contract -- --ignored --nocapture
-```
-
-The actual public query endpoint returned a provider error (`400 Invalid URL`) during verification even though catalog and table metadata were readable. The implementation must remain a DRAFT PR until a live contract check succeeds, or a verified replacement endpoint is adopted. No observations are fabricated, and no ready/live claim should be made. Native desktop runtime and IPC were not exercised in this environment.
-
-Remaining in #6: authorized backend AIS stream, vessel-level positions/details, reconnect/backoff, retention, commodity prices and commodity-specific context. AISStream credentials must stay in Rust/server memory; its documented feed does not permit direct browser clients. WorldMonitor is a UX reference, not an implementation or data license.
+Daily port-call and chokepoint-transit counts from IMF PortWatch were removed in November 2026. Its public ArcGIS query endpoint kept rejecting valid requests (`400 Invalid URL`), so the panel never showed data. Its retries also held the shared provider lock, which delayed FRED and price loads by up to a couple of minutes. Old cached PortWatch rows are deleted from SQLite on startup.

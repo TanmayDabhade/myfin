@@ -14,5 +14,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Live provider contract tests (PortWatch, SEC EDGAR, Twelve Data and Alpha Vantage demo keys)
+      - name: Live provider contract tests (SEC EDGAR, Twelve Data and Alpha Vantage demo keys)
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib -- --ignored
