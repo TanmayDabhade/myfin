@@ -10,15 +10,22 @@ export const providers = {
   },
   finnhub: {
     name: "Finnhub",
-    provides: "Real-time US stock trades, streamed live while the app is open",
-    limits: "Free plan: up to 50 symbols streaming at once",
+    provides: "Real-time US stock trades, company news, key metrics, company profile and the earnings calendar",
+    limits: "Free plan: 60 requests/minute, up to 50 symbols streaming at once",
     keyURL: "https://finnhub.io/register",
   },
   alpha: {
     name: "Alpha Vantage",
-    provides: "Company fundamentals, statements, news, earnings; prices",
+    provides: "Financial statements and company description; prices",
     limits: "Free plan: 25 requests/day, about 100 days of prices",
     keyURL: "https://www.alphavantage.co/support/#api-key",
+  },
+  alpaca: {
+    name: "Alpaca",
+    provides: "Past trade prints for time and sales when the market is closed (IEX exchange). Paste the key ID and the secret.",
+    limits: "Free market-data account; the latest 15 minutes aren't available",
+    keyURL: "https://app.alpaca.markets/signup",
+    secret: true,
   },
   fred: {
     name: "FRED",

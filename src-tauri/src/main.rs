@@ -18,6 +18,7 @@ use tauri_plugin_dialog::DialogExt;
 struct Backend {
     db: Mutex<Connection>,
     gate: tokio::sync::Mutex<()>,
+    fast_gate: tokio::sync::Mutex<()>,
     /// SEC has its own rate limit, so its requests don't wait behind other providers.
     sec_gate: tokio::sync::Mutex<()>,
     env_keys: Credentials,
@@ -183,7 +184,10 @@ async fn fetch_data(
     symbol: String,
 ) -> Result<Value, String> {
     providers::validate(&provider, &kind, &symbol)?;
-    let _guard = b.gate.lock().await;
+    // Slow free plans (Alpha Vantage waits 13 s between calls) must not hold
+    // up the fast ones, so Finnhub and Alpaca queue separately.
+    let gate = if provider == "finnhub" || provider == "alpaca" { &b.fast_gate } else { &b.gate };
+    let _guard = gate.lock().await;
     let rules = providers::budget(&provider);
     let cache_key = format!("{provider}:{kind}:{symbol}");
     let cached: Option<(String, i64)> = {
@@ -199,10 +203,17 @@ async fn fetch_data(
     }
     let key = {
         let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
-        providers::resolve(&b.env_keys, &saved, &provider).0.to_string()
+        let k = providers::resolve(&b.env_keys, &saved, &provider).0.to_string();
+        if provider == "alpaca" {
+            let secret = providers::resolve(&b.env_keys, &saved, "alpacasecret").0;
+            if k.is_empty() || secret.is_empty() { String::new() } else { format!("{k}:{secret}") }
+        } else {
+            k
+        }
     };
     if key.is_empty() {
-        return Err(format!("No {} key yet. Add it in Settings → Data sources.", match provider.as_str() { "alpha" => "Alpha Vantage", "twelve" => "Twelve Data", _ => "FRED" }));
+        let what = if provider == "alpaca" { "Alpaca key ID and secret" } else { providers::display_name(&provider) };
+        return Err(format!("No {what} yet. Add it in Settings → Data sources."));
     }
     let (count, last): (i64, i64) = {
         let db = b.db.lock().map_err(|_| "Database unavailable")?;
@@ -231,9 +242,13 @@ async fn fetch_data(
         .map_err(|_| "Database unavailable")?
         .execute("INSERT INTO requests(provider,stamp) VALUES(?1,?2)", params![provider, ts])
         .map_err(|e| e.to_string())?;
-    let (url, query) = providers::request(&provider, &kind, &symbol, &key);
+    let req = providers::request(&provider, &kind, &symbol, &key, ts);
     let result: Result<Value, String> = async {
-        let resp = b.http.get(url).query(&query).send().await.map_err(|_| "Could not reach the provider. Check your internet connection.".to_string())?;
+        let mut call = b.http.get(&req.url).query(&req.query);
+        for (name, value) in &req.headers {
+            call = call.header(name.as_str(), value.as_str());
+        }
+        let resp = call.send().await.map_err(|_| "Could not reach the provider. Check your internet connection.".to_string())?;
         let http = resp.status().as_u16();
         let body = resp.text().await.map_err(|_| "Could not read provider response".to_string())?;
         providers::interpret(&provider, &kind, http, &body, &key)
@@ -864,5 +879,5 @@ async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, k
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

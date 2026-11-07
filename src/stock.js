@@ -216,5 +216,124 @@ export function valuationInputs(facts = {}) {
   }
   sources.discount = "Default assumption";
   sources.terminal = "Default assumption";
-  return { inputs: { fcf, growth, discount: 0.09, terminal: 0.025, netDebt, shares }, sources, missing };
+  // Raw figures the key statistics reuse (market cap, P/E, margin).
+  const basis = { sharesOut: facts.sharesOut?.shares > 0 ? facts.sharesOut : null, netIncome: annualSeries(facts.NetIncomeLoss).at(-1) || null, revenue: rev.at(-1) || null };
+  return { inputs: { fcf, growth, discount: 0.09, terminal: 0.025, netDebt, shares }, sources, missing, basis };
 }
+
+// ---- Key statistics -----------------------------------------------------------
+const val = (x) => {
+  if (x == null || x === "" || x === "None" || x === "-") return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+};
+const DAY_MS = 864e5;
+// P/E, margin, revenue growth, market cap, 52-week range and dividend yield.
+// Each is calculated from the live price, the company's statements and SEC
+// shares outstanding when possible, then falls back to a provider's figure
+// (Finnhub metrics, then the Alpha Vantage overview). Every value says
+// where it came from.
+//   overview: Alpha Vantage OVERVIEW; metric: Finnhub metric.metric;
+//   income: Alpha Vantage INCOME_STATEMENT (annualReports/quarterlyReports,
+//   newest first); basis: valuationInputs().basis; price; bars: daily bars.
+export function keyStats({ overview = {}, metric = {}, income = null, basis = {}, price = null, bars = [] } = {}) {
+  const q = income?.quarterlyReports || [],
+    a = income?.annualReports || [];
+  const sum4 = (k) => (q.length >= 4 && q.slice(0, 4).every((r) => val(r[k]) != null) ? q.slice(0, 4).reduce((t, r) => t + val(r[k]), 0) : null);
+  const out = {};
+  const pick = (name, ...options) => {
+    const hit = options.find((o) => o && o.value != null && Number.isFinite(o.value));
+    out[name] = hit ? { value: hit.value, source: hit.source, note: hit.note || "" } : { value: null, source: "", note: options.find((o) => o?.note)?.note || "" };
+  };
+  const shares = basis.sharesOut?.shares || val(overview.SharesOutstanding);
+  const sharesSource = basis.sharesOut ? `SEC cover page, ${basis.sharesOut.date}` : "Alpha Vantage";
+  const fh = (k, scale = 1) => (val(metric[k]) == null ? null : { value: val(metric[k]) * scale, source: "Finnhub" });
+  const av = (k) => (val(overview[k]) == null ? null : { value: val(overview[k]), source: "Alpha Vantage" });
+
+  pick("marketCap", price > 0 && shares > 0 && { value: price * shares, source: `Price × shares outstanding (${sharesSource})` }, av("MarketCapitalization"), fh("marketCapitalization", 1e6));
+
+  // Earnings: trailing four quarters, else the latest fiscal year.
+  const ttmIncome = sum4("netIncome");
+  const earnings =
+    ttmIncome != null
+      ? { value: ttmIncome, label: `last four quarters to ${q[0].fiscalDateEnding}` }
+      : basis.netIncome
+        ? { value: basis.netIncome.val, label: `fiscal year ending ${basis.netIncome.end}` }
+        : val(a[0]?.netIncome) != null
+          ? { value: val(a[0].netIncome), label: `fiscal year ending ${a[0].fiscalDateEnding}` }
+          : null;
+  const loss = earnings && earnings.value <= 0;
+  pick(
+    "pe",
+    price > 0 && shares > 0 && earnings && !loss && { value: (price * shares) / earnings.value, source: `Price ÷ earnings per share; net income ${earnings.label}` },
+    loss ? { note: "Not meaningful: the company lost money" } : null,
+    fh("peTTM") || fh("peBasicExclExtraTTM"),
+    av("PERatio"),
+  );
+
+  const ttmRevenue = sum4("totalRevenue");
+  const annualMargin = basis.netIncome && basis.revenue && basis.netIncome.end === basis.revenue.end && basis.revenue.revenue > 0 ? basis.netIncome.val / basis.revenue.revenue : null;
+  pick(
+    "margin",
+    ttmIncome != null && ttmRevenue > 0 && { value: ttmIncome / ttmRevenue, source: `Net income ÷ revenue, last four quarters to ${q[0].fiscalDateEnding}` },
+    annualMargin != null && { value: annualMargin, source: `Net income ÷ revenue, fiscal year ending ${basis.revenue.end} (SEC)` },
+    val(a[0]?.netIncome) != null && val(a[0]?.totalRevenue) > 0 && { value: val(a[0].netIncome) / val(a[0].totalRevenue), source: `Net income ÷ revenue, fiscal year ending ${a[0].fiscalDateEnding}` },
+    fh("netProfitMarginTTM", 0.01),
+    av("ProfitMargin"),
+  );
+
+  // Latest quarter against the same quarter a year earlier.
+  let quarterly = null;
+  if (q.length && val(q[0].totalRevenue) != null) {
+    const t0 = Date.parse(q[0].fiscalDateEnding);
+    const prior = q.find((r) => {
+      const gap = (t0 - Date.parse(r.fiscalDateEnding)) / DAY_MS;
+      return gap > 330 && gap < 400 && val(r.totalRevenue) > 0;
+    });
+    if (prior) quarterly = { value: val(q[0].totalRevenue) / val(prior.totalRevenue) - 1, source: `Quarter ending ${q[0].fiscalDateEnding} vs ${prior.fiscalDateEnding}` };
+  }
+  pick(
+    "growth",
+    quarterly,
+    basis.revenue?.growth != null && { value: basis.revenue.growth, source: `Fiscal year ending ${basis.revenue.end} vs the year before (SEC)` },
+    fh("revenueGrowthQuarterlyYoy", 0.01),
+    av("QuarterlyRevenueGrowthYOY"),
+  );
+
+  // 52-week range from daily bars when a year of them is loaded.
+  const last = bars.at(-1);
+  const year = last ? bars.filter((b) => Date.parse(last.date) - Date.parse(b.date) <= 365 * DAY_MS) : [];
+  const covered = year.length > 200;
+  pick("high52", covered && { value: Math.max(...year.map((b) => b.high)), source: "Daily prices, last 52 weeks" }, fh("52WeekHigh"), av("52WeekHigh"));
+  pick("low52", covered && { value: Math.min(...year.map((b) => b.low)), source: "Daily prices, last 52 weeks" }, fh("52WeekLow"), av("52WeekLow"));
+  pick("dividendYield", fh("dividendYieldIndicatedAnnual", 0.01) || fh("currentDividendYieldTTM", 0.01), av("DividendYield"));
+  return out;
+}
+
+// ---- Past trades ------------------------------------------------------------
+const nyDay = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+// Alpaca historical trades (newest first) -> tape prints of the most recent
+// session in the response, oldest first.
+export function pastPrints(data) {
+  const prints = (data?.trades || [])
+    .map((t) => ({ price: val(t.p), size: val(t.s) ?? 0, time: Date.parse(t.t), conditions: Array.isArray(t.c) ? t.c.map(String).filter((c) => c.trim()) : [] }))
+    .filter((p) => p.price > 0 && Number.isFinite(p.time));
+  if (!prints.length) return { date: null, prints: [] };
+  const date = nyDay.format(new Date(Math.max(...prints.map((p) => p.time))));
+  return { date, prints: prints.filter((p) => nyDay.format(new Date(p.time)) === date).sort((x, y) => x.time - y.time) };
+}
+// Twelve Data 1-minute bars -> the most recent session's minutes, oldest
+// first, with session totals. Volume-weighted price uses each minute's
+// typical price (high + low + close) / 3.
+export function minuteSession(data) {
+  const rows = (data?.values || [])
+    .map((v) => ({ time: v.datetime, open: val(v.open), high: val(v.high), low: val(v.low), close: val(v.close), volume: val(v.volume) ?? 0 }))
+    .filter((r) => r.close != null && /^\d{4}-\d\d-\d\d \d\d:\d\d/.test(r.time || ""));
+  if (!rows.length) return { date: null, rows: [], volume: 0, vwap: null, high: null, low: null };
+  const date = rows.map((r) => r.time.slice(0, 10)).sort().at(-1);
+  const day = rows.filter((r) => r.time.startsWith(date)).sort((x, y) => x.time.localeCompare(y.time));
+  const volume = day.reduce((t, r) => t + r.volume, 0);
+  const pv = day.reduce((t, r) => t + r.volume * ((r.high + r.low + r.close) / 3), 0);
+  return { date, rows: day, volume, vwap: volume > 0 ? pv / volume : null, high: Math.max(...day.map((r) => r.high)), low: Math.min(...day.map((r) => r.low)), open: day[0].open, close: day.at(-1).close };
+}
+
