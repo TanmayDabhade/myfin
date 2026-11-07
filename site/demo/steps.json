@@ -1,0 +1,89 @@
+{
+  "width": 1440,
+  "height": 900,
+  "steps": [
+    {
+      "image": "demo/01-overview.jpg",
+      "caption": "Your watchlist, with real-time prices streaming in.",
+      "click": {
+        "x": 1099,
+        "y": 398
+      }
+    },
+    {
+      "image": "demo/02-stock.jpg",
+      "caption": "Pick a stock and everything about it is on one page: chart, news, live trades, holders, valuation.",
+      "click": {
+        "x": 700,
+        "y": 101
+      }
+    },
+    {
+      "image": "demo/03-holders.jpg",
+      "caption": "Holders: every fund that disclosed a position in SEC 13F filings, with what it bought or sold last quarter.",
+      "click": {
+        "x": 829,
+        "y": 101
+      }
+    },
+    {
+      "image": "demo/04-ownership.jpg",
+      "caption": "Ownership changes: fund moves, 5%+ owners and insider trades in one dated feed.",
+      "click": {
+        "x": 1149,
+        "y": 101
+      }
+    },
+    {
+      "image": "demo/05-valuation.jpg",
+      "caption": "Valuation: a DCF pre-filled from the company's own SEC filings, each input sourced.",
+      "click": {
+        "x": 1261,
+        "y": 101
+      }
+    },
+    {
+      "image": "demo/06-tape.jpg",
+      "caption": "Time and sales: every trade print with VWAP and a buy/sell estimate, or the last session's when the market is closed.",
+      "click": {
+        "x": 1004,
+        "y": 101
+      }
+    },
+    {
+      "image": "demo/07-relationships.jpg",
+      "caption": "Suppliers and customers, traced from annual reports with the evidence attached.",
+      "click": {
+        "x": 105,
+        "y": 257
+      }
+    },
+    {
+      "image": "demo/08-market-map.jpg",
+      "caption": "The whole S&P 500 at a glance: sized by market cap, coloured by today's move.",
+      "click": {
+        "x": 629,
+        "y": 521
+      }
+    },
+    {
+      "image": "demo/09-nvda.jpg",
+      "caption": "Click any company to open its stock page.",
+      "click": {
+        "x": 105,
+        "y": 103
+      }
+    },
+    {
+      "image": "demo/10-command.jpg",
+      "caption": "Or type a terminal-style command: MSFT HDS.",
+      "click": null,
+      "key": "Enter"
+    },
+    {
+      "image": "demo/11-msft-holders.jpg",
+      "caption": "Microsoft's holders, one keystroke later.",
+      "click": null
+    }
+  ]
+}

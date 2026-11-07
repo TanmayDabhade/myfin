@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Market Lens</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="A free, open-source desktop app for stock research: one page per stock with holders, ownership changes, valuation, live trades and an S&P 500 market map.">
+<meta property="og:title" content="Market Lens">
+<meta property="og:description" content="Free, open-source stock research on your desktop. Load a stock once; every view follows it.">
+<meta property="og:image" content="demo/08-market-map.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: a terminal-black page; the live product tour is the hero, then
+   features keyed by the app's own function codes, sources, download. */
+:root {
+  --bg: #050506;
+  --panel: #0e0e10;
+  --line: #1f1f23;
+  --fg: #f2f2f0;
+  --muted: #9a9aa1;
+  --faint: #5d5d65;
+  --up: #3ecf8e;
+  --down: #f2685e;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 16px/1.6 var(--body);
+  font-stretch: 100%;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; }
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.mono { font-family: var(--mono); }
+
+/* Top bar */
+.top { display: flex; align-items: center; gap: 16px; padding-block: 22px; }
+.brand { display: flex; align-items: center; gap: 10px; font: 700 15px/1 var(--display); font-stretch: 112%; letter-spacing: 0.14em; text-decoration: none; }
+.brand svg { width: 24px; height: 24px; }
+.top nav { margin-left: auto; display: flex; gap: 22px; font-size: 14px; color: var(--muted); }
+.top nav a { text-decoration: none; }
+.top nav a:hover { color: var(--fg); }
+
+/* Hero */
+.hero { padding-block: 28px 30px; display: grid; gap: 22px 56px; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: end; }
+.hero .eyebrow { grid-column: 1 / -1; }
+.hero .side { display: grid; gap: 20px; min-width: 0; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 4px #3ecf8e22; }
+h1 {
+  margin: 0;
+  font: 800 clamp(40px, 6.2vw, 80px)/0.92 var(--display);
+  font-stretch: 72%;
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  text-wrap: balance;
+  max-width: 13ch;
+}
+.lede { margin: 0; max-width: 60ch; font-size: clamp(16px, 1.6vw, 18px); color: #c9c9cc; text-wrap: pretty; }
+.actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 10px; padding: 13px 20px; border-radius: 8px; font: 600 15px/1 var(--body); text-decoration: none; border: 1px solid var(--line); background: var(--panel); transition: background 0.15s, border-color 0.15s; }
+.btn:hover { border-color: #3a3a40; background: #16161a; }
+.btn.primary { background: var(--fg); color: #000; border-color: var(--fg); }
+.btn.primary:hover { background: #d8d8d4; }
+.btn:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
+.note { font-size: 13px; color: var(--faint); margin: 0; }
+
+/* Product tour */
+.tour { padding-block: 10px 36px; }
+.window { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #000; box-shadow: 0 40px 120px -40px #000, 0 0 0 1px #ffffff08 inset; }
+.chrome { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: #0b0b0d; }
+.chrome i { width: 11px; height: 11px; border-radius: 50%; background: #2a2a2f; display: block; }
+.chrome span { margin-left: 10px; font: 500 12px/1 var(--mono); color: var(--faint); }
+.chrome .sample { margin-left: auto; font: 500 11px/1 var(--mono); color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 4px 7px; }
+.stage { position: relative; aspect-ratio: 1440 / 900; max-width: 100%; overflow: hidden; background: #000; }
+.stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity 0.38s ease; }
+.cursor { position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; margin: -3px 0 0 -4px; pointer-events: none; z-index: 3; transition: left 0.9s cubic-bezier(0.45, 0, 0.2, 1), top 0.9s cubic-bezier(0.45, 0, 0.2, 1); filter: drop-shadow(0 2px 4px #000c); }
+.ripple { position: absolute; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; border: 2px solid #fff; opacity: 0; pointer-events: none; z-index: 2; }
+.ripple.go { animation: ripple 0.55s ease-out; }
+@keyframes ripple { from { transform: scale(0.3); opacity: 0.95; } to { transform: scale(1.4); opacity: 0; } }
+.key { position: absolute; z-index: 3; font: 600 13px/1 var(--mono); background: #fff; color: #000; padding: 7px 10px; border-radius: 6px; box-shadow: 0 3px 0 #9a9aa1; opacity: 0; transform: translateY(6px); transition: opacity 0.2s, transform 0.2s; pointer-events: none; }
+.key.on { opacity: 1; transform: none; }
+.bar { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; padding: 16px 18px; border-top: 1px solid var(--line); background: #0b0b0d; }
+.count { font: 500 13px/1 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.count b { color: var(--fg); font-weight: 600; }
+.caption { margin: 0; font-size: 15px; line-height: 1.45; min-width: 0; text-wrap: pretty; }
+.controls { display: flex; gap: 6px; }
+.controls button { width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; display: grid; place-items: center; }
+.controls button:hover { border-color: #3a3a40; }
+.controls svg { width: 14px; height: 14px; }
+.ticks { display: flex; gap: 4px; padding: 0 18px 16px; background: #0b0b0d; }
+.ticks button { flex: 1; height: 4px; padding: 0; border: 0; border-radius: 2px; background: #26262b; cursor: pointer; position: relative; overflow: hidden; }
+.ticks button::after { content: ""; position: absolute; inset: 0; width: var(--fill, 0%); background: var(--fg); }
+.ticks button.done::after { width: 100%; background: #6b6b72; }
+
+/* Code band */
+.band { border-block: 1px solid var(--line); overflow: hidden; background: #08080a; }
+.band .row { display: flex; gap: 0; width: max-content; animation: slide 38s linear infinite; }
+.band span { font: 500 13px/1 var(--mono); padding: 14px 22px; color: var(--muted); white-space: nowrap; border-right: 1px solid var(--line); }
+.band span b { color: var(--fg); margin-right: 8px; font-weight: 600; }
+@keyframes slide { to { transform: translateX(-50%); } }
+
+/* Sections */
+section.block { padding-block: 72px 24px; }
+h2 { margin: 0 0 10px; font: 800 clamp(28px, 4.2vw, 46px)/1 var(--display); font-stretch: 75%; text-transform: uppercase; letter-spacing: 0; text-wrap: balance; }
+.sub { margin: 0 0 34px; color: var(--muted); max-width: 62ch; }
+.codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.code { background: var(--bg); padding: 22px 22px 24px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.code kbd { justify-self: start; font: 600 12px/1 var(--mono); letter-spacing: 0.06em; padding: 5px 8px; border: 1px solid #34343a; border-radius: 4px; color: var(--fg); background: #111114; }
+.code h3 { margin: 4px 0 0; font: 700 18px/1.2 var(--display); font-stretch: 95%; }
+.code p { margin: 0; color: var(--muted); font-size: 15px; }
+.wide { display: grid; grid-template-columns: 1.1fr 1fr; gap: 28px; align-items: center; margin-top: 28px; }
+.wide img { width: 100%; border-radius: 10px; border: 1px solid var(--line); display: block; }
+.wide h3 { margin: 0 0 10px; font: 700 26px/1.1 var(--display); font-stretch: 85%; }
+.wide p { margin: 0 0 12px; color: #c9c9cc; }
+.wide ul { margin: 0; padding-left: 18px; color: var(--muted); }
+
+/* Sources */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; min-width: 620px; }
+th, td { text-align: left; padding: 14px 18px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); background: #0a0a0c; }
+tr:last-child td { border-bottom: 0; }
+td:first-child { font-weight: 600; white-space: nowrap; }
+td.free { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-top: 26px; }
+.fact { border-top: 1px solid var(--line); padding-top: 14px; }
+.fact b { display: block; font: 700 17px/1.3 var(--display); margin-bottom: 4px; }
+.fact span { color: var(--muted); font-size: 15px; }
+
+/* Download */
+.downloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.dl { border: 1px solid var(--line); border-radius: 10px; padding: 22px; display: grid; gap: 10px; align-content: start; background: var(--panel); min-width: 0; }
+.dl h3 { margin: 0; font: 700 20px/1 var(--display); }
+.dl p { margin: 0; color: var(--muted); font-size: 14.5px; }
+.dl .btn { justify-self: start; margin-top: 4px; }
+.cmd { display: flex; align-items: center; gap: 10px; margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 10px 10px 16px; background: #09090b; min-width: 0; }
+.cmd code { font: 500 13px/1.5 var(--mono); color: #d6d6d2; overflow-x: auto; white-space: nowrap; flex: 1; min-width: 0; }
+.cmd button { flex: none; font: 500 12px/1 var(--mono); padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
+
+footer { margin-top: 80px; border-top: 1px solid var(--line); padding-block: 28px 40px; color: var(--faint); font-size: 13.5px; display: grid; gap: 8px; }
+footer a { color: var(--muted); }
+
+@media (max-width: 860px) {
+  .hero { grid-template-columns: 1fr; }
+  .wide { grid-template-columns: 1fr; }
+  .bar { grid-template-columns: 1fr auto; }
+  .caption { grid-column: 1 / -1; grid-row: 2; }
+  .top nav { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .cursor, .stage img { transition: none; }
+  .band .row { animation: none; }
+  .ripple.go { animation: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#" aria-label="Market Lens">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2 22 12 12 22 2 12Z" stroke="currentColor" stroke-width="2"/><path d="M12 7 17 12 12 17 7 12Z" fill="currentColor"/></svg>
+      MARKET LENS
+    </a>
+    <nav aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#data">Data</a>
+      <a href="#download">Download</a>
+      <a href="https://github.com/TanmayDabhade/myfin">GitHub</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Free · open source · macOS, Windows, Linux · v0.3.0</p>
+    <h1>Load a stock once. Every view follows.</h1>
+    <div class="side">
+    <p class="lede">Market Lens is a desktop app for researching stocks: who owns them and who's selling, what they're worth on their own filings, every trade as it prints, and the whole S&amp;P 500 on one map. It runs on your computer with free data from your own keys.</p>
+    <div class="actions">
+      <a class="btn primary" href="https://github.com/TanmayDabhade/myfin/releases/latest">Download v0.3.0</a>
+      <a class="btn" href="https://github.com/TanmayDabhade/myfin">View the source</a>
+    </div>
+    </div>
+  </section>
+
+  <section class="tour" aria-label="Product tour">
+    <div class="window">
+      <div class="chrome"><i></i><i></i><i></i><span>Market Lens</span><em class="sample">sample data</em></div>
+      <div class="stage" id="stage">
+        <img id="imgA" alt="" src="demo/01-overview.jpg">
+        <img id="imgB" alt="" style="opacity:0">
+        <div class="ripple" id="ripple"></div>
+        <div class="key" id="key">↵ Enter</div>
+        <svg class="cursor" id="cursor" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 2.5 19.5 13.2 12.4 14.4 16.3 21.6 13.4 23 9.6 15.8 4.3 20.8Z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="bar">
+        <span class="count" id="count"><b>01</b> / 11</span>
+        <p class="caption" id="caption" aria-live="polite">Your watchlist, with real-time prices streaming in.</p>
+        <div class="controls">
+          <button id="prev" aria-label="Previous step"><svg viewBox="0 0 14 14"><path d="M9 2 4 7l5 5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+          <button id="play" aria-label="Pause tour"><svg viewBox="0 0 14 14" id="playIcon"><path d="M4 2v10M10 2v10" stroke="currentColor" stroke-width="2"/></svg></button>
+          <button id="next" aria-label="Next step"><svg viewBox="0 0 14 14"><path d="m5 2 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+        </div>
+      </div>
+      <div class="ticks" id="ticks"></div>
+    </div>
+    <p class="note" style="margin-top:12px">Recorded from the real app clicking through on its own. Prices, holders and trades in the tour are sample data; fund and insider names are made up.</p>
+  </section>
+</div>
+
+<div class="band" aria-hidden="true">
+  <div class="row">
+    <span><b>DES</b>Description</span><span><b>GP</b>Chart</span><span><b>FA</b>Financials</span><span><b>CN</b>News</span><span><b>HDS</b>Holders</span><span><b>OWN</b>Ownership changes</span><span><b>SPLC</b>Suppliers &amp; customers</span><span><b>DCF</b>Valuation</span><span><b>TAS</b>Time &amp; sales</span><span><b>CF</b>Filings</span>
+    <span><b>DES</b>Description</span><span><b>GP</b>Chart</span><span><b>FA</b>Financials</span><span><b>CN</b>News</span><span><b>HDS</b>Holders</span><span><b>OWN</b>Ownership changes</span><span><b>SPLC</b>Suppliers &amp; customers</span><span><b>DCF</b>Valuation</span><span><b>TAS</b>Time &amp; sales</span><span><b>CF</b>Filings</span>
+  </div>
+</div>
+
+<div class="wrap">
+  <section class="block" id="features">
+    <h2>One page per stock</h2>
+    <p class="sub">Type a ticker, or a ticker and a function code like <span class="mono">AAPL HDS</span>. The stock opens as a grid of live panels; click any panel to open its full view, Esc to go back. Type another ticker and you stay on the same view.</p>
+    <div class="codes">
+      <div class="code"><kbd>HDS</kbd><h3>Holders</h3><p>Every fund with a disclosed position from SEC 13F filings: shares, what it bought or sold last quarter, and how much of its portfolio the stock is. Plus 5%+ owners, insiders, options and ownership history.</p></div>
+      <div class="code"><kbd>OWN</kbd><h3>Ownership changes</h3><p>One dated feed of the largest fund moves, 5%+ owner filings and insider open-market buys and sales, with a link to every filing.</p></div>
+      <div class="code"><kbd>DCF</kbd><h3>Valuation</h3><p>A five-year discounted cash flow pre-filled from the company's own SEC filings: cash flow, capital spending, debt, cash and shares, each labelled with its source.</p></div>
+      <div class="code"><kbd>TAS</kbd><h3>Time &amp; sales</h3><p>Every trade print as it happens, with VWAP, volume and a buy/sell estimate. When the market's closed, the last session's trades.</p></div>
+      <div class="code"><kbd>SPLC</kbd><h3>Suppliers &amp; customers</h3><p>A relationship graph traced from annual reports, with the sentence and filing behind every link.</p></div>
+      <div class="code"><kbd>DES</kbd><h3>Description</h3><p>Profile, key statistics calculated from the live price and latest statements, risk metrics, earnings against estimates, and your own research notes.</p></div>
+      <div class="code"><kbd>FA</kbd><h3>Financials</h3><p>Annual and quarterly income statement, balance sheet and cash flow, plus revenue history from SEC filings.</p></div>
+      <div class="code"><kbd>GP · CN · CF</kbd><h3>Chart, news, filings</h3><p>Candles with moving averages and comparisons, the week's company news, and recent 10-K, 10-Q and 8-K filings.</p></div>
+    </div>
+
+    <div class="wide">
+      <img src="demo/08-market-map.jpg" alt="The S&amp;P 500 market map: tiles grouped by sector, sized by market cap, coloured green or red by the day's move." loading="lazy">
+      <div>
+        <h3>The S&amp;P 500 on one map</h3>
+        <p>The Screener opens on every S&amp;P 500 company, grouped by sector, sized by market cap and coloured by the move over a day, week, month, quarter, year to date or year. Click any company to open its page.</p>
+        <ul>
+          <li>Market cap from price × shares outstanding in SEC filings</li>
+          <li>Top gainers and losers for the chosen horizon</li>
+          <li>Built in the background and saved, so it opens instantly</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="data">
+    <h2>Free data, on your machine</h2>
+    <p class="sub">No account, no server, no subscription. You paste the free keys you want once; the app loads everything by itself within each free plan and keeps it in a local database.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Source</th><th>What it provides</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><td>SEC EDGAR</td><td>13F holdings for every fund over $100M, 13D/G, Forms 3/4/5, filings, XBRL financials and share counts</td><td class="free">free, no key</td></tr>
+          <tr><td>Finnhub</td><td>Real-time US trades, company news, key metrics, earnings calendar</td><td class="free">free key</td></tr>
+          <tr><td>Twelve Data</td><td>About five years of daily prices, 1-minute bars</td><td class="free">free key</td></tr>
+          <tr><td>Alpha Vantage</td><td>Financial statements and company description</td><td class="free">free key</td></tr>
+          <tr><td>Alpaca</td><td>Past trade prints and daily bars for the market map</td><td class="free">free account</td></tr>
+          <tr><td>FRED · AISStream</td><td>Economic series and commodity prices · live vessel positions at ports and chokepoints</td><td class="free">free keys</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="facts">
+      <div class="fact"><b>Local-first</b><span>Data lives in SQLite on your computer and keeps updating where it left off after a restart.</span></div>
+      <div class="fact"><b>Every number sourced</b><span>Figures carry their provider and date; missing data shows as missing, never as zero.</span></div>
+      <div class="fact"><b>Paper trading</b><span>Simulated buys and sells with a full ledger, portfolio analytics and price alerts.</span></div>
+      <div class="fact"><b>Small and fast</b><span>Tauri 2 and Rust, no Electron. A plain JavaScript interface.</span></div>
+    </div>
+  </section>
+
+  <section class="block" id="download">
+    <h2>Download</h2>
+    <p class="sub">Version 0.3.0. One key is enough to start, and the built-in demo workspace needs none.</p>
+    <div class="downloads">
+      <div class="dl"><h3>macOS</h3><p>Universal .dmg for Apple Silicon and Intel. The app isn't signed by Apple yet: the first time, right-click it in Applications and choose Open.</p><a class="btn primary" href="https://github.com/TanmayDabhade/myfin/releases/latest">Get the .dmg</a></div>
+      <div class="dl"><h3>Windows</h3><p>.exe installer for 64-bit Windows. SmartScreen may ask you to confirm: More info → Run anyway.</p><a class="btn" href="https://github.com/TanmayDabhade/myfin/releases/latest">Get the installer</a></div>
+      <div class="dl"><h3>Linux</h3><p>.deb for Debian and Ubuntu, or a portable .AppImage.</p><a class="btn" href="https://github.com/TanmayDabhade/myfin/releases/latest">Get the package</a></div>
+    </div>
+    <div class="cmd"><code id="brew">brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git &amp;&amp; brew install --cask tanmaydabhade/myfin/market-lens-preview</code><button id="copy" type="button">Copy</button></div>
+    <p class="note" style="margin-top:8px">Homebrew tracks the newest preview build, ahead of releases.</p>
+  </section>
+
+  <footer>
+    <span>Market Lens is open source. All trades are simulated, and nothing in the app is investment advice. Data comes from the providers above under their own terms, using your keys.</span>
+    <span><a href="https://github.com/TanmayDabhade/myfin">github.com/TanmayDabhade/myfin</a></span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const FALLBACK = { width: 1440, height: 900, steps: [{ image: "demo/01-overview.jpg", caption: "Your watchlist, with real-time prices streaming in.", click: null }] };
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), cursor = $("cursor"), ripple = $("ripple"), key = $("key");
+  const layers = [$("imgA"), $("imgB")];
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let data = FALLBACK, i = 0, front = 0, playing = true, timers = [], visible = true, run = 0;
+  const HOLD = reduced ? 4200 : 2600, MOVE = reduced ? 0 : 950;
+
+  const pct = (p) => ({ left: (p.x / data.width) * 100 + "%", top: (p.y / data.height) * 100 + "%" });
+  const later = (ms, fn) => timers.push(setTimeout(fn, ms));
+  const clear = () => { timers.forEach(clearTimeout); timers = []; run++; };
+
+  function ticks() {
+    $("ticks").innerHTML = data.steps.map((s, n) => `<button aria-label="Step ${n + 1}: ${s.caption.replace(/"/g, "&quot;")}" data-n="${n}"></button>`).join("");
+    $("ticks").querySelectorAll("button").forEach((b) => (b.onclick = () => go(+b.dataset.n, true)));
+  }
+  function paintTicks(progress) {
+    $("ticks").querySelectorAll("button").forEach((b, n) => {
+      b.classList.toggle("done", n < i);
+      b.style.setProperty("--fill", n === i ? progress + "%" : "0%");
+    });
+  }
+  function show(n) {
+    const s = data.steps[n];
+    const back = layers[1 - front];
+    back.src = s.image;
+    back.alt = s.caption;
+    const swap = () => { back.style.opacity = 1; layers[front].style.opacity = 0; front = 1 - front; };
+    back.complete ? swap() : (back.onload = swap);
+    $("caption").textContent = s.caption;
+    $("count").innerHTML = `<b>${String(n + 1).padStart(2, "0")}</b> / ${data.steps.length}`;
+    key.classList.remove("on");
+  }
+  // One step: show the screen, then move the cursor to where the next click
+  // happens, click, and continue.
+  function go(n, manual = false) {
+    clear();
+    i = (n + data.steps.length) % data.steps.length;
+    show(i);
+    paintTicks(0);
+    if (i === 0) Object.assign(cursor.style, { left: "56%", top: "62%" });
+    const s = data.steps[i];
+    const t0 = performance.now(), mine = run;
+    const last = i === data.steps.length - 1;
+    const total = last ? HOLD + 1600 : HOLD + MOVE + 600;
+    const fill = () => {
+      if (!playing || mine !== run) return;
+      const p = Math.min(100, ((performance.now() - t0) / total) * 100);
+      paintTicks(p);
+      if (p < 100) requestAnimationFrame(fill);
+    };
+    if (!playing) return;
+    fill();
+    if (last) return later(total, () => go(0));
+    later(HOLD, () => {
+      if (s.click) Object.assign(cursor.style, pct(s.click));
+      if (s.key) {
+        const at = pct(s.click || { x: 140, y: 100 });
+        Object.assign(key.style, { left: `calc(${at.left} + 20px)`, top: `calc(${at.top} + 18px)` });
+      }
+      later(MOVE, () => {
+        if (s.click) {
+          Object.assign(ripple.style, pct(s.click));
+          ripple.classList.remove("go");
+          void ripple.offsetWidth;
+          ripple.classList.add("go");
+        }
+        if (s.key) key.classList.add("on");
+        later(s.key ? 700 : 420, () => go(i + 1));
+      });
+    });
+  }
+  function setPlaying(on) {
+    playing = on;
+    $("play").setAttribute("aria-label", on ? "Pause tour" : "Play tour");
+    $("playIcon").innerHTML = on ? '<path d="M4 2v10M10 2v10" stroke="currentColor" stroke-width="2"/>' : '<path d="M3.5 2 11.5 7 3.5 12Z" fill="currentColor"/>';
+    on ? go(i) : clear();
+  }
+  $("play").onclick = () => setPlaying(!playing);
+  $("next").onclick = () => go(i + 1, true);
+  $("prev").onclick = () => go(i - 1, true);
+  stage.onclick = () => setPlaying(!playing);
+  // Pause while the tour is off screen.
+  new IntersectionObserver(([e]) => {
+    if (e.isIntersecting === visible) return;
+    visible = e.isIntersecting;
+    if (!visible) clear();
+    else if (playing) go(i);
+  }).observe(stage);
+
+  $("copy").onclick = async () => {
+    const text = $("brew").textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      $("copy").textContent = "Copied";
+    } catch {
+      const r = document.createRange();
+      r.selectNodeContents($("brew"));
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      $("copy").textContent = "Selected";
+    }
+    setTimeout(() => ($("copy").textContent = "Copy"), 1600);
+  };
+
+  fetch("demo/steps.json")
+    .then((r) => r.json())
+    .then((d) => { if (d?.steps?.length) data = d; })
+    .catch(() => {})
+    .finally(() => {
+      data.steps.forEach((s) => (new Image().src = s.image));
+      ticks();
+      go(0);
+    });
+})();
+</script>
+</body>
+</html>
