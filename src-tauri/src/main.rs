@@ -4,6 +4,8 @@ mod providers;
 mod sec;
 mod ais;
 mod quotes;
+mod f13;
+mod universe;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -24,6 +26,36 @@ struct Backend {
     ais: std::sync::Arc<Mutex<AisRuntime>>,
     quotes: std::sync::Arc<Mutex<QuoteRuntime>>,
     http: reqwest::Client,
+    /// Long downloads (bulk SEC files, the listing directory).
+    bulk: reqwest::Client,
+    /// reference.sqlite: 13F holdings and the listing directory. Bulk loads
+    /// write through their own connection; WAL keeps reads going meanwhile.
+    refdb: std::sync::Arc<Mutex<Connection>>,
+    ref_path: std::path::PathBuf,
+    jobs: std::sync::Arc<Mutex<Jobs>>,
+}
+#[derive(Default, Clone, serde::Serialize)]
+struct Job {
+    running: bool,
+    stage: String,
+    done: u64,
+    total: u64,
+    error: String,
+    finished: i64,
+}
+#[derive(Default)]
+struct Jobs {
+    holdings: Job,
+    universe: Job,
+}
+fn open_reference(path: &std::path::Path) -> rusqlite::Result<Connection> {
+    let db = Connection::open(path)?;
+    // auto_vacuum only takes effect on a new file, before any table exists.
+    db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    db.busy_timeout(std::time::Duration::from_secs(120))?;
+    f13::init(&db)?;
+    universe::init(&db)?;
+    Ok(db)
 }
 fn now() -> i64 {
     SystemTime::now()
@@ -275,6 +307,295 @@ async fn fetch_sec(
             None => Err(error),
         },
     }
+}
+
+// ---- Reference data: 13F holdings and the listing directory ---------------
+type JobsRef = std::sync::Arc<Mutex<Jobs>>;
+fn set_job(jobs: &JobsRef, which: &str, f: impl FnOnce(&mut Job)) {
+    if let Ok(mut j) = jobs.lock() {
+        f(if which == "holdings" { &mut j.holdings } else { &mut j.universe });
+    }
+}
+fn sec_contact(b: &Backend) -> Result<String, String> {
+    let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+    Ok(providers::resolve(&b.env_keys, &saved, "sec").0.to_string())
+}
+/// GET into memory, reporting bytes as they arrive.
+async fn fetch_bytes(client: &reqwest::Client, url: &str, ua: &str, jobs: &JobsRef, which: &str) -> Result<Vec<u8>, String> {
+    let mut resp = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, ua)
+        .send()
+        .await
+        .map_err(|_| "Could not reach the server. Check your internet connection.".to_string())?;
+    match resp.status().as_u16() {
+        200 => {}
+        403 => return Err("SEC refused the download. Check the contact email in Settings → Data sources.".into()),
+        code => return Err(format!("Download failed (HTTP {code})")),
+    }
+    let total = resp.content_length().unwrap_or(0);
+    set_job(jobs, which, |j| {
+        j.done = 0;
+        j.total = total;
+    });
+    let mut out = Vec::with_capacity(total.min(200_000_000) as usize);
+    while let Some(chunk) = resp.chunk().await.map_err(|_| "The download was interrupted.".to_string())? {
+        out.extend_from_slice(&chunk);
+        if out.len() > 400_000_000 {
+            return Err("Download is larger than expected; stopped.".into());
+        }
+        let n = out.len() as u64;
+        set_job(jobs, which, |j| j.done = n);
+    }
+    Ok(out)
+}
+fn first_zip_entry(bytes: Vec<u8>) -> Result<String, String> {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| "Not a zip file".to_string())?;
+    let f = z.by_index(0).map_err(|_| "Empty zip file".to_string())?;
+    Ok(String::from_utf8_lossy(&f13::read_capped(f, f13::MAX_FTD)?).into_owned())
+}
+#[tauri::command]
+fn holdings_status(b: tauri::State<Backend>) -> Result<Value, String> {
+    let mut s = f13::status(&*b.refdb.lock().map_err(|_| "Database unavailable")?).map_err(|e| e.to_string())?;
+    s["job"] = serde_json::to_value(b.jobs.lock().map_err(|_| "Jobs unavailable")?.holdings.clone()).unwrap_or_default();
+    Ok(s)
+}
+/// Downloads the newest `quarters` SEC 13F data sets that aren't loaded yet,
+/// loads them, drops older quarters and refreshes the ticker-to-CUSIP map.
+#[tauri::command]
+fn holdings_update(b: tauri::State<Backend>, quarters: u32) -> Result<(), String> {
+    if !(1..=12).contains(&quarters) {
+        return Err("Choose between 1 and 12 quarters".into());
+    }
+    let contact = sec_contact(&b)?;
+    if contact.is_empty() {
+        return Err("SEC asks for a contact email before bulk downloads. Add yours in Settings → Data sources.".into());
+    }
+    {
+        let mut j = b.jobs.lock().map_err(|_| "Jobs unavailable")?;
+        if j.holdings.running {
+            return Ok(());
+        }
+        j.holdings = Job { running: true, stage: "Checking SEC for 13F data sets…".into(), ..Default::default() };
+    }
+    let (jobs, client, path, read) = (b.jobs.clone(), b.bulk.clone(), b.ref_path.clone(), b.refdb.clone());
+    tauri::async_runtime::spawn(async move {
+        let result = run_holdings(&jobs, &client, &path, &read, &sec::user_agent(&contact), quarters as usize).await;
+        set_job(&jobs, "holdings", |j| {
+            j.running = false;
+            j.finished = now();
+            match result {
+                Ok(stage) => {
+                    j.stage = stage;
+                    j.error.clear();
+                }
+                Err(e) => j.error = e,
+            }
+        });
+    });
+    Ok(())
+}
+async fn run_holdings(jobs: &JobsRef, client: &reqwest::Client, path: &std::path::Path, read: &std::sync::Arc<Mutex<Connection>>, ua: &str, quarters: usize) -> Result<String, String> {
+    let page = fetch_bytes(client, f13::LIST_URL, ua, jobs, "holdings").await?;
+    let sets = f13::set_links(&String::from_utf8_lossy(&page));
+    if sets.is_empty() {
+        return Err("Couldn't find any 13F data sets on SEC's page.".into());
+    }
+    let want: Vec<(String, String)> = sets.into_iter().take(quarters).collect();
+    let loaded: Vec<String> = {
+        let db = read.lock().map_err(|_| "Database unavailable")?;
+        let mut q = db.prepare("SELECT name FROM f13_sets").map_err(|e| e.to_string())?;
+        let v = q.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+        v
+    };
+    let todo: Vec<&(String, String)> = want.iter().rev().filter(|(n, _)| !loaded.contains(n)).collect();
+    let dir = path.parent().unwrap_or(std::path::Path::new(".")).join("f13");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    for (i, (name, link)) in todo.iter().enumerate() {
+        let label = format!("{} of {}: SEC 13F filings {}", i + 1, todo.len(), name.trim_end_matches("_form13f").replace('-', " to "));
+        set_job(jobs, "holdings", |j| j.stage = format!("Downloading {label}"));
+        let bytes = fetch_bytes(client, &format!("https://www.sec.gov{link}"), ua, jobs, "holdings").await?;
+        let file = dir.join(format!("{name}.zip"));
+        std::fs::write(&file, &bytes).map_err(|_| "Couldn't save the download (disk full?)".to_string())?;
+        drop(bytes);
+        set_job(jobs, "holdings", |j| j.stage = format!("Reading {label}"));
+        let (p, f, n, jb) = (path.to_path_buf(), file.clone(), name.clone(), jobs.clone());
+        let out = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+            let mut db = open_reference(&p).map_err(|e| e.to_string())?;
+            db.execute_batch("PRAGMA cache_size=-262144;").map_err(|e| e.to_string())?;
+            let zip = std::fs::File::open(&f).map_err(|e| e.to_string())?;
+            f13::ingest(&mut db, zip, &n, &mut |done, total| {
+                set_job(&jb, "holdings", |j| {
+                    j.done = done;
+                    j.total = total;
+                })
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&file);
+        out?;
+    }
+    set_job(jobs, "holdings", |j| j.stage = "Updating the ticker-to-CUSIP map…".into());
+    let page = fetch_bytes(client, f13::FTD_URL, ua, jobs, "holdings").await?;
+    let have: Vec<String> = {
+        let db = read.lock().map_err(|_| "Database unavailable")?;
+        let mut q = db.prepare("SELECT name FROM ftd_files").map_err(|e| e.to_string())?;
+        let v = q.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+        v
+    };
+    for (name, link) in f13::ftd_links(&String::from_utf8_lossy(&page)).into_iter().take(f13::FTD_FILES) {
+        if have.contains(&name) {
+            continue;
+        }
+        let text = first_zip_entry(fetch_bytes(client, &format!("https://www.sec.gov{link}"), ua, jobs, "holdings").await?)?;
+        let map = f13::parse_ftd(&text);
+        let mut db = read.lock().map_err(|_| "Database unavailable")?;
+        f13::store_ftd(&mut db, &name, &map).map_err(|e| e.to_string())?;
+    }
+    set_job(jobs, "holdings", |j| j.stage = "Removing older quarters…".into());
+    let p = path.to_path_buf();
+    let names: Vec<String> = want.iter().map(|w| w.0.clone()).collect();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let db = open_reference(&p).map_err(|e| e.to_string())?;
+        f13::prune(&db, quarters).map_err(|e| e.to_string())?;
+        let mut q = db.prepare("SELECT name FROM f13_sets").map_err(|e| e.to_string())?;
+        let all: Vec<String> = q.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?.filter_map(Result::ok).collect();
+        for n in all.iter().filter(|n| !names.contains(n)) {
+            db.execute("DELETE FROM f13_sets WHERE name=?1", [n]).map_err(|e| e.to_string())?;
+        }
+        db.execute_batch("PRAGMA incremental_vacuum;").map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(if todo.is_empty() { "Up to date".into() } else { format!("Loaded {} quarter(s)", todo.len()) })
+}
+fn parse_period(p: &Option<String>) -> Option<u32> {
+    let p = p.as_deref()?.replace('-', "");
+    (p.len() == 8).then(|| p.parse().ok()).flatten()
+}
+/// All 13F holders of a ticker's securities. `extra` adds CUSIPs the caller
+/// knows (from 13G cover pages); `only` replaces the automatic choice.
+#[tauri::command]
+fn holders(b: tauri::State<Backend>, ticker: String, name: String, extra: Vec<String>, only: Option<Vec<String>>, period: Option<String>) -> Result<Value, String> {
+    if ticker.len() > 30 || name.len() > 200 || extra.len() > 20 || only.as_ref().is_some_and(|o| o.len() > 20) {
+        return Err("Invalid holder request".into());
+    }
+    let db = b.refdb.lock().map_err(|_| "Database unavailable")?;
+    let period = parse_period(&period);
+    let found = f13::resolve(&db, &ticker, &name, &extra, period).map_err(|e| e.to_string())?;
+    let ids: Vec<String> = match only {
+        Some(o) => o,
+        None => found["securities"].as_array().into_iter().flatten().filter_map(|s| s["cusip"].as_str().map(String::from)).collect(),
+    };
+    let mut out = f13::holders(&db, &ids, period).map_err(|e| e.to_string())?;
+    out["securities"] = found["securities"].clone();
+    out["related"] = found["related"].clone();
+    out["included"] = json!(ids);
+    Ok(out)
+}
+#[tauri::command]
+fn holder_portfolio(b: tauri::State<Backend>, cik: u32, period: Option<String>) -> Result<Value, String> {
+    let db = b.refdb.lock().map_err(|_| "Database unavailable")?;
+    f13::portfolio(&db, cik, parse_period(&period)).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn holders_find(b: tauri::State<Backend>, q: String) -> Result<Value, String> {
+    if q.trim().len() < 2 || q.len() > 80 {
+        return Ok(json!([]));
+    }
+    let db = b.refdb.lock().map_err(|_| "Database unavailable")?;
+    f13::find_filers(&db, &q, 12).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn universe_status(b: tauri::State<Backend>) -> Result<Value, String> {
+    let mut s = universe::status(&*b.refdb.lock().map_err(|_| "Database unavailable")?).map_err(|e| e.to_string())?;
+    s["job"] = serde_json::to_value(b.jobs.lock().map_err(|_| "Jobs unavailable")?.universe.clone()).unwrap_or_default();
+    Ok(s)
+}
+/// Rebuilds the listing directory from Twelve Data's public stock and ETF
+/// lists, plus SEC's company file when a contact email is set.
+#[tauri::command]
+fn universe_refresh(b: tauri::State<Backend>) -> Result<(), String> {
+    let contact = sec_contact(&b)?;
+    {
+        let mut j = b.jobs.lock().map_err(|_| "Jobs unavailable")?;
+        if j.universe.running {
+            return Ok(());
+        }
+        j.universe = Job { running: true, stage: "Downloading the world stock list…".into(), ..Default::default() };
+    }
+    let (jobs, client, path) = (b.jobs.clone(), b.bulk.clone(), b.ref_path.clone());
+    tauri::async_runtime::spawn(async move {
+        let result: Result<String, String> = async {
+            let ua = "MarketLens/0.2 (desktop research app)";
+            let stocks = fetch_bytes(&client, universe::STOCKS_URL, ua, &jobs, "universe").await?;
+            set_job(&jobs, "universe", |j| j.stage = "Downloading the world ETF list…".into());
+            let etfs = fetch_bytes(&client, universe::ETFS_URL, ua, &jobs, "universe").await?;
+            let sec_body = if contact.is_empty() {
+                None
+            } else {
+                set_job(&jobs, "universe", |j| j.stage = "Downloading SEC's company list…".into());
+                fetch_bytes(&client, universe::SEC_URL, &sec::user_agent(&contact), &jobs, "universe").await.ok()
+            };
+            set_job(&jobs, "universe", |j| j.stage = "Building the directory…".into());
+            tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+                let mut list = universe::parse_twelve(&String::from_utf8_lossy(&stocks), false)?;
+                let n_stocks = list.len() as i64;
+                drop(stocks);
+                let etf = universe::parse_twelve(&String::from_utf8_lossy(&etfs), true).unwrap_or_default();
+                let n_etfs = etf.len() as i64;
+                list.extend(etf);
+                let sec = sec_body.map(|s| universe::parse_sec(&String::from_utf8_lossy(&s)).unwrap_or_default()).unwrap_or_default();
+                let merged = universe::merge(list, &sec);
+                let mut db = open_reference(&path).map_err(|e| e.to_string())?;
+                let n = universe::replace(&mut db, &merged, (n_stocks, n_etfs, sec.len() as i64)).map_err(|e| e.to_string())?;
+                Ok(format!("{n} listings"))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
+        .await;
+        set_job(&jobs, "universe", |j| {
+            j.running = false;
+            j.finished = now();
+            match result {
+                Ok(stage) => {
+                    j.stage = stage;
+                    j.error.clear();
+                }
+                Err(e) => j.error = e,
+            }
+        });
+    });
+    Ok(())
+}
+#[tauri::command]
+fn universe_search(b: tauri::State<Backend>, q: String, limit: Option<usize>) -> Result<Value, String> {
+    let db = b.refdb.lock().map_err(|_| "Database unavailable")?;
+    universe::search(&db, &q, limit.unwrap_or(12)).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn universe_browse(b: tauri::State<Backend>, country: String, mic: String, kind: String, q: String, offset: usize, limit: usize) -> Result<Value, String> {
+    if [&country, &mic, &kind, &q].iter().any(|x| x.len() > 80) {
+        return Err("Invalid filter".into());
+    }
+    let db = b.refdb.lock().map_err(|_| "Database unavailable")?;
+    universe::browse(&db, &universe::Filter { country, mic, kind, q, offset, limit }).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn universe_facets(b: tauri::State<Backend>) -> Result<Value, String> {
+    let db = b.refdb.lock().map_err(|_| "Database unavailable")?;
+    universe::facets(&db).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn universe_get(b: tauri::State<Backend>, key: String) -> Result<Value, String> {
+    if key.len() > 40 {
+        return Ok(Value::Null);
+    }
+    let db = b.refdb.lock().map_err(|_| "Database unavailable")?;
+    Ok(universe::get(&db, &key).map_err(|e| e.to_string())?.unwrap_or(Value::Null))
 }
 #[derive(Default)]
 struct AisRuntime {
@@ -536,5 +857,5 @@ async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, k
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }
