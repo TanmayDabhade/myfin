@@ -6,7 +6,7 @@ A local-first financial research and paper-trading application built with **Taur
 
 ## Install and update with Homebrew (preview channel)
 
-Available after the release workflow is merged and the first eligible PR build publishes:
+Tracks the newest PR build, ahead of releases:
 
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
