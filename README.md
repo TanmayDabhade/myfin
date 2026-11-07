@@ -1,5 +1,7 @@
 # Market Lens Desktop
 
+**Website and product tour:** https://tanmaydabhade.github.io/myfin/
+
 A local-first financial research and paper-trading application built with **Tauri 2, Rust, SQLite, and a lightweight Vite/JavaScript interface**. There is no Electron runtime or hosted backend. All trades are simulations.
 
 ## Install and update with Homebrew (preview channel)
