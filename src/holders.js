@@ -4,28 +4,40 @@
 
 // ---- Command line ---------------------------------------------------------
 // Terminal-style mnemonics typed in the search box: "AAPL HDS", "HDS AAPL",
-// "HDS" (current ticker). Words like US and EQUITY are ignored.
+// "HDS" (current stock). Stock functions open that view of the stock page.
+// Words like US and EQUITY are ignored.
 export const COMMANDS = {
-  HDS: "Holders",
-  DES: "Research",
-  GP: "Research",
-  FA: "Research",
-  CN: "Research",
-  RELS: "Relationships",
-  SPLC: "Relationships",
+  DES: "Stock",
+  GP: "Stock",
+  FA: "Stock",
+  CN: "Stock",
+  HDS: "Stock",
+  OWN: "Stock",
+  SPLC: "Stock",
+  RELS: "Stock",
+  DCF: "Stock",
+  TAS: "Stock",
+  QR: "Stock",
+  CF: "Stock",
   EQS: "Universe",
   SECF: "Universe",
   PORT: "Portfolio",
   ECO: "Economy",
   CMDTY: "Commodities",
 };
+const VIEW_ALIAS = { RELS: "SPLC", QR: "TAS" };
 const FILLER = new Set(["US", "EQUITY", "<GO>", "GO", "<EQUITY>"]);
 export function parseCommand(text) {
-  const words = String(text || "").trim().toUpperCase().split(/\s+/).filter((w) => w && !FILLER.has(w));
-  const cmd = words.find((w) => COMMANDS[w]);
+  const all = String(text || "").trim().toUpperCase().split(/\s+/).filter(Boolean);
+  const words = all.filter((w) => !FILLER.has(w));
+  // "CF US EQUITY" names the security; a lone word after it is a ticker.
+  if (words.length === 1 && all.some((w) => w === "EQUITY" || w === "<EQUITY>")) return null;
+  // The function is the last command word, so "CF HDS" is CF's holders.
+  const cmd = words.findLast((w) => COMMANDS[w]);
   if (!cmd) return null;
-  const rest = words.filter((w) => w !== cmd);
-  return { command: cmd, page: COMMANDS[cmd], ticker: rest[0] || null };
+  const rest = words.filter((w, i) => i !== words.lastIndexOf(cmd));
+  const page = COMMANDS[cmd];
+  return { command: cmd, page, view: page === "Stock" ? VIEW_ALIAS[cmd] || cmd : null, ticker: rest[0] || null };
 }
 
 // ---- Shares outstanding (XBRL dei cover-page facts) -----------------------

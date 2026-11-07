@@ -6,3 +6,4 @@ src-tauri/gen/
 *.sqlite*
 playwright-report/
 test-results/
+.superpowers/

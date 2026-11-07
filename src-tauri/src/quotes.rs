@@ -3,11 +3,13 @@
 //! websocket loop lives in the desktop binary.
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 pub const STREAM_URL: &str = "wss://ws.finnhub.io";
 /// Finnhub's free plan streams at most 50 symbols per connection.
 pub const MAX_SYMBOLS: usize = 50;
+/// Trade prints kept per symbol for the time-and-sales tape.
+pub const MAX_TAPE: usize = 500;
 
 pub fn valid_symbol(s: &str) -> bool {
     !s.is_empty() && s.len() <= 20 && s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || ".:-_^".contains(c))
@@ -59,9 +61,42 @@ pub struct Quote {
     pub time: i64,
 }
 
+/// One trade print for the tape: price, size, time and Finnhub's
+/// trade-condition codes.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Print {
+    pub price: f64,
+    pub size: f64,
+    pub time: i64,
+    pub conditions: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct Book {
     pub quotes: HashMap<String, Quote>,
+    /// Recent prints per symbol, oldest first, at most MAX_TAPE.
+    pub tape: HashMap<String, VecDeque<Print>>,
+}
+
+impl Book {
+    /// Drops quotes and tapes for symbols no longer streamed.
+    pub fn retain(&mut self, symbols: &[String]) {
+        self.quotes.retain(|s, _| symbols.contains(s));
+        self.tape.retain(|s, _| symbols.contains(s));
+    }
+    /// Prints for one symbol newer than `since` (Unix ms), oldest first.
+    pub fn prints(&self, symbol: &str, since: i64) -> Vec<Print> {
+        self.tape.get(symbol).map(|t| t.iter().filter(|p| p.time > since).cloned().collect()).unwrap_or_default()
+    }
+    fn record(&mut self, symbol: &str, print: Print) {
+        let tape = self.tape.entry(symbol.to_string()).or_default();
+        // Trades can arrive out of order inside a batch: keep the tape sorted.
+        let at = tape.iter().rposition(|p| p.time <= print.time).map_or(0, |i| i + 1);
+        tape.insert(at, print);
+        while tape.len() > MAX_TAPE {
+            tape.pop_front();
+        }
+    }
 }
 
 impl Book {
@@ -76,6 +111,15 @@ impl Book {
                     if !p.is_finite() || p <= 0.0 || !wanted.iter().any(|w| w == s) {
                         continue;
                     }
+                    let size = t["v"].as_f64().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0);
+                    let conditions = t["c"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c.as_str().map(str::to_string).or_else(|| c.as_i64().map(|n| n.to_string())))
+                        .take(8)
+                        .collect();
+                    self.record(s, Print { price: p, size, time, conditions });
                     // Trades can arrive out of order inside a batch.
                     if self.quotes.get(s).is_some_and(|q| q.time > time) {
                         continue;
@@ -109,6 +153,20 @@ mod tests {
         assert!(url("K").starts_with("wss://ws.finnhub.io/?token="));
     }
     #[test]
+    fn tape_is_capped_and_keeps_conditions() {
+        let mut b = Book::default();
+        for i in 0..(MAX_TAPE as i64 + 20) {
+            let msg = json!({"type":"trade","data":[{"s":"AAPL","p":100.0,"t":i,"v":1,"c":["12", 37]}]});
+            b.apply(&msg, &wanted()).unwrap();
+        }
+        let tape = b.prints("AAPL", -1);
+        assert_eq!(tape.len(), MAX_TAPE);
+        assert_eq!(tape[0].time, 20);
+        assert_eq!(tape[0].conditions, vec!["12", "37"]);
+        b.retain(&["QCOM".into()]);
+        assert!(b.prints("AAPL", -1).is_empty());
+    }
+    #[test]
     fn keeps_latest_trade_per_wanted_symbol() {
         let mut b = Book::default();
         let msg = json!({"type":"trade","data":[
@@ -121,6 +179,12 @@ mod tests {
         assert_eq!(b.quotes["AAPL"], Quote { price: 201.5, time: 2000 });
         assert!(!b.quotes.contains_key("MSFT") && !b.quotes.contains_key("QCOM"));
         assert_eq!(b.apply(&json!({"type":"ping"}), &wanted()), Ok(0));
+        // Both AAPL prints are on the tape, oldest first, even the late one.
+        let tape = b.prints("AAPL", 0);
+        assert_eq!(tape.iter().map(|p| p.time).collect::<Vec<_>>(), vec![1000, 2000]);
+        assert_eq!(tape[1].size, 10.0);
+        assert_eq!(b.prints("AAPL", 1000).len(), 1);
+        assert!(b.prints("MSFT", 0).is_empty());
         assert!(b.apply(&json!({"type":"error","msg":"Invalid symbol"}), &wanted()).is_err());
     }
 }

@@ -9,6 +9,19 @@ pub const REVENUE_TAGS: [&str; 3] = [
     "Revenues",
     "SalesRevenueNet",
 ];
+/// XBRL concepts used to pre-fill the valuation model: cash flow, capital
+/// spending, cash, debt and diluted shares. Must match VALUE_TAGS in
+/// src/sec-tags.js.
+pub const VALUE_TAGS: [&str; 8] = [
+    "NetCashProvidedByUsedInOperatingActivities",
+    "PaymentsToAcquirePropertyPlantAndEquipment",
+    "CashAndCashEquivalentsAtCarryingValue",
+    "LongTermDebt",
+    "LongTermDebtNoncurrent",
+    "LongTermDebtCurrent",
+    "ShortTermBorrowings",
+    "WeightedAverageNumberOfDilutedSharesOutstanding",
+];
 
 pub fn cik(raw: &str) -> Result<String, String> {
     let digits = raw.trim().trim_start_matches("CIK");
@@ -47,6 +60,12 @@ pub fn resource(kind: &str, cik_raw: &str, accession: &str, doc: &str) -> Result
         "submissions" => Ok((format!("https://data.sec.gov/submissions/CIK{}.json", cik(cik_raw)?), false, 21_600)),
         "revenue" => {
             if !REVENUE_TAGS.contains(&doc) {
+                return Err("Unsupported XBRL concept".into());
+            }
+            Ok((format!("https://data.sec.gov/api/xbrl/companyconcept/CIK{}/us-gaap/{doc}.json", cik(cik_raw)?), false, 86_400))
+        }
+        "concept" => {
+            if !VALUE_TAGS.contains(&doc) {
                 return Err("Unsupported XBRL concept".into());
             }
             Ok((format!("https://data.sec.gov/api/xbrl/companyconcept/CIK{}/us-gaap/{doc}.json", cik(cik_raw)?), false, 86_400))
@@ -275,6 +294,10 @@ mod tests {
         let (u, contact, _) = resource("shares", "320193", "", "").unwrap();
         assert!(u.ends_with("/CIK0000320193/dei/EntityCommonStockSharesOutstanding.json") && !contact);
         assert!(resource("other", "1", "", "").is_err());
+        let (u, contact, _) = resource("concept", "320193", "", "LongTermDebt").unwrap();
+        assert!(u.ends_with("/CIK0000320193/us-gaap/LongTermDebt.json") && !contact);
+        assert!(resource("concept", "320193", "", "Revenues").is_err());
+        assert!(resource("concept", "320193", "", "../x").is_err());
     }
     #[test]
     fn strips_html_and_hidden_xbrl() {

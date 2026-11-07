@@ -13,6 +13,8 @@ import {
   resolveCenter,
   ensureCompany,
   companyGroup,
+  neighborhood,
+  parentTicker,
 } from "./relationships.js";
 import {
   screenerView,
@@ -33,7 +35,8 @@ import {
   mentionsOf,
   filingURL,
 } from "./filings.js";
-import { REVENUE_TAGS } from "./sec-tags.js";
+import { REVENUE_TAGS, VALUE_TAGS } from "./sec-tags.js";
+import { VIEWS, VIEW_CODES, viewLabel, pushRecent, tapeStats, ownershipFeed, valuationInputs } from "./stock.js";
 import {
   parseCommand,
   sharesSeries,
@@ -66,6 +69,7 @@ import {
   quotesStart,
   quotesStop,
   quotesSnapshot,
+  quotesTape,
   native,
   nativeTrade,
   holdingsStatus,
@@ -197,22 +201,13 @@ if (native && !state.setupDone) {
 }
 const graph = () => (state.relationshipGraph ||= seedGraph());
 if (state.relationshipGraph) validateGraph(state.relationshipGraph);
-const pages = [
-  "Overview",
-  "Universe",
-  "Research",
-  "Holders",
-  "Relationships",
-  "Trade",
-  "Portfolio",
-  "Screener",
-  "Valuation",
-  "Economy",
-  "Alerts",
-  "Commodities",
-  "Settings",
+// Market-wide and personal pages. Everything about one company lives on the
+// stock page, which the sidebar lists by ticker.
+const navGroups = [
+  ["Markets", ["Overview", "Universe", "Screener", "Economy", "Commodities"]],
+  ["Your account", ["Portfolio", "Trade", "Alerts"]],
 ];
-const navIcons = { Overview: "◫", Universe: "◍", Research: "⌕", Holders: "◔", Relationships: "⋈", Trade: "⇄", Portfolio: "◉", Screener: "☷", Valuation: "ƒ", Economy: "◎", Alerts: "◇", Commodities: "≋", Settings: "⚙" };
+const navIcons = { Overview: "◫", Universe: "◍", Screener: "☷", Economy: "◎", Commodities: "≋", Portfolio: "◉", Trade: "⇄", Alerts: "◇", Settings: "⚙" };
 // Dover Strait by default: AISStream's coverage is strong there and thin in
 // some Middle East and open-ocean areas. The last pick is remembered.
 let maritimeSelected = locations.some((x) => x.id === state.vesselLocation)
@@ -471,29 +466,21 @@ let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    if (page === "Relationships") render();
+    if (inGraph()) render();
     else drawCharts();
   }, 150);
 });
 function render() {
   const a = asset();
-  if (a) symbol = a.symbol;
+  if (!symbol && a) symbol = a.symbol;
   const views = {
     Setup: setup,
     Overview: overview,
-    Research: research,
-    Holders: holdersPage,
+    Stock: stockPage,
     Universe: universePage,
-    Relationships: () =>
-      relationshipsView(graph(), graphCenter, graphCandidates, {
-        width: graphWidth(),
-        trail: graphTrail,
-        progress: scanText(graphCenter),
-      }) + filingScan(),
     Trade: trade,
     Portfolio: portfolioPage,
     Screener: screener,
-    Valuation: valuation,
     Economy: economy,
     Alerts: alerts,
     Commodities: commodities,
@@ -501,7 +488,7 @@ function render() {
   };
   const demo = page !== "Setup" && state.mode === "sample";
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="side-search"><input id="search" placeholder="${page === "Relationships" ? "Find a company…" : page === "Holders" ? "Ticker for holders…" : "Ticker, name or AAPL HDS"}" aria-label="Search any listing or type a command like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${pages.map((p) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${navIcons[p]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content"><div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Relationships" ? "COMPANY RELATIONSHIPS · DATED SOURCED DISCLOSURES" : page === "Holders" ? "HOLDERS · SEC 13F, 13D/G AND FORMS 3/4/5" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page === "Holders" ? "Holders (HDS)" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>${views[page]()}</section><footer>Market Lens 0.2 · USD equity workspace · Daily prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="side-search"><input id="search" placeholder="Ticker or AAPL HDS" aria-label="Search any listing or type a function like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${sideNav()}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content">${page === "Stock" ? "" : `<div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>`}${views[page]()}</section><footer>Market Lens 0.2 · USD equity workspace · Daily prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
   bind();
   bindVessel();
   drawCharts();
@@ -516,6 +503,23 @@ function render() {
   autoLoad();
   syncVesselStream();
   syncPriceStream();
+  syncTape();
+}
+// Sidebar: market and account pages, then the loaded stock and recent ones.
+function sideNav() {
+  const item = (p) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${navIcons[p]}</span>${p}</button>`;
+  const map = activeMap();
+  const stockItem = (t, current) => {
+    const a = map[t];
+    const c = a && a.bars?.length > 1 ? change(a) : null;
+    return `<button class="nav stock-nav ${current && page === "Stock" ? "selected" : ""}" ${current ? 'data-page="Stock"' : `data-recent="${esc(t)}"`} title="${esc(a?.name || t)}"><span>${current ? "◆" : "·"}</span>${esc(t)}${c == null ? "" : `<small data-live-change="${esc(t)}" data-suffix="" class="${tone(c)}">${pct(c)}</small>`}</button>`;
+  };
+  const recent = (state.recent || []).filter((t) => t !== symbol).slice(0, 5);
+  return (
+    navGroups.map(([label, list]) => `<div class="nav-group">${label}</div>${list.map(item).join("")}`).join("") +
+    (symbol ? `<div class="nav-group">Stock</div>${stockItem(symbol, true)}${recent.map((t) => stockItem(t, false)).join("")}` : "") +
+    `<div class="nav-group"></div>${item("Settings")}`
+  );
 }
 // ---- Real-time prices (Finnhub) -------------------------------------------
 let quoteTimer = null,
@@ -646,7 +650,7 @@ function overview() {
     )
     .join(
       "",
-    )}</div><div class="grid main-grid"><section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small><span class="head-price">${livePrice(a)}${liveChange(a)}</span></h2>${button("Research →", "research")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><section class="panel"><div class="panel-head"><h2>Watchlist</h2></div><div class="watch-add"><input id="watch-input" placeholder="Add ticker" maxlength="20" aria-label="Add ticker to watchlist">${button("Add", "watch-add")}</div>${
+    )}</div><div class="grid main-grid"><section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small><span class="head-price">${livePrice(a)}${liveChange(a)}</span></h2>${button(`Open ${esc(a.symbol)} →`, "research", "", `data-value="${esc(a.symbol)}"`)}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><section class="panel"><div class="panel-head"><h2>Watchlist</h2></div><div class="watch-add"><input id="watch-input" placeholder="Add ticker" maxlength="20" aria-label="Add ticker to watchlist">${button("Add", "watch-add")}</div>${
     state.watchlist
       .map((s) => all.find((a) => a.symbol === s))
       .filter(Boolean)
@@ -813,48 +817,6 @@ function drawCharts(only) {
     };
   });
 }
-function research() {
-  const a = asset();
-  if (!a) return empty("Import or download an asset in Settings.");
-  const o = a.overview || {},
-    r = risk(a.bars),
-    data =
-      state.mode === "market"
-        ? state.datasets[`${symbol}:${statement}`]?.data?.[period]
-        : null;
-  const news =
-    state.mode === "market" ? state.datasets[`${symbol}:NEWS_SENTIMENT`] : null;
-  return `<section class="panel"><div class="panel-head"><h2>${esc(a.symbol)} <small>${esc(a.name)}</small><span class="head-price">${livePrice(a)}${liveChange(a)}</span></h2>${state.mode === "market" ? button("Refresh", "research-refresh") : ""}${button("Supplier / customer graph", "graph-open")}</div>${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div></section><div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || waiting("OVERVIEW", "the company profile"))}</p><div class="metrics"><span>Sector</span><b>${esc(a.sector || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div>${link("https://www.sec.gov/edgar/search/", "SEC filings search")}<p><small>Search company name or ticker on EDGAR. Metrics retain provider definitions and reported currencies.</small></p></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="8" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div><section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select></div>${
-    data?.length
-      ? table(
-          ["Metric", ...data.slice(0, 4).map((r) => esc(r.fiscalDateEnding))],
-          Object.keys(data[0])
-            .filter(
-              (k) => !["fiscalDateEnding", "reportedCurrency"].includes(k),
-            )
-            .map(
-              (k) =>
-                `<tr><td>${esc(k)}</td>${data
-                  .slice(0, 4)
-                  .map(
-                    (r) =>
-                      `<td>${number(r[k]) == null ? "—" : compact(+r[k])}</td>`,
-                  )
-                  .join("")}</tr>`,
-            ),
-        )
-      : empty(esc(waiting(statement, "financial statements")))
-  }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. Raw provider figures; “None” is missing, not zero.</small></section><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company news</h2></div>${
-    news?.data.feed
-      ?.slice(0, 10)
-      .map((n) => {
-        const url = safeURL(n.url);
-        return `<article>${url ? link(url, n.title) : esc(n.title)}<small>${esc(n.source)} · ${esc(n.time_published)}</small><p>${esc(n.summary)}</p></article>`;
-      })
-      .join("") ||
-    empty(esc(waiting("NEWS_SENTIMENT", "company news")))
-  } ${datasetStamp(news)}</section><section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${state.mode === "market" ? button("Load calendar", "calendar-fetch") : ""}</div>${calendar()}<small>Calendar availability depends on provider access. Dividend dates are available in the company overview: ${esc(o.DividendDate || "—")}.</small></section></div>${secPanel()}`;
-}
 // ---- Reference data status (13F holdings, listing directory) ---------------
 let refStatus = null, // holdings_status
   uniStatus = null, // universe_status
@@ -914,16 +876,12 @@ async function autoReference() {
   watchReference();
 }
 // ---- Holders (HDS) ----------------------------------------------------------
-const hds = { ticker: null, followed: null, tab: "institutions", filter: "all", q: "", sort: "value", dir: -1, limit: 100, fund: null, fundFilter: "all", fundSort: "value", fundLimit: 100, insiderSince: "" };
+const hds = { tab: "institutions", filter: "all", q: "", sort: "value", dir: -1, limit: 100, fund: null, fundFilter: "all", fundSort: "value", fundLimit: 100, insiderSince: "" };
 const hdsData = {}; // ticker -> loaded holder data for this session
-const hdsTicker = () => (hds.ticker || symbol || "").toUpperCase();
+const hdsTicker = () => (symbol || "").toUpperCase();
 const hdsEntry = (t) => (hdsData[t] ||= { errors: {}, loading: {}, only: null, period: null });
 function openHolders(t) {
-  hds.ticker = String(t || symbol).trim().toUpperCase();
-  hds.followed = symbol;
-  Object.assign(hds, { fund: null, filter: "all", q: "", limit: 100 });
-  page = "Holders";
-  render();
+  openStock(t || symbol, "HDS");
 }
 async function companyName(t) {
   const a = activeMap()[t];
@@ -969,6 +927,9 @@ function loadOwnership(t) {
     const list = f.schedules.slice(0, 40);
     d.scheduleProgress = { done: 0, total: list.length };
     for (const s of list) {
+      // Another stock is open: stop so its filings come first. Reads resume
+      // (mostly from cache) when this stock is opened again.
+      if (symbol !== t) return;
       try {
         const xml = (await fetchSEC("xml", d.cik, s.accession, s.doc)).data.xml;
         d.schedules.push({ ...parseSchedule13(xml), filed: s.filed, accession: s.accession, url: s.url });
@@ -980,12 +941,13 @@ function loadOwnership(t) {
     d.scheduleProgress = null;
     if (!d.holders?.securities?.length && d.schedules.some((s) => s.cusips.length)) loadHolders(t, true);
     refresh();
-    await loadInsiders(t, 40);
+    if (!(await loadInsiders(t, 40))) return;
     d.secDone = true;
   })()
     .catch((e) => (d.errors.sec = message(e)))
     .finally(() => {
       d.loading.sec = false;
+      d.scheduleProgress = null;
       refresh();
     });
 }
@@ -996,6 +958,10 @@ async function loadInsiders(t, n) {
   const todo = (d.insiderList || []).filter((f) => !have.has(f.accession)).slice(0, n);
   d.insiderProgress = { done: 0, total: todo.length };
   for (const f of todo) {
+    if (symbol !== t) {
+      d.insiderProgress = null;
+      return false;
+    }
     try {
       const xml = (await fetchSEC("xml", d.cik, f.accession, f.doc)).data.xml;
       d.insiderForms.push({ ...parseOwnership(xml), filed: f.filed, accession: f.accession, url: f.url });
@@ -1007,6 +973,7 @@ async function loadInsiders(t, n) {
   }
   d.insiderProgress = null;
   d.insiderView = null;
+  return true;
 }
 function sharesOutFor(d) {
   return sharesAt(d.series, d.holders?.period || new Date().toISOString().slice(0, 10));
@@ -1186,7 +1153,7 @@ function holdersPage() {
     ["options", "Options (13F)"],
     ["history", "History"],
   ];
-  const head = `<section class="panel"><div class="panel-head"><h2>${esc(t)} <small>${esc(prettyName(d.name || ""))}</small></h2><div class="inline"><input id="hds-ticker" placeholder="Another ticker" maxlength="30" aria-label="Show holders for ticker" autocomplete="off" spellcheck="false">${button("Go", "hds-go")}</div>${quarters.length ? `<label class="inline">Quarter<select id="hds-period">${quarters.map((q) => `<option value="${esc(q.period)}" ${q.period === (d.period || d.holders?.period) ? "selected" : ""}>${esc(q.period)} · ${int(q.filers)} managers</option>`).join("")}</select></label>` : ""}${button("Export CSV", "hds-export")}${button("Reload", "hds-reload")}</div>${securitiesLine(d)}<div class="tabs">${tabs.map(([k, l]) => button(l, "hds-tab", hds.tab === k ? "active" : "", `data-value="${k}"`)).join("")}</div></section>`;
+  const head = `<section class="panel"><div class="panel-head"><h2>Holders <small>SEC 13F, 13D/G and Forms 3/4/5</small></h2>${quarters.length ? `<label class="inline">Quarter<select id="hds-period">${quarters.map((q) => `<option value="${esc(q.period)}" ${q.period === (d.period || d.holders?.period) ? "selected" : ""}>${esc(q.period)} · ${int(q.filers)} managers</option>`).join("")}</select></label>` : ""}${button("Export CSV", "hds-export")}${button("Reload", "hds-reload")}</div>${securitiesLine(d)}<div class="tabs">${tabs.map(([k, l]) => button(l, "hds-tab", hds.tab === k ? "active" : "", `data-value="${k}"`)).join("")}</div></section>`;
   const body = { institutions: () => institutionsTab(d, c), big: () => bigTab(d), insiders: () => insidersTab(d), options: () => optionsTab(c), history: () => historyTab(d) }[hds.tab]();
   return head + holderStats(d, c) + (["institutions", "options"].includes(hds.tab) ? fundPanel() : "") + body + `<small class="source-note">Sources: SEC Form 13F data sets (${esc((refStatus?.sets || []).map((s) => s.name.replace("_form13f", "")).join(", ") || "not downloaded")}), SEC fails-to-deliver files for ticker ↔ CUSIP, EDGAR Schedules 13D/G and Forms 3/4/5, XBRL cover-page shares outstanding. Filings are disclosures as of their dates, not live positions.</small>`;
 }
@@ -1228,31 +1195,405 @@ function universePage() {
   }</section>`;
   return top + filters;
 }
+// ---- Stock page ---------------------------------------------------------------
+// One loaded stock (`symbol`) and every view of it. The grid shows a summary
+// panel per function; clicking a panel, its tab or typing its code (AAPL HDS)
+// opens the full view. Esc goes back to the grid.
+let stockView = null; // null = the panel grid, otherwise a VIEWS code
+state.recent ||= [];
+const tickerPattern = /^[A-Z0-9.^_&-]{1,24}(:[A-Z0-9]{3,5})?$/;
+const stockAsset = () => assets().find((a) => a.symbol === symbol) || null;
+const inGraph = () => page === "Stock" && stockView === "SPLC";
+// Loads a stock everywhere at once. Keeps the current view when already on
+// the stock page, so typing another ticker on Holders shows its holders.
+function openStock(t, view = page === "Stock" ? stockView : null, meta = null) {
+  t = String(t || symbol || "").trim().toUpperCase();
+  if (!tickerPattern.test(t)) return notify("Enter a ticker like AAPL, or pick a listing from the search list.", true);
+  const known = assets().some((a) => a.symbol === t);
+  if (!known && !native) return notify("No match in demo data. Switch to Live data to look up " + t + ".", true);
+  if (t !== symbol) {
+    symbol = t;
+    compare = "";
+    Object.assign(hds, { fund: null, filter: "all", q: "", limit: 100 });
+  }
+  state.recent = pushRecent(state.recent, t);
+  page = "Stock";
+  stockView = VIEW_CODES.has(view) ? view : null;
+  if (stockView === "SPLC") followGraph();
+  persist().catch(() => {});
+  render();
+  if (!known && live()) ensureAsset(t, meta).then(refresh).catch((e) => notify(message(e), true));
+}
+// The relationship explorer follows the loaded stock.
+function followGraph() {
+  if (symbol === graphSymbol) return;
+  const a = activeMap()[symbol];
+  if (!centerOnTicker(symbol, a?.overview?.Name || state.secData?.[symbol]?.name)) graphSymbol = symbol;
+}
+function stockName() {
+  const a = stockAsset();
+  return a?.overview?.Name || (a && a.name !== symbol ? a.name : "") || state.secData?.[symbol]?.name || hdsData[symbol]?.name || "";
+}
+function stockHead() {
+  const a = stockAsset();
+  const watching = state.watchlist.includes(symbol);
+  const where = [a?.exchange, a?.country, a?.currency].filter(Boolean).join(" · ") || a?.sector || "";
+  const quote = a ? `${livePrice(a)}${liveChange(a)}` : `<span class="muted">${live() ? "Loading prices…" : "No prices in this workspace"}</span>`;
+  return `<section class="stock-head"><div class="sh-top"><div class="sh-id"><h1>${esc(symbol)}</h1><div><b>${esc(prettyName(stockName()))}</b><small>${esc(where)}</small></div></div><div class="sh-price head-price">${quote}</div><div class="sh-actions">${state.mode === "sample" ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}${button(watching ? "★ In watchlist" : "☆ Add to watchlist", "watch-toggle", watching ? "active" : "")}${a ? button("Trade", "goto-trade") : ""}${state.mode === "market" && a ? button("Refresh", "research-refresh") : ""}</div></div><nav class="fn-strip" aria-label="Views of ${esc(symbol)}">${button("Grid", "stock-view", stockView ? "" : "active", 'data-value=""')}${VIEWS.map((v) => button(`${v.label}<kbd>${v.code}</kbd>`, "stock-view", stockView === v.code ? "active" : "", `data-value="${v.code}"`)).join("")}</nav></section>`;
+}
+function stockPage() {
+  return stockHead() + (stockView ? stockBody() : stockGrid());
+}
+function stockGrid() {
+  const tile = (code, body, cls = "") =>
+    `<section class="panel tile ${cls}" data-tile="${code}"><div class="panel-head"><h2><button class="tile-title" data-action="stock-view" data-value="${code}">${viewLabel(code)}</button><kbd>${code}</kbd></h2><button class="icon" data-action="stock-view" data-value="${code}" title="Open ${viewLabel(code)}" aria-label="Open ${viewLabel(code)}">⤢</button></div>${body}</section>`;
+  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
+}
+function stockBody() {
+  const views = {
+    DES: descriptionView,
+    GP: () => `<section class="panel">${chartBody()}</section>`,
+    FA: financialsView,
+    CN: () => `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company news</h2></div>${newsList(30, true)}</section>${calendarPanel()}</div>`,
+    HDS: holdersPage,
+    OWN: ownershipView,
+    SPLC: relationsView,
+    DCF: valuation,
+    TAS: tapeView,
+    CF: secPanel,
+  };
+  return views[stockView]();
+}
+const noStock = () => empty(esc(live() ? `Loading ${symbol} prices…` : native ? `No prices for ${symbol} in demo data. Holder and filing views still work.` : `No prices for ${symbol}.`));
+function chartBody() {
+  const a = stockAsset();
+  return a ? `${chartTools()}${chart(a)}<div class="source-line">${badge(a)}</div>` : noStock();
+}
+// "20261105T120000" -> "2026-11-05 12:00"
+const newsTime = (t) => String(t || "").replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d).*$/, "$1-$2-$3 $4:$5");
+function newsList(n, full = false) {
+  const news = state.mode === "market" ? state.datasets[`${symbol}:NEWS_SENTIMENT`] : null;
+  const items = news?.data?.feed?.slice(0, n) || [];
+  if (!items.length) return empty(esc(waiting("NEWS_SENTIMENT", "company news")));
+  return (
+    items
+      .map((x) => {
+        const url = safeURL(x.url);
+        return `<article class="news-item">${url ? link(url, x.title) : esc(x.title)}<small>${esc(x.source)} · ${esc(newsTime(x.time_published))}</small>${full ? `<p>${esc(x.summary)}</p>` : ""}</article>`;
+      })
+      .join("") + (full ? datasetStamp(news) : "")
+  );
+}
+function calendarPanel() {
+  return `<section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${state.mode === "market" ? button("Load calendar", "calendar-fetch") : ""}</div>${calendar()}<small>Calendar availability depends on provider access. Dividend date from the company overview: ${esc(stockAsset()?.overview?.DividendDate || "—")}.</small></section>`;
+}
+function profileTile() {
+  const a = stockAsset(),
+    o = a?.overview || {};
+  return `<div class="metrics"><span>Sector</span><b>${esc(o.Sector || a?.sector || "—")}</b><span>Industry</span><b>${esc(o.Industry || "—")}</b><span>52-week range</span><b>${o["52WeekLow"] ? `${fmt(number(o["52WeekLow"]))} – ${fmt(number(o["52WeekHigh"]))}` : "—"}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b></div>${o.Description ? `<p class="clamp">${esc(o.Description)}</p>` : `<p class="muted">${esc(a ? waiting("OVERVIEW", "the company profile") : "No profile loaded.")}</p>`}`;
+}
+function descriptionView() {
+  const a = stockAsset();
+  if (!a) return `<section class="panel">${noStock()}</section>`;
+  const o = a.overview || {},
+    r = risk(a.bars);
+  return `<div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || waiting("OVERVIEW", "the company profile"))}</p><div class="metrics"><span>Sector</span><b>${esc(o.Sector || a.sector || "—")}</b><span>Industry</span><b>${esc(o.Industry || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div><small>Metrics keep provider definitions and reported currencies.</small></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="10" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div>${calendarPanel()}`;
+}
+function financialsTile() {
+  const o = stockAsset()?.overview || {},
+    rev = (state.mode === "market" ? state.secData?.[symbol]?.revenue : null) || [];
+  return `<div class="mini-stats"><span>P/E <b>${fmt(number(o.PERatio))}</b></span><span>Margin <b>${pct(number(o.ProfitMargin))}</b></span><span>Market cap <b>${compact(number(o.MarketCapitalization))}</b></span></div>${
+    rev.length
+      ? table(
+          ["Fiscal year end", "Revenue", "YoY"],
+          rev.slice(-4).reverse().map((r) => `<tr><td>${esc(r.end)}</td><td>${compact(r.revenue)}</td><td class="${r.growth == null ? "" : tone(r.growth)}">${pct(r.growth)}</td></tr>`),
+        )
+      : `<p class="muted">${esc(state.mode === "market" ? secWhy() : "Revenue history loads from SEC filings with Live data.")}</p>`
+  }`;
+}
+function statementsPanel() {
+  const data = state.mode === "market" ? state.datasets[`${symbol}:${statement}`]?.data?.[period] : null;
+  return `<section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement" aria-label="Statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period" aria-label="Period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select></div>${
+    data?.length
+      ? table(
+          ["Metric", ...data.slice(0, 4).map((r) => esc(r.fiscalDateEnding))],
+          Object.keys(data[0])
+            .filter((k) => !["fiscalDateEnding", "reportedCurrency"].includes(k))
+            .map((k) => `<tr><td>${esc(k)}</td>${data.slice(0, 4).map((r) => `<td>${number(r[k]) == null ? "—" : compact(+r[k])}</td>`).join("")}</tr>`),
+        )
+      : empty(esc(waiting(statement, "financial statements")))
+  }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. Raw provider figures; “None” is missing, not zero.</small></section>`;
+}
+function financialsView() {
+  const o = stockAsset()?.overview || {};
+  return `<div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div>${statementsPanel()}<section class="panel"><div class="panel-head"><h2>Annual revenue <small>SEC XBRL</small></h2></div>${financialsTile()}</section>`;
+}
+// ---- Time and sales (the trade tape) ----
+const tapes = {}; // symbol -> prints received this session, oldest first
+let tapeTimer = null,
+  tapeError = "";
+const tapeClock = (ms) => new Date(ms).toLocaleTimeString("en-US", { hour12: false, timeZone: "America/New_York" }) + "." + String(ms % 1000).padStart(3, "0");
+function tapeBlocker() {
+  if (!live()) return native ? "The trade tape streams with Live data." : "The trade tape streams in the desktop app.";
+  if (!hasKey("finnhub")) return "finnhub";
+  if (!isUSKey(symbol)) return "Finnhub's free stream covers US-listed stocks only.";
+  if (!stockAsset()) return "Waiting for prices…";
+  return "";
+}
+function tapeBody(n, full = false) {
+  const why = tapeBlocker();
+  if (why === "finnhub") return `<div class="empty">Real-time trades need a free Finnhub key.<br>${button("Add it in Settings", "goto-settings")}</div>`;
+  if (why) return empty(esc(why));
+  const s = tapeStats(tapes[symbol] || []);
+  if (!s.count) return empty(esc(tapeError || "Waiting for trades. The tape fills from the moment this stock is open, and stays empty outside US market hours."));
+  const sum = `<div class="mini-stats"><span>VWAP <b>${fmt(s.vwap)}</b></span><span>Volume <b>${compact(s.volume)}</b></span><span>Buy · sell <b><span class="up">${pct(s.buyShare)}</span> · <span class="down">${s.buyShare == null ? "—" : pct(1 - s.buyShare)}</span></b></span></div>`;
+  const rows = s.rows.slice(-n).reverse();
+  const big = full && s.largest ? s.largest.size : Infinity;
+  return (
+    (full
+      ? `<div class="stats">${stat("Prints", int(s.count), `since ${esc(tapeClock(s.first.time))} New York`)}${stat("Volume", compact(s.volume), `VWAP ${fmt(s.vwap)}`)}${stat("Buy · sell volume", `${compact(s.buyVolume)} · ${compact(s.sellVolume)}`, `estimated, ${pct(s.buyShare)} buyer-initiated`)}${stat("Largest print", int(s.largest?.size), s.largest ? `at ${fmt(s.largest.price)}, ${esc(tapeClock(s.largest.time))}` : "")}</div>`
+      : sum) +
+    `<div class="table-wrap"><table class="tape"><thead><tr><th>Time (NY)</th><th>Price</th><th>Size</th><th>Side</th>${full ? "<th>Conditions</th>" : ""}</tr></thead><tbody>${rows
+      .map((r) => `<tr class="${r.size >= big ? "big" : ""}"><td>${esc(tapeClock(r.time))}</td><td class="${r.tick > 0 ? "up" : r.tick < 0 ? "down" : ""}">${r.tick > 0 ? "▲" : r.tick < 0 ? "▼" : "·"} ${fmt(r.price)}</td><td>${int(r.size)}</td><td class="${r.side === "buy" ? "up" : r.side === "sell" ? "down" : ""}">${r.side ? (r.side === "buy" ? "Buy" : "Sell") : "—"}</td>${full ? `<td><small>${esc((r.conditions || []).join(" "))}</small></td>` : ""}</tr>`)
+      .join("")}</tbody></table></div>`
+  );
+}
+function tapeView() {
+  return `<section class="panel"><div class="panel-head"><h2>Time and sales <small>every trade print, newest first</small></h2></div><div id="tape-slot">${tapeBody(500, true)}</div><small>Trades as Finnhub streams them, kept from the moment the stock is open (up to 500). Buy and sell are estimated with the tick rule: a print above the previous price counts as buyer-initiated, below as seller-initiated. The free feed has no bid/ask quotes, so this is an estimate and there is no order book (market depth).</small></section>`;
+}
+function syncTape() {
+  const want = page === "Stock" && (!stockView || stockView === "TAS") && !tapeBlocker();
+  if (!want) {
+    clearInterval(tapeTimer);
+    tapeTimer = null;
+    return;
+  }
+  if (!tapeTimer) tapeTimer = setInterval(pollTape, 1000);
+}
+async function pollTape() {
+  const s = symbol,
+    buf = (tapes[s] ||= []);
+  try {
+    const r = await quotesTape(s, buf.at(-1)?.time ?? 0);
+    tapeError = r.streaming ? "" : "Connecting this stock to the real-time stream…";
+    if (!r.prints?.length) return;
+    buf.push(...r.prints);
+    if (buf.length > 500) buf.splice(0, buf.length - 500);
+    const el = $("#tape-slot");
+    if (el && s === symbol && !el.matches(":hover")) el.innerHTML = stockView === "TAS" ? tapeBody(500, true) : tapeBody(12);
+  } catch (e) {
+    tapeError = message(e);
+  }
+}
+// ---- Holders and ownership changes ----
+function holdersTile() {
+  if (!native) return empty("Holder data loads in the desktop app.");
+  if (!isUSKey(symbol)) return empty("SEC holder filings cover US-listed securities.");
+  if (!refStatus?.quarters?.length) return `<div class="empty">Institutional holders come from SEC's quarterly 13F data (about 200 MB per quarter).<br>${button("Set up holders", "stock-view", "", 'data-value="HDS"')}</div>`;
+  const d = hdsEntry(symbol),
+    c = holderComparison(d);
+  if (d.errors.holders) return empty(esc(d.errors.holders));
+  if (!c) return empty("Loading 13F holders…");
+  const top = c.holders.filter((h) => h.shares > 0).slice(0, 5);
+  if (!top.length) return empty(`No 13F holders found for ${esc(symbol)}.`);
+  const s = c.summary;
+  return `<div class="mini-stats"><span>Holders <b>${int(s.holders)}</b></span><span>% of shares out <b>${pct(s.pctOut)}</b></span><span>New · sold out <b>${int(s.newPositions)} · ${int(s.exited)}</b></span></div>${table(
+    ["Holder", "Shares", "Change"],
+    top.map((h) => `<tr><td class="holder">${esc(prettyName(h.name))}</td><td>${compact(h.shares)}</td><td class="${toneOf(h.change)}">${h.status === "new" ? "New" : h.changePct == null ? "—" : signed(h.changePct, pct)}</td></tr>`),
+  )}<small>Form 13F · quarter ending ${esc(c.period)}</small>`;
+}
+const own = { filter: "all" };
+const OWN_FILTERS = [
+  ["all", "All"],
+  ["13F", "Funds (13F)"],
+  ["13DG", "5%+ owners (13D/G)"],
+  ["insider", "Insiders (Form 4)"],
+];
+function ownershipNotes(d) {
+  const notes = [];
+  if (!refStatus?.quarters?.length) notes.push("Fund moves (13F) appear once SEC 13F data is downloaded on Holders.");
+  else if (d.loading.holders) notes.push("Loading 13F holders…");
+  if (!hasKey("sec")) notes.push("Add your SEC contact email in Settings → Data sources to read 13D/G and Form 4 filings.");
+  if (d.scheduleProgress) notes.push(`Reading Schedules 13D/G ${d.scheduleProgress.done}/${d.scheduleProgress.total}…`);
+  if (d.insiderProgress) notes.push(`Reading Forms 3/4/5 ${d.insiderProgress.done}/${d.insiderProgress.total}…`);
+  if (d.errors.sec) notes.push(d.errors.sec);
+  return notes;
+}
+function ownershipItems(full) {
+  const d = hdsEntry(symbol),
+    c = holderComparison(d);
+  const big = d.schedules ? (d.bigView ||= bigHolders(d.schedules)) : [];
+  const log = d.insiderForms?.length ? (d.insiderView ||= insiderSummary(d.insiderForms)).log : [];
+  return { d, items: ownershipFeed({ holders: c?.holders || [], big, insiders: log }, { top13F: full ? 50 : 25, limit: full ? 400 : 50 }) };
+}
+const ownLink = (x) => (x.url ? link(x.url, x.source) : x.cik ? link(filingIndex(x.cik, x.accession), x.source) : esc(x.source));
+const ownTone = (x) => toneOf(x.shares ?? (x.action === "New position" ? 1 : x.action === "Sold out" ? -1 : 0));
+function ownershipBody() {
+  if (!native) return empty("Ownership filings load in the desktop app.");
+  if (!isUSKey(symbol)) return empty("SEC ownership filings cover US-registered companies.");
+  const { d, items } = ownershipItems(false);
+  const notes = ownershipNotes(d);
+  if (!items.length) return empty(esc(notes.join(" ") || "No disclosed ownership changes found yet."));
+  return `${table(
+    ["Date", "Who", "Change"],
+    items.slice(0, 7).map((x) => `<tr><td><small>${esc(x.date)}</small></td><td class="holder">${esc(prettyName(x.who))}<small>${esc(x.source)} · ${esc(x.role || "")}</small></td><td class="${ownTone(x)}">${esc(x.action)}${x.shares != null ? `<small>${signed(x.shares, compact)} sh</small>` : ""}</td></tr>`),
+  )}${notes.length ? `<small>${esc(notes[0])}</small>` : ""}`;
+}
+function ownershipView() {
+  if (!native || !isUSKey(symbol)) return `<section class="panel">${ownershipBody()}</section>`;
+  const { d, items } = ownershipItems(true);
+  const pick = (k) => (x) => (k === "13F" ? x.source === "13F" : k === "13DG" ? /^13[DG]$/.test(x.source) : k === "insider" ? x.source.startsWith("Form") : true);
+  const rows = items.filter(pick(own.filter));
+  const counts = Object.fromEntries(OWN_FILTERS.map(([k]) => [k, items.filter(pick(k)).length]));
+  const notes = ownershipNotes(d);
+  return `<section class="panel"><div class="panel-head"><h2>Ownership changes <small>disclosed in SEC filings, newest first</small></h2>${button("All holders →", "stock-view", "", 'data-value="HDS"')}</div><div class="filters segmented">${OWN_FILTERS.map(([k, l]) => button(`${l} <small>${int(counts[k])}</small>`, "own-filter", own.filter === k ? "active" : "", `data-value="${k}"`)).join("")}</div>${notes.length ? `<p class="muted">${esc(notes.join(" "))}</p>` : ""}${
+    rows.length
+      ? table(
+          ["Date", "Who", "Role", "Change", "Shares", "Value", "Holds after", "Filing"],
+          rows.map((x) => `<tr><td>${esc(x.date)}</td><td class="holder">${esc(prettyName(x.who))}</td><td><small>${esc(x.role || "")}</small></td><td class="${ownTone(x)}">${esc(x.action)}</td><td class="${toneOf(x.shares)}">${signed(x.shares)}</td><td class="${toneOf(x.value)}">${x.value == null ? "—" : signed(x.value, usd)}</td><td>${int(x.after)}${x.percent != null ? ` <small>${fmt(x.percent)}% of class</small>` : ""}</td><td>${ownLink(x)}</td></tr>`),
+        )
+      : empty("No changes of this kind in the filings read so far.")
+  }<small>Dates are filing dates (Form 4 trades use the trade date). Fund rows are the largest 13F moves from the latest quarter by estimated dollar change (shares × quarter-end price), reported up to 45 days after quarter end. 13D/G rows are each 5%+ owner's latest schedule. Insider rows are open-market purchases and sales only; awards, tax withholding and option exercises are on Holders → Insiders.</small></section>`;
+}
+// ---- Valuation ----
+const ILLUSTRATIVE = { fcf: 1000, growth: 0.08, discount: 0.1, terminal: 0.025, netDebt: 2000, shares: 500 };
+const modelKey = () => `${state.mode}:${symbol}`;
+// Where the model's inputs come from: your saved edits, the company's
+// filings, or illustrative numbers when neither exists.
+function dcfModel() {
+  const filed = state.mode === "market" ? state.valuationData?.[symbol] : null;
+  const saved = state.valuations?.[modelKey()];
+  if (saved) return { inputs: saved, sources: filed?.sources || {}, missing: [], origin: "saved" };
+  if (filed) return { inputs: filed.inputs, sources: filed.sources, missing: filed.missing, origin: "filings", fetchedAt: filed.fetchedAt };
+  return { inputs: ILLUSTRATIVE, sources: {}, missing: [], origin: "illustrative" };
+}
+function scenarios(m) {
+  return ["Bear", "Base", "Bull"].map((name, i) => {
+    const growth = m.growth + (i - 1) * 0.03,
+      discount = m.discount - (i - 1) * 0.01;
+    let perShare = null;
+    try {
+      perShare = dcf({ ...m, growth, discount }).perShare;
+    } catch {
+      // Missing or invalid inputs: shown as —.
+    }
+    return { name, growth, discount, perShare };
+  });
+}
+const ORIGIN = { saved: "Your saved assumptions", filings: "Inputs from the company's SEC filings", illustrative: "Illustrative inputs; replace them with your own" };
+function valuationTile() {
+  const loading = live() && isUSKey(symbol) && !state.valuationData?.[symbol] && !loadErrors["val:" + symbol] && (cikFor(symbol) || hasKey("sec"));
+  if (loading && !state.valuations?.[modelKey()]) return empty("Reading cash flow, debt and shares from SEC filings…");
+  const m = dcfModel(),
+    px = m.origin === "illustrative" ? null : price(stockAsset());
+  const sc = scenarios(m.inputs);
+  if (sc[1].perShare == null) return empty(esc(m.missing.length ? `The filings don't report ${m.missing.join(", ")}. Open to fill them in.` : "Open to set assumptions."));
+  return `<div class="scenarios compact">${sc.map((s) => `<div class="scenario"><span>${s.name}</span><strong>${fmt(s.perShare)}</strong>${px && s.perShare != null ? `<small class="${tone(s.perShare / px - 1)}">${signed(s.perShare / px - 1, pct)} vs price</small>` : ""}</div>`).join("")}</div><small>${ORIGIN[m.origin]}${loadErrors["val:" + symbol] && m.origin === "illustrative" ? ` · ${esc(loadErrors["val:" + symbol])}` : ""}</small>`;
+}
+const inputValue = (k, v) => (v == null ? "" : ["growth", "discount", "terminal"].includes(k) ? +(v * 100).toFixed(2) : +v.toFixed(2));
+function valuation() {
+  const m = dcfModel();
+  const fields = [
+    ["fcf", "Base free cash flow (millions)"],
+    ["growth", "Annual growth (%)"],
+    ["discount", "Discount rate (%)"],
+    ["terminal", "Terminal growth (%)"],
+    ["netDebt", "Net debt (millions)"],
+    ["shares", "Diluted shares (millions)"],
+  ];
+  const missing = m.missing.length ? `<p class="notice">The filings don't report ${esc(m.missing.join(", "))}; enter ${m.missing.length > 1 ? "them" : "it"} to value the stock.</p>` : "";
+  return `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Discounted cash flow</h2><span class="tag">${esc(ORIGIN[m.origin].toUpperCase())}</span></div><p>Unlevered free cash flow model, five forecast years plus a terminal value. Amounts in millions of the reporting currency; shares in millions.</p>${missing}<div class="form-grid">${fields
+    .map(([id, label]) => `<label>${label}<input id="${id}" type="number" step="any" value="${inputValue(id, m.inputs[id])}">${m.sources[id] ? `<small>${esc(m.sources[id])}</small>` : ""}</label>`)
+    .join("")}</div>${button("Calculate and save", "dcf", "primary")}${m.origin === "saved" && state.mode === "market" ? button("Use filing values", "dcf-reset") : ""}${button("Export model", "dcf-export")}<small>Negative enterprise or equity values are shown, not clipped. ${m.fetchedAt ? `SEC XBRL company facts, read ${new Date(m.fetchedAt * 1000).toLocaleDateString()}.` : ""}</small></section><section class="panel"><div class="panel-head"><h2>Valuation range</h2></div><div id="dcf-results"></div></section></div><section class="panel"><div class="panel-head"><h2>Sensitivity · value per share</h2><small>Discount rate × terminal growth</small></div><div id="sensitivity"></div></section>`;
+}
+async function loadValuation(s) {
+  try {
+    const cik = await resolveCIK(s);
+    const facts = {};
+    for (const tag of VALUE_TAGS) {
+      // Debt reported as one total doesn't need its parts.
+      if (facts.LongTermDebt && /^LongTermDebt(Non)?[Cc]urrent$/.test(tag)) continue;
+      try {
+        facts[tag] = (await fetchSEC("concept", cik, "", tag)).data;
+      } catch {
+        // Not every company reports every concept.
+      }
+    }
+    const shares = await fetchSEC("shares", cik).catch(() => null);
+    facts.sharesOut = shares ? sharesSeries(shares.data).at(-1) || null : null;
+    if (!state.secData?.[s]) await loadSEC(s).catch(() => {});
+    facts.revenue = state.secData?.[s]?.revenue || [];
+    (state.valuationData ||= {})[s] = { ...valuationInputs(facts), fetchedAt: Date.now() / 1000 };
+    delete loadErrors["val:" + s];
+  } catch (e) {
+    loadErrors["val:" + s] = message(e);
+    throw e;
+  }
+}
+// ---- Suppliers and customers ----
+function relationsTile() {
+  const g = graph();
+  const n = g.nodes.find((x) => x.ticker === symbol);
+  if (!n) return `<div class="empty">No supplier or customer data for ${esc(symbol)} yet.${live() ? `<br>${button("Find in filings", "stock-view", "", 'data-value="SPLC"')}` : ""}</div>`;
+  const nb = neighborhood(g, n.id, { includeUnreviewed: graphCandidates });
+  const name = (id) => prettyName(g.nodes.find((x) => x.id === id)?.name || id);
+  const list = (edges, key) => {
+    const ids = [...new Set(edges.map((e) => e[key]))];
+    return { n: ids.length, html: ids.slice(0, 5).map((id) => `<li>${esc(name(id))}</li>`).join("") || `<li class="muted">None on file</li>` };
+  };
+  const s = list(nb.suppliers, "supplier"),
+    c = list(nb.customers, "customer");
+  return `<div class="rel-mini"><div><h3>Suppliers <small>${s.n}</small></h3><ul>${s.html}</ul></div><div><h3>Customers <small>${c.n}</small></h3><ul>${c.html}</ul></div></div><small>${graphCandidates ? "Includes unreviewed mentions found in filings." : "Reviewed sources only."}</small>`;
+}
+function relationsView() {
+  const center = graph().nodes.find((x) => x.id === graphCenter);
+  const elsewhere = center && center.ticker !== symbol && parentTicker(center) !== symbol;
+  const note = elsewhere && graphSymbol === symbol ? `<p class="notice">No relationship data for ${esc(symbol)}${state.mode === "sample" ? " in demo data" : ""}. Showing ${esc(prettyName(center.name))}, the last company you explored.</p>` : "";
+  return (
+    note +
+    relationshipsView(graph(), graphCenter, graphCandidates, {
+      width: graphWidth(),
+      trail: graphTrail,
+      progress: scanText(graphCenter),
+    }) +
+    filingScan()
+  );
+}
+// ---- Filings ----
+function secWhy() {
+  return state.mode === "sample"
+    ? "Switch to Live data for SEC filings."
+    : !native
+      ? "SEC filings load in the desktop app."
+      : !isUSKey(symbol)
+        ? "SEC filings cover US-registered companies."
+        : !cikFor(symbol) && !hasKey("sec")
+          ? "Add your SEC contact email in Settings → Data sources (or an Alpha Vantage key) so the app can find this company on EDGAR."
+          : loadErrors["sec:" + symbol] || "Loading filings from SEC EDGAR…";
+}
+function filingsTile() {
+  const d = state.mode === "market" ? state.secData?.[symbol] : null;
+  if (!d) return `<p class="muted">${esc(secWhy())}</p>`;
+  return `<div class="filing-strip">${d.filings
+    .slice(0, 8)
+    .map((f) => {
+      const url = safeURL(f.url);
+      return `<span><b>${esc(f.form)}</b> ${esc(f.filed)}${url ? " " + link(url, "Open") : ""}</span>`;
+    })
+    .join("")}</div>`;
+}
 // ---- Command line and search -------------------------------------------------
 function runCommand(cmd) {
-  const t = cmd.ticker;
-  if (cmd.page === "Holders") return openHolders(t || hdsTicker() || symbol);
-  if (cmd.page === "Relationships") {
-    page = "Relationships";
-    if (t && !centerOnTicker(t)) notify("No relationship coverage for " + t + " in demo data.", true);
-    return render();
-  }
-  if (t && cmd.page === "Research") return openTicker(t);
+  if (cmd.page === "Stock") return openStock(cmd.ticker || symbol, cmd.view);
   page = cmd.page;
   render();
 }
+// A ticker, or a company name already in the workspace.
 function openTicker(q, meta) {
   const a = assets().find((a) => a.symbol === q) || (!meta && assets().find((a) => a.name.toUpperCase().includes(q)));
-  if (a) {
-    symbol = a.symbol;
-    page = "Research";
-    return render();
-  }
-  if (live()) return addTicker(q, true, meta).catch((err) => notify(message(err), true));
-  notify("No match in demo data. Switch to Live data to look up " + q + ".", true);
+  openStock(a ? a.symbol : q, undefined, meta);
 }
 function openListing(r) {
-  if (page === "Holders") return openHolders(r.key);
   openTicker(r.key, r);
 }
 function runSearch(raw) {
@@ -1260,13 +1601,6 @@ function runSearch(raw) {
   if (!q) return;
   const cmd = parseCommand(q);
   if (cmd) return runCommand(cmd);
-  if (page === "Holders") return openHolders(q);
-  if (page === "Relationships") {
-    const hit = graph().nodes.find((n) => n.ticker === q || n.name.toUpperCase().includes(q));
-    if (hit) goToEntity(hit.id);
-    else if (!centerOnTicker(q)) return notify("No relationship coverage for " + q + " in demo data.", true);
-    return render();
-  }
   openTicker(q);
 }
 // Sidebar search: commands ("AAPL HDS"), plus suggestions from every listing.
@@ -1298,7 +1632,7 @@ function bindSearch() {
   input.oninput = () => {
     clearTimeout(timer);
     const q = input.value.trim();
-    if (page === "Relationships" || !native || !uniStatus?.listings || !q || parseCommand(q)) {
+    if (!native || !uniStatus?.listings || !q || parseCommand(q)) {
       results = [];
       return close();
     }
@@ -1343,9 +1677,6 @@ function bindReference() {
     if (el) el[ev] = f;
   };
   const d = () => hdsEntry(hdsTicker());
-  on("hds-ticker", "onkeydown", (e) => {
-    if (e.key === "Enter") action("hds-go").catch((x) => notify(message(x), true));
-  });
   // Filtering re-renders the table; keep the cursor in the box.
   let qTimer = null;
   on("hds-q", "oninput", (e) => {
@@ -1444,14 +1775,7 @@ async function loadSEC(s) {
 }
 function secPanel() {
   const d = state.mode === "market" ? state.secData?.[symbol] : null;
-  const why =
-    state.mode === "sample"
-      ? "Switch to Live data for SEC filings."
-      : !native
-        ? "SEC filings load in the desktop app."
-        : !cikFor(symbol) && !hasKey("sec")
-          ? "Add your SEC contact email in Settings → Data sources (or an Alpha Vantage key) so the app can find this company on EDGAR."
-          : loadErrors["sec:" + symbol] || "Loading filings from SEC EDGAR…";
+  const why = secWhy();
   if (!d)
     return `<section class="panel"><div class="panel-head"><h2>SEC filings</h2><small>EDGAR · no key needed</small></div>${empty(esc(why))}</section>`;
   return `<section class="panel"><div class="panel-head"><h2>SEC filings <small>${esc(d.name)} · CIK ${esc(d.cik)}</small></h2>${link("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=" + d.cik, "All filings on EDGAR")}</div><div class="grid halves"><div>${table(
@@ -1887,23 +2211,6 @@ function legacyScreener() {
     ),
   )}</section>`;
 }
-function valuation() {
-  return `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Discounted cash flow</h2><span class="tag">USER ASSUMPTIONS</span></div><p>Unlevered free cash flow model. All amounts in the same currency, in millions; shares in millions. Inputs are illustrative until you replace them.</p><div class="form-grid">${[
-    ["fcf", "Base free cash flow", 1000],
-    ["growth", "Annual growth (%)", 8],
-    ["discount", "Discount rate (%)", 10],
-    ["terminal", "Terminal growth (%)", 2.5],
-    ["netDebt", "Net debt", 2000],
-    ["shares", "Diluted shares", 500],
-  ]
-    .map(
-      ([id, label, val]) =>
-        `<label>${label}<input id="${id}" type="number" step="any" value="${val}"></label>`,
-    )
-    .join(
-      "",
-    )}</div>${button("Calculate scenarios", "dcf", "primary")}${button("Export model", "dcf-export")}<small>Five explicit forecast years; Gordon-growth terminal value. Negative enterprise/equity values are shown, not clipped.</small></section><section class="panel"><div class="panel-head"><h2>Valuation range</h2></div><div id="dcf-results"></div></section></div><section class="panel"><div class="panel-head"><h2>Sensitivity · value per share</h2><small>Discount rate × terminal growth</small></div><div id="sensitivity"></div></section>`;
-}
 function modelInputs() {
   return Object.fromEntries(
     ["fcf", "growth", "discount", "terminal", "netDebt", "shares"].map((k) => [
@@ -1916,19 +2223,13 @@ function modelInputs() {
 function calcDCF() {
   try {
     const m = modelInputs(),
-      base = dcf(m);
+      base = dcf(m),
+      // Illustrative inputs say nothing about this stock; don't compare them to its price.
+      px = dcfModel().origin === "illustrative" ? null : price(stockAsset());
     $("#dcf-results").innerHTML =
-      ["Bear", "Base", "Bull"]
-        .map((name, i) => {
-          const result = dcf({
-            ...m,
-            growth: m.growth + (i - 1) * 0.03,
-            discount: m.discount - (i - 1) * 0.01,
-          });
-          return `<div class="scenario"><span>${name}</span><strong>${fmt(result.perShare)}</strong><small>Growth ${pct(m.growth + (i - 1) * 0.03)} · discount ${pct(m.discount - (i - 1) * 0.01)}</small></div>`;
-        })
-        .join("") +
-      `<p>Enterprise value: ${compact(base.enterprise)} million</p><p>Terminal value: ${pct(base.terminalShare)} of enterprise value</p>`;
+      scenarios(m)
+        .map((r) => `<div class="scenario"><span>${r.name}</span><strong>${fmt(r.perShare)}</strong><small>Growth ${pct(r.growth)} · discount ${pct(r.discount)}${px && r.perShare != null ? ` · <span class="${tone(r.perShare / px - 1)}">${signed(r.perShare / px - 1, pct)} vs ${fmt(px)}</span>` : ""}</small></div>`)
+        .join("") + `<p>Enterprise value: ${compact(base.enterprise)} million</p><p>Terminal value: ${pct(base.terminalShare)} of enterprise value</p>`;
     const gs = [-0.01, 0, 0.01].map((x) => m.terminal + x);
     $("#sensitivity").innerHTML = table(
       ["Discount / terminal", ...gs.map(pct)],
@@ -1937,9 +2238,11 @@ function calcDCF() {
         return `<tr><td>${pct(rate)}</td>${gs.map((g) => `<td>${rate > g ? fmt(dcf({ ...m, discount: rate, terminal: g }).perShare) : "Invalid"}</td>`).join("")}</tr>`;
       }),
     );
+    return m;
   } catch (e) {
     $("#dcf-results").textContent = e.message;
     $("#sensitivity").textContent = "";
+    return null;
   }
 }
 const macroSeries = {
@@ -2116,9 +2419,10 @@ async function loadMacro(id) {
 }
 // Pull whatever the current page needs and doesn't have yet.
 function autoLoad() {
-  if (page === "Holders" && native && hdsTicker()) {
-    loadHolders(hdsTicker());
-    loadOwnership(hdsTicker());
+  const v = page === "Stock" ? stockView || "GRID" : "";
+  if (["GRID", "HDS", "OWN"].includes(v) && native && symbol) {
+    loadHolders(symbol);
+    loadOwnership(symbol);
   }
   if (page === "Universe") loadUniverse();
   if (!live()) return;
@@ -2134,8 +2438,8 @@ function autoLoad() {
       }
     }).catch(() => {});
   };
-  const a = asset();
-  if (page === "Research" && a && hasKey("alpha") && isUSKey(a.symbol)) {
+  const a = stockAsset();
+  if (["GRID", "DES", "FA", "CN"].includes(v) && a && hasKey("alpha") && isUSKey(a.symbol)) {
     const s = a.symbol;
     if (!a.overview) once(`${s}:OVERVIEW`, () => loadDataset("OVERVIEW", s));
     if (!state.datasets[`${s}:${statement}`])
@@ -2143,11 +2447,15 @@ function autoLoad() {
     if (!state.datasets[`${s}:NEWS_SENTIMENT`])
       once(`${s}:NEWS_SENTIMENT`, () => loadDataset("NEWS_SENTIMENT", s));
   }
-  if (page === "Research" && a && isUSKey(a.symbol) && (cikFor(a.symbol) || hasKey("sec")) && stale(state.secData?.[a.symbol], 86400)) {
-    const s = a.symbol;
+  if (["GRID", "FA", "CF"].includes(v) && isUSKey(symbol) && (cikFor(symbol) || hasKey("sec")) && stale(state.secData?.[symbol], 86400)) {
+    const s = symbol;
     once("sec:" + s, () => loadSEC(s));
   }
-  if (page === "Relationships") autoScan(graphCenter);
+  if (["GRID", "DCF"].includes(v) && isUSKey(symbol) && (cikFor(symbol) || hasKey("sec")) && stale(state.valuationData?.[symbol], 7 * 86400)) {
+    const s = symbol;
+    once("val:" + s, () => loadValuation(s));
+  }
+  if (v === "SPLC") autoScan(graphCenter);
   if (page === "Economy" && hasKey("fred"))
     for (const id of Object.keys(macroSeries))
       if (stale(state.macro[id], 43200)) once("fred:" + id, () => loadMacro(id));
@@ -2182,26 +2490,30 @@ async function syncWatchlist() {
   })().finally(() => (syncing = null));
   return syncing;
 }
-async function addTicker(s, openResearch, meta = null) {
+// Loads daily prices and listing details for a ticker not yet in the
+// workspace, without adding it to the watchlist.
+async function ensureAsset(s, meta = null) {
+  if (!live() || activeMap()[s]) return;
+  setSync(`Loading ${s}…`);
+  try {
+    await enqueue("prices:" + s, () => loadPrices(s));
+  } finally {
+    setSync("");
+  }
+  // Listing details from the directory: name, exchange, currency.
+  const l = meta || (await universeGet(s).catch(() => null));
+  if (l && activeMap()[s]) Object.assign(activeMap()[s], { name: l.name || s, exchange: l.exchange, country: l.country, currency: l.currency, kind: l.kind, sector: activeMap()[s].sector || l.kind });
+  await persist();
+}
+async function addTicker(s, openIt, meta = null) {
   s = s.trim().toUpperCase();
-  if (!/^[A-Z0-9.^_&-]{1,24}(:[A-Z0-9]{3,5})?$/.test(s)) throw Error("Enter a ticker like AAPL, or pick a listing from the search list.");
+  if (!tickerPattern.test(s)) throw Error("Enter a ticker like AAPL, or pick a listing from the search list.");
   if (state.mode === "sample" && !activeMap()[s])
     throw Error("Demo data only has its sample tickers. Switch to Live data to add " + s + ".");
-  if (live() && !activeMap()[s]) {
-    setSync(`Loading ${s}…`);
-    try {
-      await enqueue("prices:" + s, () => loadPrices(s));
-    } finally {
-      setSync("");
-    }
-    // Listing details from the directory: name, exchange, currency.
-    const l = meta || (await universeGet(s).catch(() => null));
-    if (l && activeMap()[s]) Object.assign(activeMap()[s], { name: l.name || s, exchange: l.exchange, country: l.country, currency: l.currency, kind: l.kind, sector: activeMap()[s].sector || l.kind });
-  }
+  await ensureAsset(s, meta);
   if (!state.watchlist.includes(s)) state.watchlist.push(s);
-  symbol = s;
-  if (openResearch) page = "Research";
   await persist();
+  if (openIt) return openStock(s);
   render();
 }
 function bind() {
@@ -2271,26 +2583,21 @@ function bind() {
   document.querySelectorAll("[data-page]").forEach(
     (el) =>
       (el.onclick = () => {
+        if (el.dataset.page === "Stock") return openStock(symbol, stockView);
         page = el.dataset.page;
-        // The explorer follows the company you were last looking at.
-        if (page === "Holders" && symbol !== hds.followed) {
-          hds.ticker = symbol;
-          hds.followed = symbol;
-          hds.fund = null;
-        }
-        if (page === "Relationships" && symbol !== graphSymbol) {
-          const a = activeMap()[symbol];
-          if (!centerOnTicker(symbol, a?.overview?.Name)) graphSymbol = symbol;
-        }
+        // Trading needs a stock with prices in this workspace.
+        if (page === "Trade" && !stockAsset() && asset()) symbol = asset().symbol;
         render();
       }),
   );
+  document.querySelectorAll("[data-recent]").forEach((el) => (el.onclick = () => openStock(el.dataset.recent, page === "Stock" ? stockView : null)));
+  // Watchlist rows, heatmap cells and movers open the stock page; on Trade
+  // they pick the stock to trade.
   document.querySelectorAll("[data-symbol]").forEach(
     (el) =>
       (el.onclick = () => {
+        if (page !== "Trade") return openStock(el.dataset.symbol, null);
         symbol = el.dataset.symbol;
-        if (!["Overview", "Research", "Trade"].includes(page))
-          page = "Research";
         render();
       }),
   );
@@ -2330,6 +2637,7 @@ function bind() {
   bindSearch();
   if ($("#asset-select"))
     $("#asset-select").onchange = (e) => {
+      if (page === "Stock") return openStock(e.target.value);
       symbol = e.target.value;
       render();
     };
@@ -2369,7 +2677,7 @@ function bind() {
     $("#shock").oninput = calc;
     calc();
   }
-  if (page === "Valuation") calcDCF();
+  if (page === "Stock" && stockView === "DCF") calcDCF();
   bindReference();
   if ($("#restore"))
     $("#restore").onchange = async (e) => {
@@ -2408,16 +2716,27 @@ function bind() {
 }
 async function action(act, value) {
   switch (act) {
-    case "graph-open": {
-      const a = asset();
-      if (!a || !centerOnTicker(a.symbol, a.overview?.Name || state.secData?.[a.symbol]?.name)) {
-        notify("No relationship coverage for this ticker in demo data.", true);
-        break;
-      }
-      page = "Relationships";
+    case "graph-open":
+      openStock(symbol, "SPLC");
+      break;
+    case "stock-view":
+      openStock(symbol, value || null);
+      break;
+    case "watch-toggle":
+      if (state.watchlist.includes(symbol)) state.watchlist = state.watchlist.filter((x) => x !== symbol);
+      else if (stockAsset()) state.watchlist.push(symbol);
+      else throw Error(`No prices for ${symbol} yet, so it can't be watched.`);
+      await persist();
       render();
       break;
-    }
+    case "goto-trade":
+      page = "Trade";
+      render();
+      break;
+    case "own-filter":
+      own.filter = value;
+      render();
+      break;
     case "graph-back":
       if (graphTrail.length > 1) {
         graphTrail = graphTrail.slice(0, -1);
@@ -2495,8 +2814,7 @@ async function action(act, value) {
       break;
 
     case "research":
-      page = "Research";
-      render();
+      openStock(value || symbol, null);
       break;
     case "range":
       range = +value;
@@ -2543,11 +2861,6 @@ async function action(act, value) {
         render();
       }
       break;
-    case "hds-go": {
-      const t = $("#hds-ticker")?.value.trim();
-      if (t) openHolders(t);
-      break;
-    }
     case "hds-open":
       openHolders(value);
       break;
@@ -2858,8 +3171,19 @@ async function action(act, value) {
         "text/csv",
       );
       break;
-    case "dcf":
-      calcDCF();
+    case "dcf": {
+      const m = calcDCF();
+      if (m) {
+        (state.valuations ||= {})[modelKey()] = m;
+        await persist();
+        render();
+      }
+      break;
+    }
+    case "dcf-reset":
+      delete state.valuations?.[modelKey()];
+      await persist();
+      render();
       break;
     case "dcf-export":
       download(
@@ -2903,6 +3227,12 @@ state.alerts = state.alerts.map(
       a.mode === "sample" ? state.assets : state.marketAssets || {},
     )[0],
 );
+// Esc on a stock view goes back to the stock's panel grid.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || page !== "Stock" || !stockView) return;
+  if (e.target.closest?.("input, textarea, select, .combo-list")) return;
+  openStock(symbol, null);
+});
 render();
 syncWatchlist();
 autoReference().then(() => refresh());
