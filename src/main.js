@@ -875,8 +875,11 @@ async function autoReference() {
   if (uniStatus && (!uniStatus.listings || Date.now() / 1000 - (uniStatus.fetched || 0) > week)) await universeRefresh().catch((e) => (lastError.reference = message(e)));
   // 13F holdings: the first download starts as soon as SEC's contact email
   // is saved; after that the app checks for a new quarter every few days.
-  const first = !refStatus?.quarters?.length && !refStatus?.job?.running && !refStatus?.job?.error;
-  if (hasKey("sec") && (first || Date.now() - (state.holdings?.checked || 0) > 3 * 864e5)) {
+  // Also resumes when fewer quarters are loaded than wanted (a download cut
+  // short by closing the app); quarters already loaded are kept.
+  const want = state.holdings?.quarters || 2;
+  const missing = (refStatus?.quarters?.length || 0) < want && !refStatus?.job?.running && !refStatus?.job?.error;
+  if (hasKey("sec") && (missing || Date.now() - (state.holdings?.checked || 0) > 3 * 864e5)) {
     state.holdings = { quarters: 2, ...(state.holdings || {}), checked: Date.now() };
     await holdingsUpdate(state.holdings.quarters).catch((e) => (lastError.sec = message(e)));
     persist();
@@ -2312,7 +2315,9 @@ async function ensureMarket(force = false) {
   if (!marketInfo) await readMarket(true);
   const age = Date.now() / 1000 - (marketInfo?.built || 0);
   const maxAge = marketSnap?.source === "finnhub" ? 3600 : 900;
-  if ((force || age > maxAge) && !marketInfo?.job?.running && live() && (hasAlpaca() || hasKey("finnhub"))) {
+  // A build cut short (the app closed mid-way) starts again on the next launch.
+  const unfinished = marketSnap && marketSnap.complete === false;
+  if ((force || unfinished || age > maxAge) && !marketInfo?.job?.running && live() && (hasAlpaca() || hasKey("finnhub"))) {
     try {
       await marketRefresh();
       marketError = "";
@@ -2656,10 +2661,12 @@ function autoLoad() {
   const a = stockAsset();
   if (["GRID", "DES", "FA"].includes(v) && a && hasKey("alpha") && isUSKey(a.symbol)) {
     const s = a.symbol;
-    if (!a.overview) once(`${s}:OVERVIEW`, () => loadDataset("OVERVIEW", s));
+    // Saved for a week: statements change quarterly and Alpha Vantage allows 25 calls a day.
+    const week = 7 * 86400;
+    if (!a.overview || stale(state.datasets[`${s}:OVERVIEW`], week)) once(`${s}:OVERVIEW`, () => loadDataset("OVERVIEW", s));
     // The income statement also feeds P/E, margin and growth.
     for (const kind of new Set(["INCOME_STATEMENT", statement]))
-      if (!state.datasets[`${s}:${kind}`]) once(`${s}:${kind}`, () => loadDataset(kind, s));
+      if (stale(state.datasets[`${s}:${kind}`], week)) once(`${s}:${kind}`, () => loadDataset(kind, s));
   }
   if (hasKey("finnhub") && isUSKey(symbol) && page === "Stock") {
     const s = symbol;
