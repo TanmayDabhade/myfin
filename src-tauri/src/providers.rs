@@ -150,7 +150,7 @@ pub fn status(env: &Credentials, saved: &Credentials) -> Value {
 pub fn validate(provider: &str, kind: &str, symbol: &str) -> Result<(), String> {
     if symbol.is_empty()
         || symbol.len() > 100
-        || !symbol.chars().all(|c| c.is_ascii_alphanumeric() || ".-_^".contains(c))
+        || !symbol.chars().all(|c| c.is_ascii_alphanumeric() || ".-_^:&".contains(c))
     {
         return Err("Invalid identifier".into());
     }
@@ -170,10 +170,17 @@ pub fn request(provider: &str, kind: &str, symbol: &str, key: &str) -> (&'static
             "https://api.stlouisfed.org/fred/series/observations",
             q(&[("series_id", symbol), ("api_key", key), ("file_type", "json"), ("sort_order", "desc"), ("limit", "500")]),
         ),
-        "twelve" => (
-            "https://api.twelvedata.com/time_series",
-            q(&[("symbol", symbol), ("interval", "1day"), ("outputsize", "1300"), ("apikey", key)]),
-        ),
+        // Listings outside the US are keyed SYMBOL:MIC (VOD:XLON).
+        "twelve" => match symbol.split_once(':') {
+            Some((s, mic)) => (
+                "https://api.twelvedata.com/time_series",
+                q(&[("symbol", s), ("mic_code", mic), ("interval", "1day"), ("outputsize", "1300"), ("apikey", key)]),
+            ),
+            None => (
+                "https://api.twelvedata.com/time_series",
+                q(&[("symbol", symbol), ("interval", "1day"), ("outputsize", "1300"), ("apikey", key)]),
+            ),
+        },
         _ => {
             let field = if kind == "NEWS_SENTIMENT" { "tickers" } else { "symbol" };
             ("https://www.alphavantage.co/query", q(&[("function", kind), (field, symbol), ("apikey", key)]))
@@ -252,6 +259,10 @@ mod tests {
     fn rejects_unknown_datasets_and_identifiers() {
         assert!(validate("twelve", "TIME_SERIES", "AAPL").is_ok());
         assert!(validate("twelve", "OVERVIEW", "AAPL").is_err());
+        assert!(validate("twelve", "TIME_SERIES", "VOD:XLON").is_ok());
+        assert!(validate("twelve", "TIME_SERIES", "M&M:XNSE").is_ok());
+        let (_, q) = request("twelve", "TIME_SERIES", "VOD:XLON", "k");
+        assert!(q.contains(&("symbol".into(), "VOD".into())) && q.contains(&("mic_code".into(), "XLON".into())));
         assert!(validate("alpha", "OVERVIEW", "BRK.B").is_ok());
         assert!(validate("fred", "observations", "DGS10").is_ok());
         assert!(validate("alpha", "OVERVIEW", "AAPL&apikey=x").is_err());

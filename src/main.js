@@ -34,6 +34,23 @@ import {
   filingURL,
 } from "./filings.js";
 import { REVENUE_TAGS } from "./sec-tags.js";
+import {
+  parseCommand,
+  sharesSeries,
+  sharesAt,
+  compareHolders,
+  ownershipHistory,
+  comparePortfolio,
+  parseSchedule13,
+  bigHolders,
+  parseOwnership,
+  insiderSummary,
+  ownershipFilings,
+  alphaSymbol,
+  isUSKey,
+  STATUS_LABEL,
+  TX_CODES,
+} from "./holders.js";
 import "./style.css";
 import {
   load,
@@ -51,6 +68,16 @@ import {
   quotesSnapshot,
   native,
   nativeTrade,
+  holdingsStatus,
+  holdingsUpdate,
+  holdersFor,
+  holderPortfolio,
+  universeStatus,
+  universeRefresh,
+  universeSearch,
+  universeBrowse,
+  universeFacets,
+  universeGet,
 } from "./bridge.js";
 import {
   providers,
@@ -172,7 +199,9 @@ const graph = () => (state.relationshipGraph ||= seedGraph());
 if (state.relationshipGraph) validateGraph(state.relationshipGraph);
 const pages = [
   "Overview",
+  "Universe",
   "Research",
+  "Holders",
   "Relationships",
   "Trade",
   "Portfolio",
@@ -183,6 +212,7 @@ const pages = [
   "Commodities",
   "Settings",
 ];
+const navIcons = { Overview: "◫", Universe: "◍", Research: "⌕", Holders: "◔", Relationships: "⋈", Trade: "⇄", Portfolio: "◉", Screener: "☷", Valuation: "ƒ", Economy: "◎", Alerts: "◇", Commodities: "≋", Settings: "⚙" };
 // Dover Strait by default: AISStream's coverage is strong there and thin in
 // some Middle East and open-ocean areas. The last pick is remembered.
 let maritimeSelected = locations.some((x) => x.id === state.vesselLocation)
@@ -366,8 +396,12 @@ function change(a) {
   return b.length > 1 ? b.at(-1).close / b.at(-2).close - 1 : null;
 }
 // Price and change cells that the real-time stream updates in place.
+// Listings outside the US are priced in their own currency.
+function priceText(a, x) {
+  return a?.currency && a.currency !== "USD" ? (x == null ? "—" : `${fmt(x)} ${esc(a.currency)}`) : money(x);
+}
 function livePrice(a) {
-  return `<span data-live-price="${esc(a.symbol)}">${money(price(a))}</span>`;
+  return `<span data-live-price="${esc(a.symbol)}">${priceText(a, price(a))}</span>`;
 }
 function liveChange(a, suffix = "") {
   return `<span data-live-change="${esc(a.symbol)}" data-suffix="${esc(suffix)}" class="${tone(change(a))}">${pct(change(a))}${suffix}</span>`;
@@ -448,6 +482,8 @@ function render() {
     Setup: setup,
     Overview: overview,
     Research: research,
+    Holders: holdersPage,
+    Universe: universePage,
     Relationships: () =>
       relationshipsView(graph(), graphCenter, graphCandidates, {
         width: graphWidth(),
@@ -465,7 +501,7 @@ function render() {
   };
   const demo = page !== "Setup" && state.mode === "sample";
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="side-search"><input id="search" placeholder="${page === "Relationships" ? "Find a company…" : "Search ticker…"}" aria-label="Search or add a ticker" autocomplete="off" spellcheck="false"><kbd>↵</kbd></div><nav>${pages.map((p, i) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${["◫", "⌕", "⋈", "⇄", "◉", "☷", "ƒ", "◎", "◇", "≋", "⚙"][i]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content"><div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Relationships" ? "COMPANY RELATIONSHIPS · DATED SOURCED DISCLOSURES" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>${views[page]()}</section><footer>Market Lens 0.2 · USD equity workspace · Daily prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> MARKET LENS</div><div class="side-search"><input id="search" placeholder="${page === "Relationships" ? "Find a company…" : page === "Holders" ? "Ticker for holders…" : "Ticker, name or AAPL HDS"}" aria-label="Search any listing or type a command like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${pages.map((p) => `<button class="nav ${page === p ? "selected" : ""}" data-page="${p}"><span>${navIcons[p]}</span>${p}</button>`).join("")}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content"><div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Relationships" ? "COMPANY RELATIONSHIPS · DATED SOURCED DISCLOSURES" : page === "Holders" ? "HOLDERS · SEC 13F, 13D/G AND FORMS 3/4/5" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page === "Holders" ? "Holders (HDS)" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>${views[page]()}</section><footer>Market Lens 0.2 · USD equity workspace · Daily prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
   bind();
   bindVessel();
   drawCharts();
@@ -489,7 +525,7 @@ let quoteTimer = null,
 function streamSymbols() {
   const map = activeMap();
   return [...new Set([...state.watchlist, symbol, compare, ...state.alerts.filter((x) => x.mode === "market").map((x) => x.symbol)])]
-    .filter((s) => s && map[s])
+    .filter((s) => s && map[s] && isUSKey(s))
     .slice(0, 50);
 }
 function streamText() {
@@ -818,6 +854,548 @@ function research() {
       .join("") ||
     empty(esc(waiting("NEWS_SENTIMENT", "company news")))
   } ${datasetStamp(news)}</section><section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${state.mode === "market" ? button("Load calendar", "calendar-fetch") : ""}</div>${calendar()}<small>Calendar availability depends on provider access. Dividend dates are available in the company overview: ${esc(o.DividendDate || "—")}.</small></section></div>${secPanel()}`;
+}
+// ---- Reference data status (13F holdings, listing directory) ---------------
+let refStatus = null, // holdings_status
+  uniStatus = null, // universe_status
+  refTimer = null;
+function jobLine(job, idle = "") {
+  if (!job) return idle;
+  if (job.running) {
+    const p = job.total ? Math.min(100, Math.round((job.done / job.total) * 100)) : null;
+    return `<span class="job">${esc(job.stage)}${p != null ? ` · ${p}%` : ""}</span>${p != null ? `<progress max="100" value="${p}"></progress>` : ""}`;
+  }
+  if (job.error) return `<span class="down">${esc(job.error)}</span>`;
+  return job.finished ? `<span class="muted">${esc(job.stage)} · ${new Date(job.finished * 1000).toLocaleString()}</span>` : idle;
+}
+function paintJobs() {
+  document.querySelectorAll("[data-job]").forEach((el) => {
+    el.innerHTML = jobLine(el.dataset.job === "holdings" ? refStatus?.job : uniStatus?.job);
+  });
+}
+async function readReference() {
+  if (!native) return;
+  try {
+    [refStatus, uniStatus] = await Promise.all([holdingsStatus(), universeStatus()]);
+  } catch (e) {
+    lastError.reference = message(e);
+  }
+}
+// Polls while a download runs, then re-renders with the new data.
+async function watchReference() {
+  await readReference();
+  paintJobs();
+  if (refTimer || !(refStatus?.job?.running || uniStatus?.job?.running)) return;
+  refTimer = setInterval(async () => {
+    const was = { h: refStatus?.job?.running, u: uniStatus?.job?.running };
+    await readReference();
+    paintJobs();
+    if (refStatus?.job?.running || uniStatus?.job?.running) return;
+    clearInterval(refTimer);
+    refTimer = null;
+    if (was.h) for (const d of Object.values(hdsData)) delete d.holders;
+    if (was.u) uni.data = uni.facets = null;
+    refresh();
+  }, 1000);
+}
+// The listing directory loads by itself (no key); 13F data refreshes by
+// itself once the user has downloaded it the first time.
+async function autoReference() {
+  if (!native) return;
+  await readReference();
+  const week = 7 * 86400;
+  if (uniStatus && (!uniStatus.listings || Date.now() / 1000 - (uniStatus.fetched || 0) > week)) await universeRefresh().catch((e) => (lastError.reference = message(e)));
+  const q = state.holdings?.quarters;
+  if (q && hasKey("sec") && Date.now() - (state.holdings.checked || 0) > 3 * 864e5) {
+    state.holdings.checked = Date.now();
+    await holdingsUpdate(q).catch((e) => (lastError.sec = message(e)));
+    persist();
+  }
+  watchReference();
+}
+// ---- Holders (HDS) ----------------------------------------------------------
+const hds = { ticker: null, followed: null, tab: "institutions", filter: "all", q: "", sort: "value", dir: -1, limit: 100, fund: null, fundFilter: "all", fundSort: "value", fundLimit: 100, insiderSince: "" };
+const hdsData = {}; // ticker -> loaded holder data for this session
+const hdsTicker = () => (hds.ticker || symbol || "").toUpperCase();
+const hdsEntry = (t) => (hdsData[t] ||= { errors: {}, loading: {}, only: null, period: null });
+function openHolders(t) {
+  hds.ticker = String(t || symbol).trim().toUpperCase();
+  hds.followed = symbol;
+  Object.assign(hds, { fund: null, filter: "all", q: "", limit: 100 });
+  page = "Holders";
+  render();
+}
+async function companyName(t) {
+  const a = activeMap()[t];
+  const known = a?.overview?.Name || state.secData?.[t]?.name || (a?.name !== t ? a?.name : "");
+  if (known) return known;
+  const l = await universeGet(t).catch(() => null);
+  return l?.name || t;
+}
+function loadHolders(t, force = false) {
+  const d = hdsEntry(t);
+  if (!native || d.loading.holders || (!force && (d.holders || d.errors.holders))) return;
+  if (!refStatus?.quarters?.length) return;
+  d.loading.holders = true;
+  (async () => {
+    d.name ||= await companyName(t);
+    const extra = [...new Set((d.schedules || []).flatMap((s) => s.cusips))].slice(0, 10);
+    d.holders = await holdersFor(t, d.name, extra, d.only, d.period);
+    d.comp = null;
+    delete d.errors.holders;
+  })()
+    .catch((e) => (d.errors.holders = message(e)))
+    .finally(() => {
+      d.loading.holders = false;
+      refresh();
+    });
+}
+// 5%+ owners and insiders from the company's own EDGAR filing list.
+function loadOwnership(t) {
+  const d = hdsEntry(t);
+  if (!native || d.loading.sec || d.secDone || d.errors.sec || !isUSKey(t)) return;
+  if (!hasKey("sec") && !cikFor(t)) return;
+  d.loading.sec = true;
+  (async () => {
+    d.cik ||= await resolveCIK(t);
+    const [sub, shares] = await Promise.all([fetchSEC("submissions", d.cik), fetchSEC("shares", d.cik).catch(() => null)]);
+    d.series = shares ? sharesSeries(shares.data) : [];
+    if (sub.data.name) d.name = prettyName(sub.data.name);
+    const f = ownershipFilings(sub.data);
+    Object.assign(d, { legacy: f.legacy, scheduleList: f.schedules, insiderList: f.insiders, comp: null });
+    refresh();
+    if (!hasKey("sec")) throw Error("Add your SEC contact email in Settings → Data sources to read 13D/G and Form 4 filings.");
+    d.schedules = [];
+    const list = f.schedules.slice(0, 40);
+    d.scheduleProgress = { done: 0, total: list.length };
+    for (const s of list) {
+      try {
+        const xml = (await fetchSEC("xml", d.cik, s.accession, s.doc)).data.xml;
+        d.schedules.push({ ...parseSchedule13(xml), filed: s.filed, accession: s.accession, url: s.url });
+      } catch {
+        // Skip one unreadable filing.
+      }
+      d.scheduleProgress.done++;
+    }
+    d.scheduleProgress = null;
+    if (!d.holders?.securities?.length && d.schedules.some((s) => s.cusips.length)) loadHolders(t, true);
+    refresh();
+    await loadInsiders(t, 40);
+    d.secDone = true;
+  })()
+    .catch((e) => (d.errors.sec = message(e)))
+    .finally(() => {
+      d.loading.sec = false;
+      refresh();
+    });
+}
+async function loadInsiders(t, n) {
+  const d = hdsEntry(t);
+  d.insiderForms ||= [];
+  const have = new Set(d.insiderForms.map((f) => f.accession));
+  const todo = (d.insiderList || []).filter((f) => !have.has(f.accession)).slice(0, n);
+  d.insiderProgress = { done: 0, total: todo.length };
+  for (const f of todo) {
+    try {
+      const xml = (await fetchSEC("xml", d.cik, f.accession, f.doc)).data.xml;
+      d.insiderForms.push({ ...parseOwnership(xml), filed: f.filed, accession: f.accession, url: f.url });
+    } catch {
+      // Skip one unreadable filing.
+    }
+    d.insiderProgress.done++;
+    if (d.insiderProgress.done % 8 === 0) refresh();
+  }
+  d.insiderProgress = null;
+  d.insiderView = null;
+}
+function sharesOutFor(d) {
+  return sharesAt(d.series, d.holders?.period || new Date().toISOString().slice(0, 10));
+}
+function holderComparison(d) {
+  if (!d.holders) return null;
+  return (d.comp ||= compareHolders(d.holders, sharesOutFor(d)?.shares ?? null));
+}
+const int = (x) => (x == null || !Number.isFinite(+x) ? "—" : Math.round(x).toLocaleString("en-US"));
+const signed = (x, f = int) => (x == null ? "—" : x > 0 ? "+" + f(x) : f(x));
+const toneOf = (x) => (x > 0 ? "up" : x < 0 ? "down" : "");
+const usd = (x) => (x == null ? "—" : (x < 0 ? "−$" : "$") + compact(Math.abs(x)));
+function sortable(label, key, current, dir, act = "hds-sort") {
+  const on = current === key;
+  return `<button class="th-sort ${on ? "on" : ""}" data-action="${act}" data-value="${key}">${label}${on ? (dir < 0 ? " ▼" : " ▲") : ""}</button>`;
+}
+function sortBy(rows, key, dir) {
+  const v = (r) => (r[key] == null ? -Infinity : typeof r[key] === "string" ? r[key].toUpperCase() : r[key]);
+  return [...rows].sort((a, b) => (v(a) < v(b) ? -dir : v(a) > v(b) ? dir : 0));
+}
+const HOLDER_FILTERS = [
+  ["all", "All"],
+  ["new", "New"],
+  ["added", "Added"],
+  ["reduced", "Reduced"],
+  ["exited", "Sold out"],
+  ["not-filed", "No filing yet"],
+  ["conviction", "≥1% of portfolio"],
+  ["top", "Top-10 holding"],
+];
+function holderRows(c) {
+  const q = hds.q.trim().toUpperCase();
+  const f = hds.filter;
+  return c.holders.filter((h) => {
+    if (q && !`${h.name} ${h.city} ${h.state}`.toUpperCase().includes(q)) return false;
+    if (f === "all") return h.shares > 0;
+    if (f === "conviction") return h.weight >= 0.01;
+    if (f === "top") return h.rank != null && h.rank <= 10;
+    return h.status === f;
+  });
+}
+function filingIndex(cik, accession) {
+  return `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${String(accession).replace(/-/g, "")}/`;
+}
+function holdersSetup() {
+  const job = refStatus?.job;
+  const q = state.holdings?.quarters || 2;
+  const blocker = !hasKey("sec") ? `<p><b>SEC asks for a contact email before bulk downloads.</b> ${button("Add it in Settings", "goto-settings")}</p>` : "";
+  return `<section class="panel"><div class="panel-head"><h2>Download institutional holdings</h2></div><p>Every investment manager with $100 million or more in US-listed securities files Form 13F each quarter. SEC publishes all of them together as one file per quarter, about 100 MB to download and 200 MB once loaded. The app reads the whole file, so you see every disclosed manager for every US-listed stock, ETF and ADR, and each manager's full portfolio.</p>${blocker}<div class="filters"><label>Quarters to keep<select id="hds-quarters">${[2, 4, 8].map((n) => `<option value="${n}" ${n === q ? "selected" : ""}>${n} quarters · about ${n * 200} MB</option>`).join("")}</select></label>${button(job?.running ? "Downloading…" : "Download SEC 13F data", "hds-download", "primary")}</div><div class="job-line" data-job="holdings">${jobLine(job)}</div><small>Two quarters are the minimum for new positions, exits and changes. After the first download the app checks SEC for a new quarter every few days. 13F data sets are published about a month after the filing deadline (45 days after quarter end).</small></section>`;
+}
+function securitiesLine(d) {
+  const h = d.holders;
+  if (!h) return "";
+  const included = new Set(h.included || []);
+  const chip = (s) => `<label class="chip"><input type="checkbox" data-cusip="${esc(s.cusip)}" ${included.has(s.cusip) ? "checked" : ""}> <b>${esc(s.cusip)}</b> ${esc(prettyName(s.issuer || ""))} ${esc(s.class || "")} · ${int(s.holders)} holders <small>${esc(s.source)}</small></label>`;
+  const all = [...(h.securities || []), ...(h.related || [])];
+  if (!all.length) return "";
+  return `<div class="chips">${all.map(chip).join("")}${button("Update", "hds-securities")}</div>`;
+}
+function holderStats(d, c) {
+  const s = c?.summary;
+  const out = sharesOutFor(d);
+  const big = d.bigView || [];
+  const ins = d.insiderView?.summary;
+  const tiles = [];
+  if (s) {
+    tiles.push(
+      stat("13F holders", int(s.holders), `${signed(s.holders - s.prevHolders)} vs ${esc(c.prior || "—")}`),
+      stat("Shares held by 13F filers", compact(s.shares), s.prevShares ? `${signed(s.shares / s.prevShares - 1, pct)} vs prior quarter` : ""),
+      stat("% of shares outstanding", pct(s.pctOut), out ? `${compact(out.shares)} shares out at ${esc(out.date)}${out.classes > 1 ? ` (${out.classes} classes)` : ""}` : "Shares outstanding not loaded"),
+      stat("Value at quarter end", usd(s.value), s.price ? `≈ $${fmt(s.price)} per share` : ""),
+      stat("New · sold out", `${int(s.newPositions)} · ${int(s.exited)}`, s.notFiled ? `${int(s.notFiled)} prior holders haven't filed yet` : "All prior holders have filed"),
+      stat("Added · reduced", `${int(s.added)} · ${int(s.reduced)}`, `${int(s.unchanged)} unchanged`),
+      stat("Net shares bought", `<span class="${toneOf(s.netChange)}">${signed(s.netChange, compact)}</span>`, `Bought ${compact(s.bought)} · sold ${compact(s.sold)}`),
+      stat("Top 10 holders", pct(s.top10Share), "of shares held by 13F filers"),
+      stat("High conviction", int(s.highConviction), `holders with ≥1% of their portfolio here · #1 holding for ${int(s.topHolding)}`),
+      stat("Median portfolio weight", pct(s.medianWeight), "across holders"),
+      stat("13F put/call ratio", fmt(s.putCall), `${int(s.putHolders)} put and ${int(s.callHolders)} call holders`),
+    );
+  }
+  if (d.schedules) tiles.push(stat("5%+ owners", int(big.filter((b) => !b.below5).length), "latest Schedule 13D/G per filer"));
+  if (ins) tiles.push(stat("Insider buys · sales", `${int(ins.buys)} · ${int(ins.sells)}`, `open-market, in the ${int(d.insiderForms?.length)} latest Forms 3/4/5`));
+  return tiles.length ? `<div class="stats hds-stats">${tiles.join("")}</div>` : "";
+}
+function institutionsTab(d, c) {
+  if (!refStatus?.quarters?.length) return holdersSetup();
+  if (d.errors.holders) return `<section class="panel">${empty(esc(d.errors.holders))}</section>`;
+  if (!d.holders) return `<section class="panel">${empty("Loading 13F holders…")}</section>`;
+  if (!d.holders.included?.length)
+    return `<section class="panel">${empty(`No 13F securities found for ${esc(hdsTicker())}. 13F covers US-listed stocks, ETFs and ADRs; ${d.loading.sec ? "checking 13G cover pages for a CUSIP…" : "this one may not be on SEC's 13(f) list."}`)}</section>`;
+  const rows = sortBy(holderRows(c), hds.sort, hds.dir);
+  const shown = rows.slice(0, hds.limit);
+  const H = (l, k) => sortable(l, k, hds.sort, hds.dir);
+  const sm = c.summary;
+  const counts = { all: sm.holders, new: sm.newPositions, added: sm.added, reduced: sm.reduced, exited: sm.exited, "not-filed": sm.notFiled, conviction: sm.highConviction, top: c.holders.filter((h) => h.rank != null && h.rank <= 10).length };
+  return `<section class="panel"><div class="panel-head"><h2>Institutional holders <small>Form 13F · quarter ending ${esc(c.period)} vs ${esc(c.prior || "—")}</small></h2><input id="hds-q" placeholder="Filter by manager or city" value="${esc(hds.q)}" aria-label="Filter holders"></div><div class="filters segmented">${HOLDER_FILTERS.map(([k, l]) => button(`${l} <small>${int(counts[k])}</small>`, "hds-filter", hds.filter === k ? "active" : "", `data-value="${k}"`)).join("")}</div>${table(
+    [H("Holder", "name"), H("Shares", "shares"), H("Change", "change"), H("Change %", "changePct"), H("Value", "value"), H("% out", "pctOut"), H("% of portfolio", "weight"), H("Rank in portfolio", "rank"), H("Positions", "positions"), H("Portfolio", "portfolio"), H("Quarters held", "quarters"), "Status", "Voting sole / shared / none", "Discretion", H("Filed", "filed")],
+    shown.map(
+      (h) =>
+        `<tr><td class="holder"><button class="link" data-action="hds-fund" data-value="${h.cik}">${esc(prettyName(h.name))}</button><small>${esc([h.city, h.state].filter(Boolean).join(", "))}</small></td><td>${int(h.shares)}</td><td class="${toneOf(h.change)}">${signed(h.change)}</td><td class="${toneOf(h.changePct)}">${h.changePct == null ? "—" : signed(h.changePct, pct)}</td><td>${usd(h.value)}</td><td>${pct(h.pctOut)}</td><td>${pct(h.weight)}</td><td>${h.rank ?? "—"}</td><td>${int(h.positions)}</td><td>${usd(h.portfolio)}</td><td>${h.quarters ? `${h.quarters} <small>since ${esc(h.since)}</small>` : "—"}</td><td><span class="pill st-${h.status}">${STATUS_LABEL[h.status]}</span></td><td><small>${int(h.sole)} / ${int(h.sharedVote)} / ${int(h.noVote)}</small></td><td>${esc(h.discretion || "—")}</td><td>${link(filingIndex(h.cik, h.accession), h.filed)}</td></tr>`,
+    ),
+  )}${rows.length > shown.length ? button(`Show ${Math.min(500, rows.length - shown.length)} more of ${int(rows.length - shown.length)}`, "hds-more") : ""}<small>Value is the manager's reported market value at quarter end (US dollars). Shares are reported shares or principal amount. "% of portfolio" is the position's share of everything the manager reported, a measure of conviction. "Rank" is its place among the manager's positions by value (1 = largest). "No filing yet" means a prior holder hasn't filed for this quarter, not that it sold. 13F excludes short positions, non-US securities and managers under $100M.</small></section>`;
+}
+function optionsTab(c) {
+  if (!c) return `<section class="panel">${empty("Load 13F data on the Institutions tab first.")}</section>`;
+  const rows = c.options;
+  return `<section class="panel"><div class="panel-head"><h2>Options positions <small>13F puts and calls · quarter ending ${esc(c.period)}</small></h2></div>${rows.length ? table(["Holder", "Type", "Underlying shares", "Change", "Notional value", "Status", "Filed"], rows.map((o) => `<tr><td><button class="link" data-action="hds-fund" data-value="${o.cik}">${esc(prettyName(o.name))}</button></td><td>${o.type}</td><td>${int(o.shares)}</td><td class="${toneOf(o.change)}">${signed(o.change)}</td><td>${usd(o.value)}</td><td><span class="pill st-${o.status}">${STATUS_LABEL[o.status]}</span></td><td>${link(filingIndex(o.cik, o.accession), o.filed)}</td></tr>`)) : empty("No 13F filer reported puts or calls on this security.")}<small>Managers report options by underlying shares and the value of those shares, not premium. Puts are not necessarily bearish (they often hedge a long position).</small></section>`;
+}
+function historyTab(d) {
+  const h = d.holders?.history;
+  if (!h?.length) return `<section class="panel">${empty(refStatus?.quarters?.length ? "Loading ownership history…" : "Download 13F data to see ownership history.")}</section>`;
+  const rows = ownershipHistory(h, d.series).reverse();
+  return `<section class="panel"><div class="panel-head"><h2>Ownership by quarter <small>${rows.length} quarters loaded</small></h2>${spark(rows.map((r) => r.holders).reverse())}</div>${table(
+    ["Quarter", "13F holders", "Shares held", "% of shares out", "Value", "Put holders", "Put shares", "Call holders", "Call shares"],
+    rows.map((r) => `<tr><td>${esc(r.period)}</td><td>${int(r.holders)}</td><td>${int(r.shares)}</td><td>${pct(r.pctOut)}</td><td>${usd(r.value)}</td><td>${int(r.putHolders)}</td><td>${int(r.putShares)}</td><td>${int(r.callHolders)}</td><td>${int(r.callShares)}</td></tr>`),
+  )}<small>Keep more quarters in Settings → Reference data for a longer history. Shares outstanding come from the company's own cover-page filings nearest each quarter.</small></section>`;
+}
+function bigTab(d) {
+  if (!isUSKey(hdsTicker())) return `<section class="panel">${empty("Schedules 13D and 13G are SEC filings for US-registered companies.")}</section>`;
+  const p = d.scheduleProgress;
+  const rows = (d.bigView ||= d.schedules ? bigHolders(d.schedules) : null);
+  const head = `<div class="panel-head"><h2>5%+ beneficial owners <small>Schedules 13D (activist) and 13G (passive)</small></h2>${p ? `<span class="muted">Reading filings ${p.done}/${p.total}…</span>` : ""}</div>`;
+  if (d.errors.sec && !rows) return `<section class="panel">${head}${empty(esc(d.errors.sec))}</section>`;
+  if (!rows) return `<section class="panel">${head}${empty(hasKey("sec") ? "Loading Schedule 13D/G filings from EDGAR…" : "Add your SEC contact email in Settings → Data sources to read these filings.")}</section>`;
+  const legacy = d.legacy || [];
+  return `<section class="panel">${head}${rows.length ? table(
+    ["Owner", "Type", "Shares", "% of class", "Change vs prior filing", "Sole vote", "Shared vote", "Sole dispose", "Shared dispose", "Form", "Event date", "Filed"],
+    rows.map((b) => `<tr class="${b.below5 ? "faded" : ""}"><td class="holder">${esc(prettyName(b.name))}${b.members > 1 ? `<small>${b.members} reporting persons</small>` : ""}</td><td>${esc(b.typeLabel || "—")}</td><td>${int(b.shares)}</td><td>${b.percent == null ? "—" : fmt(b.percent) + "%"}${b.below5 ? ` <span class="pill">below 5%</span>` : ""}</td><td class="${toneOf(b.change)}">${signed(b.change)}${b.prevPercent != null ? ` <small>was ${fmt(b.prevPercent)}%</small>` : ""}</td><td>${int(b.soleVote)}</td><td>${int(b.sharedVote)}</td><td>${int(b.soleDispose)}</td><td>${int(b.sharedDispose)}</td><td>${esc(b.form)}${b.activist ? ' <span class="pill warn">activist</span>' : ""}</td><td>${esc(b.eventDate || "—")}</td><td>${link(b.url, b.filed)}</td></tr>${b.purpose ? `<tr class="sub"><td colspan="12"><small>Purpose (Item 4): ${esc(b.purpose.slice(0, 600))}${b.purpose.length > 600 ? "…" : ""}</small></td></tr>` : ""}`),
+  ) : empty("No structured Schedule 13D/G filings name this company.")}<small>A 13G is filed by passive investors above 5%, a 13D by anyone who may seek influence. Percent is of the class at the event date. A filing below 5% usually reports an exit from the 5% level. Structured filings began in December 2024${legacy.length ? `; ${legacy.length} older text filings: ${legacy.slice(0, 6).map((l) => link(l.url, `${l.form} ${l.filed}`)).join(", ")}` : ""}.</small></section>`;
+}
+function insidersTab(d) {
+  if (!isUSKey(hdsTicker())) return `<section class="panel">${empty("Forms 3, 4 and 5 are SEC filings for US-registered companies.")}</section>`;
+  const p = d.insiderProgress;
+  const head = (h, extra = "") => `<div class="panel-head"><h2>${h}</h2>${p ? `<span class="muted">Reading Forms 3/4/5 ${p.done}/${p.total}…</span>` : extra}</div>`;
+  if (!d.insiderForms?.length) return `<section class="panel">${head("Insiders <small>Forms 3, 4 and 5</small>")}${empty(esc(d.errors.sec || (hasKey("sec") ? "Loading insider filings from EDGAR…" : "Add your SEC contact email in Settings → Data sources to read insider filings.")))}</section>`;
+  const v = (d.insiderView ||= insiderSummary(d.insiderForms));
+  const out = sharesOutFor(d)?.shares;
+  const more = (d.insiderList?.length || 0) > d.insiderForms.length;
+  const codes = hds.insiderCodes || "open";
+  const log = v.log.filter((x) => (codes === "all" ? true : codes === "open" ? x.code === "P" || x.code === "S" : !x.derivative));
+  return `<section class="panel">${head(`Insiders <small>${v.people.length} people in the ${d.insiderForms.length} latest Forms 3/4/5</small>`, more ? button("Read 40 older forms", "hds-insiders-more") : "")}<div class="stats">${stat("Open-market buys", int(v.summary.buys), `${int(v.summary.buyers)} people · ${compact(v.summary.boughtShares)} shares · ${usd(v.summary.boughtValue)}`)}${stat("Open-market sales", int(v.summary.sells), `${int(v.summary.sellers)} people · ${compact(v.summary.soldShares)} shares · ${usd(v.summary.soldValue)}`)}${stat("Sales under 10b5-1 plans", int(v.summary.planSales), "pre-scheduled trading plans")}</div>${table(
+    ["Insider", "Role", "Direct shares", "Indirect shares", "% of shares out", "Bought", "Sold", "Last form"],
+    v.people.map((x) => `<tr><td class="holder">${esc(prettyName(x.name))}</td><td>${esc(x.role)}</td><td>${int(x.direct)}</td><td>${int(x.indirect)}</td><td>${pct(out ? ((x.direct || 0) + (x.indirect || 0)) / out : null)}</td><td class="up">${x.bought ? int(x.bought) : "—"}</td><td class="down">${x.sold ? int(x.sold) : "—"}</td><td>${link(x.url, `Form ${x.lastForm} · ${x.lastFiled}`)}</td></tr>`),
+  )}</section><section class="panel"><div class="panel-head"><h2>Insider transactions</h2><select id="hds-codes" aria-label="Transactions shown"><option value="open" ${codes === "open" ? "selected" : ""}>Open-market buys and sales</option><option value="stock" ${codes === "stock" ? "selected" : ""}>All stock transactions</option><option value="all" ${codes === "all" ? "selected" : ""}>Everything, including options</option></select></div>${log.length ? table(
+    ["Date", "Insider", "Role", "Transaction", "Security", "Shares", "Price", "Value", "Owned after", "Ownership", "Plan", "Filing"],
+    log.slice(0, 300).map((x) => `<tr><td>${esc(x.date || x.filed)}</td><td>${esc(prettyName(x.owner))}</td><td><small>${esc(x.role)}</small></td><td class="${x.code === "P" ? "up" : x.code === "S" ? "down" : ""}">${esc(x.code)} · ${esc(TX_CODES[x.code] || "")}</td><td><small>${esc(x.security)}</small></td><td>${x.ad === "D" ? "−" : ""}${int(x.shares)}</td><td>${x.price ? "$" + fmt(x.price) : "—"}</td><td>${usd(x.value)}</td><td>${int(x.after)}</td><td>${x.direct ? "Direct" : esc(x.nature || "Indirect")}</td><td>${x.plan ? "10b5-1" : ""}</td><td>${link(x.url, `Form ${x.form}`)}</td></tr>`),
+  ) : empty("No transactions of this kind in the forms read so far.")}<small>Holdings are each person's position after their latest form. Code S is an open-market sale and P a purchase; awards (A), tax withholding (F) and option exercises (M) are not market trades.</small></section>`;
+}
+function fundPanel() {
+  const f = hds.fund;
+  if (!f) return "";
+  if (!f.data) return `<section class="panel fund"><div class="panel-head"><h2>Manager portfolio</h2>${button("Close", "hds-fund-close")}</div>${empty(esc(f.error || "Loading the manager's full 13F portfolio…"))}</section>`;
+  const v = (f.view ||= comparePortfolio(f.data));
+  const s = v.summary,
+    info = v.filing || {};
+  const rows = sortBy(v.rows.filter((r) => hds.fundFilter === "all" || r.status === hds.fundFilter), hds.fundSort, -1);
+  const shown = rows.slice(0, hds.fundLimit);
+  const H = (l, k) => sortable(l, k, hds.fundSort, -1, "hds-fund-sort");
+  return `<section class="panel fund"><div class="panel-head"><h2>${esc(prettyName(info.name || "CIK " + f.cik))} <small>${esc([info.city, info.state].filter(Boolean).join(", "))} · CIK ${f.cik} · 13F for ${esc(v.period)}</small></h2>${link(`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${f.cik}&type=13F`, "13F filings on EDGAR")}${button("Export CSV", "hds-fund-export")}${button("Close", "hds-fund-close")}</div><div class="stats">${stat("Reported value", usd(s.total), s.prevTotal ? `${signed(s.total / s.prevTotal - 1, pct)} vs ${esc(v.prior)}` : "")}${stat("Positions", int(s.positions), s.prevPositions != null ? `${signed(s.positions - s.prevPositions)} vs prior quarter` : "")}${stat("New · sold out", `${int(s.newPositions)} · ${int(s.exited)}`, `${int(s.added)} added · ${int(s.reduced)} reduced`)}${stat("Estimated buying · selling", `${usd(s.bought)} · ${usd(s.sold)}`, "share changes × quarter-end price")}${stat("Top 10 weight", pct(s.top10Weight), `${int(s.options)} option positions`)}</div><div class="filters segmented">${[["all", "All"], ["new", "New"], ["added", "Added"], ["reduced", "Reduced"], ["exited", "Sold out"]].map(([k, l]) => button(l, "hds-fund-filter", hds.fundFilter === k ? "active" : "", `data-value="${k}"`)).join("")}</div>${table(
+    [H("Issuer", "issuer"), H("Rank", "rank"), "Class", "CUSIP", H("Shares", "shares"), H("Change", "change"), H("Change %", "changePct"), H("Value", "value"), H("Weight", "weight"), H("Est. flow", "flow"), "Status"],
+    shown.map((r) => `<tr><td class="holder">${r.ticker ? `<button class="link" data-action="hds-open" data-value="${esc(r.ticker)}">${esc(r.ticker)}</button> ` : ""}${esc(prettyName(r.issuer || ""))}${r.putcall ? ` <span class="pill">${r.putcall === 1 ? "Put" : "Call"}</span>` : ""}</td><td>${r.rank ?? "—"}</td><td><small>${esc(r.class || "")}</small></td><td><small>${esc(r.cusip)}</small></td><td>${int(r.shares)}</td><td class="${toneOf(r.change)}">${signed(r.change)}</td><td>${r.changePct == null ? "—" : signed(r.changePct, pct)}</td><td>${usd(r.value)}</td><td>${pct(r.weight)}</td><td class="${toneOf(r.flow)}">${r.flow == null ? "—" : signed(r.flow, usd)}</td><td><span class="pill st-${r.status}">${STATUS_LABEL[r.status]}</span></td></tr>`),
+  )}${rows.length > shown.length ? button(`Show more (${int(rows.length - shown.length)} left)`, "hds-fund-more") : ""}<small>Tickers come from SEC's fails-to-deliver lists; click one to see its holders. Estimated flow assumes trades at the quarter-end price.</small></section>`;
+}
+function holdersPage() {
+  const t = hdsTicker();
+  if (!native) return `<section class="panel">${empty("Holder data comes from SEC filings and loads in the desktop app.")}</section>`;
+  if (!t) return `<section class="panel">${empty("Type a ticker followed by HDS in the search box, for example AAPL HDS.")}</section>`;
+  const d = hdsEntry(t);
+  const c = holderComparison(d);
+  if (d.schedules && !d.bigView) d.bigView = bigHolders(d.schedules);
+  if (d.insiderForms?.length && !d.insiderView) d.insiderView = insiderSummary(d.insiderForms);
+  const quarters = d.holders?.quarters || refStatus?.quarters || [];
+  const tabs = [
+    ["institutions", "Institutions (13F)"],
+    ["big", "5%+ owners (13D/G)"],
+    ["insiders", "Insiders (Forms 3/4/5)"],
+    ["options", "Options (13F)"],
+    ["history", "History"],
+  ];
+  const head = `<section class="panel"><div class="panel-head"><h2>${esc(t)} <small>${esc(prettyName(d.name || ""))}</small></h2><div class="inline"><input id="hds-ticker" placeholder="Another ticker" maxlength="30" aria-label="Show holders for ticker" autocomplete="off" spellcheck="false">${button("Go", "hds-go")}</div>${quarters.length ? `<label class="inline">Quarter<select id="hds-period">${quarters.map((q) => `<option value="${esc(q.period)}" ${q.period === (d.period || d.holders?.period) ? "selected" : ""}>${esc(q.period)} · ${int(q.filers)} managers</option>`).join("")}</select></label>` : ""}${button("Export CSV", "hds-export")}${button("Reload", "hds-reload")}</div>${securitiesLine(d)}<div class="tabs">${tabs.map(([k, l]) => button(l, "hds-tab", hds.tab === k ? "active" : "", `data-value="${k}"`)).join("")}</div></section>`;
+  const body = { institutions: () => institutionsTab(d, c), big: () => bigTab(d), insiders: () => insidersTab(d), options: () => optionsTab(c), history: () => historyTab(d) }[hds.tab]();
+  return head + holderStats(d, c) + (["institutions", "options"].includes(hds.tab) ? fundPanel() : "") + body + `<small class="source-note">Sources: SEC Form 13F data sets (${esc((refStatus?.sets || []).map((s) => s.name.replace("_form13f", "")).join(", ") || "not downloaded")}), SEC fails-to-deliver files for ticker ↔ CUSIP, EDGAR Schedules 13D/G and Forms 3/4/5, XBRL cover-page shares outstanding. Filings are disclosures as of their dates, not live positions.</small>`;
+}
+// ---- Universe (every listing) ---------------------------------------------
+const uni = { country: "", mic: "", kind: "", q: "", offset: 0, data: null, facets: null, loading: false, error: "" };
+function loadUniverse() {
+  if (!native || uni.loading || !uniStatus?.listings || (uni.data && uni.facets)) return;
+  uni.loading = true;
+  Promise.all([uni.facets ? null : universeFacets(), universeBrowse({ country: uni.country, mic: uni.mic, kind: uni.kind, q: uni.q, offset: uni.offset, limit: 100 })])
+    .then(([f, d]) => {
+      if (f) uni.facets = f;
+      uni.data = d;
+      uni.error = "";
+    })
+    .catch((e) => (uni.error = message(e)))
+    .finally(() => {
+      uni.loading = false;
+      refresh();
+    });
+}
+function universePage() {
+  if (!native) return `<section class="panel">${empty("The world listing directory loads in the desktop app.")}</section>`;
+  const s = uniStatus;
+  const top = `<section class="panel"><div class="panel-head"><h2>Every listed stock and ETF <small>${s?.listings ? `${int(s.listings)} listings · ${int(s.countries)} countries · ${int(s.exchanges)} exchanges` : "not downloaded yet"}</small></h2>${button(s?.job?.running ? "Updating…" : "Update list", "uni-refresh")}</div><div class="job-line" data-job="universe">${jobLine(s?.job, s?.fetched ? `<span class="muted">Updated ${new Date(s.fetched * 1000).toLocaleString()} · Twelve Data reference lists${s.sec ? ` + ${int(s.sec)} SEC filers` : ""}</span>` : "")}</div><small>Search any of them from the box on the left. US listings open with their ticker (AAPL); others carry their exchange (VOD:XLON). Daily prices come from your price source where its plan covers that exchange; holders (HDS) cover US-listed securities.</small></section>`;
+  if (!s?.listings) return top + `<section class="panel">${empty(s?.job?.running ? "Downloading the listing directory (about 75 MB)…" : esc(s?.job?.error || "Press Update list to download the directory."))}</section>`;
+  const f = uni.facets;
+  const sel = (id, label, opts, cur) => `<label>${label}<select id="${id}"><option value="">All</option>${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`;
+  const countries = (f?.countries || []).filter((c) => c[0]).map((c) => [c[0], `${c[0]} (${int(c[3])})`]);
+  const exchanges = (f?.exchanges || []).filter((e) => e[0] && (!uni.country || e[2] === uni.country)).map((e) => [e[0], `${e[1] || e[0]} · ${e[0]}${e[2] ? " · " + e[2] : ""} (${int(e[3])})`]);
+  const kinds = [["Stock", "Stocks (common, ADR, REIT)"], ...(f?.kinds || []).filter((k) => k[0]).map((k) => [k[0], `${k[0]} (${int(k[3])})`])];
+  const d = uni.data;
+  const filters = `<section class="panel"><div class="filters">${sel("uni-country", "Country", countries, uni.country)}${sel("uni-mic", "Exchange", exchanges, uni.mic)}${sel("uni-kind", "Type", kinds, uni.kind)}<label>Name or ticker<input id="uni-q" value="${esc(uni.q)}" placeholder="e.g. bank, 7203, SAP"></label>${button("Search", "uni-search")}</div>${
+    d
+      ? `<p class="muted">${int(d.total)} matching listings${d.total > 100 ? ` · showing ${int(uni.offset + 1)}–${int(Math.min(d.total, uni.offset + 100))}` : ""}</p><div class="uni-table">${table(
+          ["Ticker", "Name", "Exchange", "Country", "Currency", "Type", ""],
+          d.rows.map((r) => `<tr><td><b>${esc(r.symbol)}</b></td><td>${esc(r.name)}</td><td>${esc(r.exchange || "")} <small>${esc(r.mic || "")}</small></td><td>${esc(r.country || "—")}</td><td>${esc(r.currency || "")}</td><td><small>${esc(r.kind || "—")}</small></td><td class="actions">${button("Open", "uni-open", "", `data-value="${esc(r.key)}"`)}${isUSKey(r.key) ? button("HDS", "hds-open", "", `data-value="${esc(r.key)}"`) : ""}</td></tr>`),
+        )}</div><div class="pager">${uni.offset > 0 ? button("← Previous", "uni-page", "", 'data-value="-100"') : ""}${uni.offset + 100 < d.total ? button("Next →", "uni-page", "", 'data-value="100"') : ""}</div>`
+      : empty(esc(uni.error || "Loading listings…"))
+  }</section>`;
+  return top + filters;
+}
+// ---- Command line and search -------------------------------------------------
+function runCommand(cmd) {
+  const t = cmd.ticker;
+  if (cmd.page === "Holders") return openHolders(t || hdsTicker() || symbol);
+  if (cmd.page === "Relationships") {
+    page = "Relationships";
+    if (t && !centerOnTicker(t)) notify("No relationship coverage for " + t + " in demo data.", true);
+    return render();
+  }
+  if (t && cmd.page === "Research") return openTicker(t);
+  page = cmd.page;
+  render();
+}
+function openTicker(q, meta) {
+  const a = assets().find((a) => a.symbol === q) || (!meta && assets().find((a) => a.name.toUpperCase().includes(q)));
+  if (a) {
+    symbol = a.symbol;
+    page = "Research";
+    return render();
+  }
+  if (live()) return addTicker(q, true, meta).catch((err) => notify(message(err), true));
+  notify("No match in demo data. Switch to Live data to look up " + q + ".", true);
+}
+function openListing(r) {
+  if (page === "Holders") return openHolders(r.key);
+  openTicker(r.key, r);
+}
+function runSearch(raw) {
+  const q = raw.trim().toUpperCase();
+  if (!q) return;
+  const cmd = parseCommand(q);
+  if (cmd) return runCommand(cmd);
+  if (page === "Holders") return openHolders(q);
+  if (page === "Relationships") {
+    const hit = graph().nodes.find((n) => n.ticker === q || n.name.toUpperCase().includes(q));
+    if (hit) goToEntity(hit.id);
+    else if (!centerOnTicker(q)) return notify("No relationship coverage for " + q + " in demo data.", true);
+    return render();
+  }
+  openTicker(q);
+}
+// Sidebar search: commands ("AAPL HDS"), plus suggestions from every listing.
+function bindSearch() {
+  const input = $("#search"),
+    list = $("#search-results");
+  let results = [],
+    active = -1,
+    timer = null;
+  const close = () => {
+    list.hidden = true;
+    active = -1;
+  };
+  const paint = () => {
+    list.innerHTML = results
+      .map((r, i) => `<button type="button" role="option" class="combo-item ${i === active ? "active" : ""}" data-i="${i}"><b>${esc(r.symbol)} <span>${esc(r.name)}</span></b><small>${esc(r.mic || r.exchange || "")}${r.country ? " · " + esc(r.country) : ""}</small></button>`)
+      .join("");
+    list.hidden = !results.length;
+    list.querySelectorAll(".combo-item").forEach(
+      (el) =>
+        (el.onmousedown = (e) => {
+          e.preventDefault();
+          close();
+          input.value = "";
+          openListing(results[+el.dataset.i]);
+        }),
+    );
+  };
+  input.oninput = () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (page === "Relationships" || !native || !uniStatus?.listings || !q || parseCommand(q)) {
+      results = [];
+      return close();
+    }
+    timer = setTimeout(async () => {
+      try {
+        const r = await universeSearch(q, 8);
+        if (input.value.trim() !== q) return;
+        results = r;
+        active = -1;
+        paint();
+      } catch {
+        results = [];
+        close();
+      }
+    }, 120);
+  };
+  input.onblur = () => setTimeout(close, 120);
+  input.onkeydown = (e) => {
+    if (!list.hidden && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      active = e.key === "ArrowDown" ? (active + 1) % results.length : active <= 0 ? results.length - 1 : active - 1;
+      return paint();
+    }
+    if (e.key === "Escape") {
+      input.value = "";
+      return close();
+    }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const pick = !list.hidden && active >= 0 ? results[active] : null;
+    close();
+    const text = input.value;
+    input.value = "";
+    if (pick) return openListing(pick);
+    runSearch(text);
+  };
+}
+// Inputs on the Holders, Universe and Settings pages.
+function bindReference() {
+  const on = (id, ev, f) => {
+    const el = $("#" + id);
+    if (el) el[ev] = f;
+  };
+  const d = () => hdsEntry(hdsTicker());
+  on("hds-ticker", "onkeydown", (e) => {
+    if (e.key === "Enter") action("hds-go").catch((x) => notify(message(x), true));
+  });
+  // Filtering re-renders the table; keep the cursor in the box.
+  let qTimer = null;
+  on("hds-q", "oninput", (e) => {
+    clearTimeout(qTimer);
+    const v = e.target.value,
+      at = e.target.selectionStart;
+    qTimer = setTimeout(() => {
+      hds.q = v;
+      hds.limit = 100;
+      render();
+      const el = $("#hds-q");
+      if (el) {
+        el.focus();
+        el.setSelectionRange(at, at);
+      }
+    }, 200);
+  });
+  on("hds-period", "onchange", (e) => {
+    const x = d();
+    x.period = e.target.value;
+    x.holders = null;
+    x.comp = null;
+    hds.fund = null;
+    render();
+  });
+  on("hds-quarters", "onchange", async (e) => {
+    state.holdings = { ...(state.holdings || {}), quarters: +e.target.value };
+    await persist();
+  });
+  on("hds-codes", "onchange", (e) => {
+    hds.insiderCodes = e.target.value;
+    render();
+  });
+  for (const [id, key] of [["uni-country", "country"], ["uni-mic", "mic"], ["uni-kind", "kind"]])
+    on(id, "onchange", (e) => {
+      uni[key] = e.target.value;
+      if (key === "country") uni.mic = "";
+      uni.offset = 0;
+      uni.data = null;
+      render();
+    });
+  on("uni-q", "onkeydown", (e) => {
+    if (e.key === "Enter") action("uni-search").catch((x) => notify(message(x), true));
+  });
+}
+function referencePanel() {
+  const r = refStatus,
+    u = uniStatus;
+  const q = state.holdings?.quarters || 2;
+  return `<section class="panel"><div class="panel-head"><h2>Reference data</h2></div><div class="source-row"><div class="source-info"><h3>World listing directory ${u?.listings ? '<span class="pill on">Loaded</span>' : '<span class="pill">Not loaded</span>'}</h3><small>${u?.listings ? `${int(u.listings)} stocks and ETFs on ${int(u.exchanges)} exchanges in ${int(u.countries)} countries` : "Every stock and ETF Twelve Data lists, plus SEC's US filers"}. No key needed. Refreshed weekly.</small><div class="job-line" data-job="universe">${jobLine(u?.job)}</div></div><div class="source-key">${button("Update now", "uni-refresh")}</div></div><div class="source-row"><div class="source-info"><h3>SEC 13F institutional holdings ${r?.quarters?.length ? `<span class="pill on">${r.quarters.length} quarters</span>` : '<span class="pill">Not downloaded</span>'}</h3><small>${r?.quarters?.length ? `Quarters: ${r.quarters.map((x) => esc(x.period)).join(", ")} · ${int(r.mapped)} CUSIPs mapped to tickers` : "About 100 MB to download and 200 MB on disk per quarter. Needs your SEC contact email."}</small><div class="job-line" data-job="holdings">${jobLine(r?.job)}</div></div><div class="source-key"><select id="hds-quarters" aria-label="Quarters to keep">${[2, 4, 8].map((n) => `<option value="${n}" ${n === q ? "selected" : ""}>Keep ${n} quarters</option>`).join("")}</select>${button(r?.quarters?.length ? "Check for new data" : "Download", "hds-download")}</div></div><small>Both live in reference.sqlite in the app-data folder, separate from your workspace and backups.</small></section>`;
 }
 // ---- SEC EDGAR -----------------------------------------------------------
 function cikFor(s) {
@@ -1422,7 +2000,7 @@ function setup() {
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in market-lens.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -1462,11 +2040,27 @@ const message = (e) => String(e?.message || e);
 async function loadPrices(s) {
   const p = priceSource(state.sources.prices, keyInfo);
   if (!p) throw Error("Connect a price source in Settings → Data sources.");
-  try {
+  // Listings outside the US can fall back to the other provider.
+  const order = isUSKey(s) ? [p] : [p, p === "twelve" ? "alpha" : "twelve"].filter((x) => hasKey(x) && (x !== "alpha" || alphaSymbol(s)));
+  const failures = [];
+  for (const src of order) {
+    try {
+      return await loadPricesFrom(src, s);
+    } catch (e) {
+      failures.push(`${providers[src].name}: ${message(e)}`);
+    }
+  }
+  const msg = failures.join(" · ") + (isUSKey(s) ? "" : " Free plans mostly cover US markets; other exchanges may need a paid plan.");
+  loadErrors["prices:" + s] = msg;
+  lastError[p] = `${s}: ${msg}`;
+  throw Error(msg);
+}
+async function loadPricesFrom(p, s) {
+  {
     const d =
       p === "twelve"
         ? await fetchData("twelve", "TIME_SERIES", s)
-        : await fetchData("alpha", "TIME_SERIES_DAILY", s);
+        : await fetchData("alpha", "TIME_SERIES_DAILY", alphaSymbol(s) || s);
     let bars;
     try {
       bars = p === "twelve" ? normalizeTwelve(d.data) : normalizeAlpha(d.data);
@@ -1481,17 +2075,13 @@ async function loadPrices(s) {
       name: prev.name || s,
       bars,
       origin: p,
-      source: providers[p].name + " · daily" + (d.stale ? " · STALE" : "") + (hasKey("finnhub") ? " · real-time trades from Finnhub" : ""),
+      source: providers[p].name + " · daily" + (d.stale ? " · STALE" : "") + (hasKey("finnhub") && isUSKey(s) ? " · real-time trades from Finnhub" : ""),
       fetchedAt: d.fetchedAt,
       live: undefined,
     };
     delete loadErrors["prices:" + s];
     if (d.warning) lastError[p] = d.warning;
     return d;
-  } catch (e) {
-    loadErrors["prices:" + s] = message(e);
-    lastError[p] = `${s}: ${message(e)}`;
-    throw e;
   }
 }
 async function loadDataset(kind, s) {
@@ -1526,6 +2116,11 @@ async function loadMacro(id) {
 }
 // Pull whatever the current page needs and doesn't have yet.
 function autoLoad() {
+  if (page === "Holders" && native && hdsTicker()) {
+    loadHolders(hdsTicker());
+    loadOwnership(hdsTicker());
+  }
+  if (page === "Universe") loadUniverse();
   if (!live()) return;
   const once = (key, job) => {
     if (attempted.has(key)) return;
@@ -1540,7 +2135,7 @@ function autoLoad() {
     }).catch(() => {});
   };
   const a = asset();
-  if (page === "Research" && a && hasKey("alpha")) {
+  if (page === "Research" && a && hasKey("alpha") && isUSKey(a.symbol)) {
     const s = a.symbol;
     if (!a.overview) once(`${s}:OVERVIEW`, () => loadDataset("OVERVIEW", s));
     if (!state.datasets[`${s}:${statement}`])
@@ -1548,7 +2143,7 @@ function autoLoad() {
     if (!state.datasets[`${s}:NEWS_SENTIMENT`])
       once(`${s}:NEWS_SENTIMENT`, () => loadDataset("NEWS_SENTIMENT", s));
   }
-  if (page === "Research" && a && (cikFor(a.symbol) || hasKey("sec")) && stale(state.secData?.[a.symbol], 86400)) {
+  if (page === "Research" && a && isUSKey(a.symbol) && (cikFor(a.symbol) || hasKey("sec")) && stale(state.secData?.[a.symbol], 86400)) {
     const s = a.symbol;
     once("sec:" + s, () => loadSEC(s));
   }
@@ -1587,9 +2182,9 @@ async function syncWatchlist() {
   })().finally(() => (syncing = null));
   return syncing;
 }
-async function addTicker(s, openResearch) {
+async function addTicker(s, openResearch, meta = null) {
   s = s.trim().toUpperCase();
-  if (!/^[A-Z0-9.^_-]{1,20}$/.test(s)) throw Error("Enter a ticker like AAPL.");
+  if (!/^[A-Z0-9.^_&-]{1,24}(:[A-Z0-9]{3,5})?$/.test(s)) throw Error("Enter a ticker like AAPL, or pick a listing from the search list.");
   if (state.mode === "sample" && !activeMap()[s])
     throw Error("Demo data only has its sample tickers. Switch to Live data to add " + s + ".");
   if (live() && !activeMap()[s]) {
@@ -1599,6 +2194,9 @@ async function addTicker(s, openResearch) {
     } finally {
       setSync("");
     }
+    // Listing details from the directory: name, exchange, currency.
+    const l = meta || (await universeGet(s).catch(() => null));
+    if (l && activeMap()[s]) Object.assign(activeMap()[s], { name: l.name || s, exchange: l.exchange, country: l.country, currency: l.currency, kind: l.kind, sector: activeMap()[s].sector || l.kind });
   }
   if (!state.watchlist.includes(s)) state.watchlist.push(s);
   symbol = s;
@@ -1675,6 +2273,11 @@ function bind() {
       (el.onclick = () => {
         page = el.dataset.page;
         // The explorer follows the company you were last looking at.
+        if (page === "Holders" && symbol !== hds.followed) {
+          hds.ticker = symbol;
+          hds.followed = symbol;
+          hds.fund = null;
+        }
         if (page === "Relationships" && symbol !== graphSymbol) {
           const a = activeMap()[symbol];
           if (!centerOnTicker(symbol, a?.overview?.Name)) graphSymbol = symbol;
@@ -1724,29 +2327,7 @@ function bind() {
     $("#watch-input").onkeydown = (e) => {
       if (e.key === "Enter") $('[data-action="watch-add"]').click();
     };
-  $("#search").onkeydown = (e) => {
-    if (e.key === "Enter") {
-      const q = e.target.value.trim().toUpperCase();
-      if (page === "Relationships" && q) {
-        const hit = graph().nodes.find((n) => n.ticker === q || n.name.toUpperCase().includes(q));
-        if (hit) goToEntity(hit.id);
-        else if (!centerOnTicker(q)) return notify("No relationship coverage for " + q + " in demo data.", true);
-        e.target.value = "";
-        return render();
-      }
-      const
-        a =
-          assets().find((a) => a.symbol === q) ||
-          assets().find((a) => a.name.toUpperCase().includes(q));
-      if (a) {
-        symbol = a.symbol;
-        page = "Research";
-        render();
-      } else if (live())
-        addTicker(q, true).catch((err) => notify(message(err), true));
-      else notify("No match in demo data. Switch to Live data to look up " + q + ".", true);
-    }
-  };
+  bindSearch();
   if ($("#asset-select"))
     $("#asset-select").onchange = (e) => {
       symbol = e.target.value;
@@ -1789,6 +2370,7 @@ function bind() {
     calc();
   }
   if (page === "Valuation") calcDCF();
+  bindReference();
   if ($("#restore"))
     $("#restore").onchange = async (e) => {
       try {
@@ -1961,6 +2543,144 @@ async function action(act, value) {
         render();
       }
       break;
+    case "hds-go": {
+      const t = $("#hds-ticker")?.value.trim();
+      if (t) openHolders(t);
+      break;
+    }
+    case "hds-open":
+      openHolders(value);
+      break;
+    case "hds-tab":
+      hds.tab = value;
+      render();
+      break;
+    case "hds-filter":
+      hds.filter = value;
+      hds.limit = 100;
+      render();
+      break;
+    case "hds-sort":
+      hds.dir = hds.sort === value ? -hds.dir : value === "name" ? 1 : -1;
+      hds.sort = value;
+      render();
+      break;
+    case "hds-more":
+      hds.limit += 500;
+      render();
+      break;
+    case "hds-reload": {
+      const t = hdsTicker();
+      const x = hdsEntry(t);
+      delete hdsData[t];
+      Object.assign(hdsEntry(t), { only: x.only, period: x.period });
+      await readReference();
+      render();
+      break;
+    }
+    case "hds-securities": {
+      const x = hdsEntry(hdsTicker());
+      x.only = [...document.querySelectorAll("[data-cusip]")].filter((el) => el.checked).map((el) => el.dataset.cusip);
+      if (!x.only.length) throw Error("Pick at least one security.");
+      x.holders = null;
+      x.comp = null;
+      render();
+      break;
+    }
+    case "hds-fund": {
+      const cik = +value;
+      hds.fund = { cik, data: null, error: "" };
+      Object.assign(hds, { fundFilter: "all", fundSort: "value", fundLimit: 100 });
+      render();
+      document.querySelector(".fund")?.scrollIntoView({ block: "start" });
+      try {
+        hds.fund.data = await holderPortfolio(cik, hdsEntry(hdsTicker()).holders?.period || null);
+      } catch (e) {
+        hds.fund.error = message(e);
+      }
+      if (hds.fund?.cik === cik) render();
+      break;
+    }
+    case "hds-fund-close":
+      hds.fund = null;
+      render();
+      break;
+    case "hds-fund-filter":
+      hds.fundFilter = value;
+      hds.fundLimit = 100;
+      render();
+      break;
+    case "hds-fund-sort":
+      hds.fundSort = value;
+      render();
+      break;
+    case "hds-fund-more":
+      hds.fundLimit += 500;
+      render();
+      break;
+    case "hds-fund-export": {
+      const v = hds.fund?.view;
+      if (!v) break;
+      download(
+        `13f-${hds.fund.cik}-${v.period}.csv`,
+        csv(v.rows.map((r) => ({ period: v.period, ticker: r.ticker || "", issuer: r.issuer, class: r.class, cusip: r.cusip, putcall: ["", "Put", "Call"][r.putcall], shares: r.shares, prevShares: r.prevShares, change: r.change, value: r.value, weight: r.weight, rank: r.rank, status: r.status }))),
+        "text/csv",
+      );
+      break;
+    }
+    case "hds-export": {
+      const t = hdsTicker(),
+        x = hdsEntry(t),
+        c = holderComparison(x);
+      const sets = {
+        institutions: () => c && holderRows(c).map((h) => ({ ticker: t, quarter: c.period, holder: h.name, cik: h.cik, city: h.city, state: h.state, shares: h.shares, prevShares: h.prevShares, change: h.change, changePct: h.changePct, value: h.value, pctOut: h.pctOut, portfolioWeight: h.weight, rankInPortfolio: h.rank, positions: h.positions, portfolioValue: h.portfolio, quartersHeld: h.quarters, since: h.since, status: h.status, votingSole: h.sole, votingShared: h.sharedVote, votingNone: h.noVote, discretion: h.discretion, filed: h.filed, accession: h.accession })),
+        options: () => c?.options.map((o) => ({ ticker: t, quarter: c.period, holder: o.name, cik: o.cik, type: o.type, shares: o.shares, change: o.change, value: o.value, status: o.status })),
+        history: () => x.holders && ownershipHistory(x.holders.history, x.series),
+        big: () => x.bigView,
+        insiders: () => x.insiderView?.log.map(({ ownerKey, ...r }) => r),
+      };
+      const rows = sets[hds.tab]?.();
+      if (!rows?.length) throw Error("Nothing to export yet.");
+      download(`${t}-${hds.tab}.csv`, csv(rows), "text/csv");
+      break;
+    }
+    case "hds-download": {
+      const q = +($("#hds-quarters")?.value || state.holdings?.quarters || 2);
+      state.holdings = { ...(state.holdings || {}), quarters: q, checked: Date.now() };
+      await persist();
+      await holdingsUpdate(q);
+      notify("Downloading SEC 13F data. You can keep using the app meanwhile.");
+      await watchReference();
+      render();
+      break;
+    }
+    case "hds-insiders-more": {
+      const t = hdsTicker();
+      await loadInsiders(t, 40);
+      render();
+      break;
+    }
+    case "uni-refresh":
+      await universeRefresh();
+      await watchReference();
+      render();
+      break;
+    case "uni-search":
+      uni.q = $("#uni-q")?.value || "";
+      uni.offset = 0;
+      uni.data = null;
+      render();
+      break;
+    case "uni-page":
+      uni.offset = Math.max(0, uni.offset + +value);
+      uni.data = null;
+      render();
+      break;
+    case "uni-open": {
+      const r = uni.data?.rows.find((x) => x.key === value);
+      openTicker(value, r);
+      break;
+    }
     case "goto-settings":
       page = "Settings";
       render();
@@ -2024,6 +2744,8 @@ async function action(act, value) {
     }
     case "buy":
     case "sell": {
+      if (asset()?.currency && asset().currency !== "USD")
+        throw Error(`Paper trading uses a USD account; ${asset().symbol} trades in ${asset().currency}.`);
       const date = $("#trade-date").value;
       if (!date) throw Error("Select a trade date");
       if (date > new Date().toISOString().slice(0, 10))
@@ -2183,5 +2905,6 @@ state.alerts = state.alerts.map(
 );
 render();
 syncWatchlist();
+autoReference().then(() => refresh());
 // Daily data: re-check every 30 minutes. Cached data costs no requests.
 setInterval(() => syncWatchlist(), 30 * 60 * 1000);

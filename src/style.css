@@ -957,3 +957,45 @@ select option, select optgroup { background: #111; color: #ececec; }
 .crumb { flex: none; }
 .crumb.current { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 @media (max-width: 1100px) { .graph-toolbar { flex-wrap: wrap; } }
+/* ---- Holders (HDS) and the listing directory */
+.hds-stats { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.hds-stats .stat small { line-height: 1.4; }
+.tabs, .segmented { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.tabs button, .segmented button { background: #111; border-color: #262626; font-size: 12px; padding: 7px 12px; border-radius: 999px; }
+.tabs button.active, .segmented button.active { background: #fff; border-color: #fff; color: #000; }
+.segmented button small { color: inherit; opacity: 0.6; margin-left: 4px; }
+.th-sort { background: none; border: none; padding: 0; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; white-space: nowrap; }
+.th-sort.on, .th-sort:hover { color: #fff; }
+button.link { background: none; border: none; padding: 0; color: #fff; text-align: left; font: inherit; font-weight: 550; cursor: pointer; text-decoration: underline; text-decoration-color: #444; text-underline-offset: 3px; }
+button.link:hover { text-decoration-color: #fff; }
+td.holder { min-width: 200px; max-width: 320px; }
+td.holder small { display: block; color: #7d7d7d; margin-top: 2px; }
+.pill.st-new { border-color: #2c6e48; color: #4cc38a; }
+.pill.st-added { border-color: #24533a; color: #7fd4a8; }
+.pill.st-reduced { border-color: #6b3330; color: #f0a19c; }
+.pill.st-exited { border-color: #84332e; color: #f0716a; }
+.pill.st-not-filed { border-style: dashed; }
+.pill.warn { border-color: #5a4a1e; color: #e6c66e; }
+tr.faded td { opacity: 0.6; }
+tr.sub td { border-top: none; padding-top: 0; color: #9a9a9a; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; padding: 5px 10px; border: 1px solid #262626; border-radius: 8px; background: #101010; font-size: 12px; flex-direction: row; margin: 0; text-transform: none; letter-spacing: 0; color: #d0d0d0; }
+.chip small { color: #777; }
+.inline { display: inline-flex; gap: 8px; align-items: center; flex-direction: row; margin: 0; }
+.inline input { width: 140px; }
+.job-line { display: flex; gap: 10px; align-items: center; min-height: 20px; margin: 8px 0; font-size: 12px; }
+.job-line:empty { display: none; }
+.job-line progress { flex: 1; max-width: 320px; height: 6px; accent-color: #fff; }
+.pager { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+td.actions { white-space: nowrap; }
+td.actions button { padding: 4px 10px; font-size: 11px; margin-left: 4px; }
+.fund { border-color: #3a3a3a; }
+.source-note { display: block; margin: 4px 2px 20px; color: #6f6f6f; line-height: 1.5; }
+#hds-q { min-width: 220px; }
+.side-search .combo-list { top: calc(100% + 4px); z-index: 50; }
+.side-search .combo-item { flex-direction: column; gap: 2px; padding: 7px 9px; }
+.side-search .combo-item b { font-size: 12px; max-width: 100%; }
+.side-search .combo-item b span { font-weight: 400; color: #a8a8a8; margin-left: 4px; }
+.side-search .combo-item small { font-size: 10.5px; }
+.uni-table th:nth-child(2), .uni-table td:nth-child(2) { text-align: left; }
+th:has(> .th-sort[data-value="name"]), th:has(> .th-sort[data-value="issuer"]) { text-align: left; }

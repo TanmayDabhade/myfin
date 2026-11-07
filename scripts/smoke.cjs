@@ -71,7 +71,72 @@ function fakeBackend() {
         { mmsi: 223456789, name: "FIXTURE CARGO", lat: 26.6, lon: 56.1, sog: null, cog: null, status: "At anchor", class: "cargo", type_code: 70, destination: "", seen: Date.now() / 1000 },
       ],
     }),
-    fetch_sec: ({ kind, accession }) => {
+    // Reference data: two 13F quarters and a small listing directory.
+    holdings_status: () => ({
+      quarters: [{ period: "2026-06-30", filers: 10940 }, { period: "2026-03-31", filers: 10800 }],
+      sets: [{ name: "01jun2026-31aug2026_form13f", loaded: 1, filings: 2, rows: 4 }],
+      mapped: 12000,
+      job: { running: false, stage: "Up to date", done: 0, total: 0, error: "", finished: 1 },
+    }),
+    holdings_update: () => null,
+    holders: ({ ticker }) => {
+      const f = (period, cik, name, shares, value, portfolio, rank, putcall = 0) => ({ period, cik, putcall, value, shares, prn: false, discretion: "Sole", sole: shares, shared: 0, none: 0, rank, name, city: "Boston", state: "MA", portfolio, positions: 40, accession: "0000000001-26-000001", filed: "2026-08-10" });
+      return {
+        period: "2026-06-30",
+        prior: "2026-03-31",
+        quarters: [{ period: "2026-06-30", filers: 10940 }, { period: "2026-03-31", filers: 10800 }],
+        securities: [{ cusip: "037833100", issuer: "APPLE INC", class: "COM", holders: 3, value: 9e9, source: "SEC fails-to-deliver list" }],
+        related: [],
+        included: ["037833100"],
+        rows: [
+          f("2026-06-30", 1, "FIXTURE CAPITAL LLC", 1500, 450000, 4500000, 1),
+          f("2026-03-31", 1, "FIXTURE CAPITAL LLC", 1000, 280000, 4000000, 2),
+          f("2026-06-30", 2, "NEWCOMER PARTNERS LP", 300, 90000, 9000000, 25),
+          f("2026-03-31", 3, "DEPARTED ADVISORS INC", 700, 200000, 5000000, 4),
+          f("2026-06-30", 1, "FIXTURE CAPITAL LLC", 100, 30000, 4500000, null, 1),
+        ],
+        history: [
+          { period: "2026-03-31", holders: 2, shares: 1700, value: 480000, putHolders: 0, putShares: 0, callHolders: 0, callShares: 0 },
+          { period: "2026-06-30", holders: 2, shares: 1800, value: 540000, putHolders: 1, putShares: 100, callHolders: 0, callShares: 0 },
+        ],
+        tenure: { 1: { quarters: 2, since: "2026-03-31" }, 2: { quarters: 1, since: "2026-06-30" } },
+        reported: [3],
+        ticker,
+      };
+    },
+    holder_portfolio: ({ cik }) => ({
+      cik,
+      period: "2026-06-30",
+      prior: "2026-03-31",
+      quarters: [],
+      filings: [
+        { period: "2026-06-30", name: "FIXTURE CAPITAL LLC", city: "Boston", state: "MA", total: 4500000, positions: 2, accession: "a", filed: "2026-08-10" },
+        { period: "2026-03-31", name: "FIXTURE CAPITAL LLC", city: "Boston", state: "MA", total: 4000000, positions: 2, accession: "b", filed: "2026-05-10" },
+      ],
+      rows: [
+        { period: "2026-06-30", cusip: "037833100", putcall: 0, value: 450000, shares: 1500, prn: false, rank: 1, issuer: "APPLE INC", class: "COM", ticker: "AAPL" },
+        { period: "2026-03-31", cusip: "037833100", putcall: 0, value: 280000, shares: 1000, prn: false, rank: 2, issuer: "APPLE INC", class: "COM", ticker: "AAPL" },
+        { period: "2026-03-31", cusip: "594918104", putcall: 0, value: 300000, shares: 700, prn: false, rank: 1, issuer: "MICROSOFT CORP", class: "COM", ticker: "MSFT" },
+      ],
+    }),
+    holders_find: () => [],
+    universe_status: () => ({ listings: 4, countries: 3, exchanges: 3, fetched: 1, stocks: 3, etfs: 1, sec: 0, job: { running: false, stage: "", done: 0, total: 0, error: "", finished: 0 } }),
+    universe_refresh: () => null,
+    universe_search: ({ q }) =>
+      [
+        { key: "AAPL", symbol: "AAPL", name: "Apple Inc.", exchange: "NASDAQ", mic: "XNGS", country: "United States", currency: "USD", kind: "Common Stock" },
+        { key: "VOD:XLON", symbol: "VOD", name: "Vodafone Group Plc", exchange: "LSE", mic: "XLON", country: "United Kingdom", currency: "GBp", kind: "Common Stock" },
+      ].filter((r) => (r.symbol + r.name).toUpperCase().includes(String(q).toUpperCase())),
+    universe_browse: () => ({
+      total: 2,
+      rows: [
+        { key: "7203:XJPX", symbol: "7203", name: "Toyota Motor Corp", exchange: "JPX", mic: "XJPX", country: "Japan", currency: "JPY", kind: "Common Stock" },
+        { key: "VOD:XLON", symbol: "VOD", name: "Vodafone Group Plc", exchange: "LSE", mic: "XLON", country: "United Kingdom", currency: "GBp", kind: "Common Stock" },
+      ],
+    }),
+    universe_facets: () => ({ countries: [["Japan", "", "", 1], ["United Kingdom", "", "", 1]], exchanges: [["XJPX", "JPX", "Japan", 1], ["XLON", "LSE", "United Kingdom", 1]], kinds: [["Common Stock", "", "", 2]] }),
+    universe_get: ({ key }) => (key === "VOD:XLON" ? { key, symbol: "VOD", name: "Vodafone Group Plc", exchange: "LSE", mic: "XLON", country: "United Kingdom", currency: "GBp", kind: "Common Stock" } : null),
+    fetch_sec: ({ kind, accession, doc }) => {
       if (kind !== "submissions" && kind !== "revenue" && !(store("native-keys") || {}).sec)
         throw "SEC contact email required";
       const wrap = (data) => ({ data, fetchedAt: Date.now() / 1000, provider: "sec" });
@@ -95,13 +160,18 @@ function fakeBackend() {
           cik: "320193",
           name: "Apple Inc.",
           filings: { recent: {
-            form: ["10-K", "8-K", "10-K"],
-            filingDate: ["2026-11-03", "2026-08-01", "2025-10-31"],
-            reportDate: ["2026-09-26", "", "2025-09-27"],
-            accessionNumber: ["0000320193-26-000026", "0000320193-26-000020", "0000320193-25-000079"],
-            primaryDocument: ["cur.htm", "e.htm", "prior.htm"],
+            form: ["4", "10-K", "SCHEDULE 13G", "8-K", "10-K"],
+            filingDate: ["2026-11-05", "2026-11-03", "2026-04-29", "2026-08-01", "2025-10-31"],
+            reportDate: ["2026-11-03", "2026-09-26", "", "", "2025-09-27"],
+            accessionNumber: ["0001140361-26-042149", "0000320193-26-000026", "0002100119-26-000139", "0000320193-26-000020", "0000320193-25-000079"],
+            primaryDocument: ["xslF345X06/form4.xml", "cur.htm", "xslSCHEDULE_13G_X02/primary_doc.xml", "e.htm", "prior.htm"],
           } },
         });
+      if (kind === "shares") return wrap({ units: { shares: [{ end: "2026-07-17", val: 15000, filed: "2026-08-01", accn: "q" }] } });
+      if (kind === "xml" && doc === "form4.xml")
+        return wrap({ xml: "<ownershipDocument><documentType>4</documentType><issuer><issuerCik>0000320193</issuerCik><issuerName>Apple Inc.</issuerName><issuerTradingSymbol>AAPL</issuerTradingSymbol></issuer><reportingOwner><reportingOwnerId><rptOwnerCik>1</rptOwnerCik><rptOwnerName>Fixture Insider</rptOwnerName></reportingOwnerId><reportingOwnerRelationship><isOfficer>true</isOfficer><officerTitle>Chief Fixture Officer</officerTitle></reportingOwnerRelationship></reportingOwner><aff10b5One>true</aff10b5One><nonDerivativeTable><nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle><transactionDate><value>2026-11-03</value></transactionDate><transactionCoding><transactionCode>S</transactionCode></transactionCoding><transactionAmounts><transactionShares><value>2399</value></transactionShares><transactionPricePerShare><value>325.75</value></transactionPricePerShare><transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode></transactionAmounts><postTransactionAmounts><sharesOwnedFollowingTransaction><value>29997</value></sharesOwnedFollowingTransaction></postTransactionAmounts><ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction></nonDerivativeTable></ownershipDocument>" });
+      if (kind === "xml")
+        return wrap({ xml: "<edgarSubmission><headerData><submissionType>SCHEDULE 13G</submissionType><filerInfo><filer><filerCredentials><cik>0002100119</cik></filerCredentials></filer></filerInfo></headerData><formData><coverPageHeader><eventDateRequiresFilingThisStatement>03/31/2026</eventDateRequiresFilingThisStatement><issuerInfo><issuerCik>0000320193</issuerCik><issuerName>Apple Inc</issuerName><issuerCusips><issuerCusipNumber>037833100</issuerCusipNumber></issuerCusips></issuerInfo></coverPageHeader><coverPageHeaderReportingPersonDetails><reportingPersonName>Fixture Index Funds</reportingPersonName><reportingPersonBeneficiallyOwnedNumberOfShares><soleVotingPower>100</soleVotingPower><sharedVotingPower>0</sharedVotingPower><soleDispositivePower>1200</soleDispositivePower><sharedDispositivePower>0</sharedDispositivePower></reportingPersonBeneficiallyOwnedNumberOfShares><reportingPersonBeneficiallyOwnedAggregateNumberOfShares>1200</reportingPersonBeneficiallyOwnedAggregateNumberOfShares><classPercent>8.00</classPercent><typeOfReportingPerson>IA</typeOfReportingPerson></coverPageHeaderReportingPersonDetails></formData></edgarSubmission>" });
       if (kind === "revenue")
         return wrap({ units: { USD: [
           { start: "2024-09-29", end: "2025-09-27", val: 400e9, form: "10-K", filed: "2025-10-31", accn: "b" },
@@ -203,6 +273,37 @@ async function liveFlow(browser, errors) {
   if ((await page.locator("h1").innerText()).includes("Connect")) throw Error("Keys were not remembered");
   await page.click('[data-page="Settings"]');
   if ((await page.locator(".pill.on").count()) < 3) throw Error("Connected sources not shown");
+  if (!(await page.locator("body").innerText()).includes("SEC 13F institutional holdings")) throw Error("Reference data panel missing");
+  // Terminal-style command: holders of any ticker.
+  await page.fill("#search", "AAPL HDS");
+  await page.press("#search", "Enter");
+  await page.waitForSelector("h1:has-text('Holders')");
+  await page.waitForSelector("td.holder:has-text('Fixture Capital')");
+  const hds = await page.locator("body").innerText();
+  for (const t of ["Newcomer Partners", "New", "Added", "+500"]) if (!hds.includes(t)) throw Error("Holders view missing " + t);
+  if (!/% of shares outstanding\s+12\.00%/.test(hds)) throw Error("Institutional % of shares outstanding wrong");
+  await page.click('[data-action="hds-filter"][data-value="exited"]');
+  if ((await page.locator("td.holder").count()) !== 1 || !(await page.locator("td.holder").innerText()).includes("Departed Advisors")) throw Error("Sold-out filter wrong");
+  await page.click('[data-action="hds-filter"][data-value="all"]');
+  await page.click('[data-action="hds-fund"][data-value="1"]');
+  await page.waitForSelector(".fund td:has-text('Microsoft')");
+  if (!(await page.locator(".fund").innerText()).includes("Sold out")) throw Error("Fund exits missing");
+  await page.click('[data-action="hds-tab"][data-value="big"]');
+  await page.waitForSelector("td:has-text('Fixture Index Funds')");
+  await page.click('[data-action="hds-tab"][data-value="insiders"]');
+  await page.waitForSelector("td:has-text('Fixture Insider')");
+  if (!(await page.locator("body").innerText()).includes("Chief Fixture Officer")) throw Error("Insider role missing");
+  await page.click('[data-action="hds-tab"][data-value="history"]');
+  await page.waitForSelector("td:has-text('2026-03-31')");
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Holders");
+  // Every listing: browse, and search suggestions from the whole directory.
+  await page.click('[data-page="Universe"]');
+  await page.waitForSelector("td:has-text('Toyota Motor')");
+  await page.fill("#search", "voda");
+  await page.waitForSelector("#search-results .combo-item:has-text('Vodafone')");
+  await page.click("#search-results .combo-item:has-text('Vodafone')");
+  await page.waitForSelector("h2:has-text('VOD:XLON')");
+  if (!(await page.locator(".head-price").innerText()).includes("GBp")) throw Error("Local currency not shown");
   await context.close();
 }
 const server = spawn(
@@ -224,7 +325,9 @@ const server = spawn(
   await page.goto("http://127.0.0.1:1420");
   await page.waitForSelector("h1");
   for (const name of [
+    "Universe",
     "Research",
+    "Holders",
     "Relationships",
     "Trade",
     "Portfolio",

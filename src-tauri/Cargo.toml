@@ -24,3 +24,4 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tokio-tungstenite = { version = "0.30", optional = true, default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }

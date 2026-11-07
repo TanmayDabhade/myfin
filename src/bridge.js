@@ -41,3 +41,16 @@ export async function nativeTrade(mode, order) {
 export const quotesStart = (symbols) => invoke("quotes_start", { symbols });
 export const quotesStop = () => (native ? invoke("quotes_stop") : Promise.resolve());
 export const quotesSnapshot = () => invoke("quotes_snapshot");
+// Reference data: SEC 13F holdings and the world listing directory.
+const call = (cmd, args) => (native ? invoke(cmd, args) : Promise.reject(Error("Holder and listing data load in the desktop app.")));
+export const holdingsStatus = () => call("holdings_status");
+export const holdingsUpdate = (quarters) => call("holdings_update", { quarters });
+export const holdersFor = (ticker, name, extra = [], only = null, period = null) => call("holders", { ticker, name, extra, only, period });
+export const holderPortfolio = (cik, period = null) => call("holder_portfolio", { cik, period });
+export const holdersFind = (q) => call("holders_find", { q });
+export const universeStatus = () => call("universe_status");
+export const universeRefresh = () => call("universe_refresh");
+export const universeSearch = (q, limit = 10) => call("universe_search", { q, limit });
+export const universeBrowse = (f) => call("universe_browse", f);
+export const universeFacets = () => call("universe_facets");
+export const universeGet = (key) => call("universe_get", { key });

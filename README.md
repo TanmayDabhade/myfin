@@ -69,10 +69,28 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 - **Relationships → Find suppliers & customers** reads the two latest annual reports, resolves company names against SEC's company list and graph aliases (legal suffixes ignored; one-word names need a legal suffix in the sentence), and adds sentences with supplier or customer wording as **unreviewed** candidates dated to the filing. Revenue concentration is stored only when the same sentence discloses it. The panel compares the two reports: counterparties new this year and no longer mentioned.
 - Candidates never become reviewed automatically; use **Mark source reviewed** after reading the filing.
 
+## Holders (HDS)
+
+Type **`AAPL HDS`** (or `HDS AAPL`, or just `HDS` for the current ticker) in the sidebar search box. The Holders page shows everyone who has disclosed a position, from SEC filings:
+
+- **Institutions (Form 13F)**: every manager with $100M+ in US-listed securities, for any US-listed stock, ETF or ADR. Per holder: shares, change vs the prior quarter, value, % of shares outstanding, **% of the manager's portfolio** (conviction), the position's rank in that portfolio, portfolio size and value, quarters held, voting authority and investment discretion, with a link to the filing. Filters for new positions, adds, reductions, sell-outs, prior holders that haven't filed yet, ≥1% of portfolio and top-10 holdings. Click a manager to see its whole portfolio and what it bought and sold.
+- **Summary**: holder count, institutional shares and % of shares outstanding, new/sold-out/added/reduced counts, net shares bought, top-10 concentration, high-conviction holders, median portfolio weight, 13F put/call ratio.
+- **5%+ owners (Schedules 13D/G)**: shares, % of class, voting and dispositive power, change vs the filer's previous schedule, activist (13D) purpose text.
+- **Insiders (Forms 3/4/5)**: each insider's role and direct/indirect holdings, open-market buys and sales, 10b5-1 plan sales, and the full transaction log.
+- **Options** (13F puts and calls) and **History** (holders, shares and % outstanding per stored quarter). Every tab exports to CSV.
+
+13F data comes from SEC's quarterly [Form 13F data sets](https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets): about 100 MB to download and about 200 MB on disk per quarter (choose 2, 4 or 8 quarters; the first download is started by you, later quarters are fetched automatically). It is loaded into `reference.sqlite` in the app-data folder, separate from the workspace. 13F reports identify securities by CUSIP; tickers are mapped with SEC's [fails-to-deliver files](https://www.sec.gov/data-research/sec-markets-data/fails-deliver-data), 13G cover pages and issuer names. Requires the SEC contact email. Limits: 13F data sets appear about a month after each filing deadline (45 days after quarter end); 13F excludes short positions, non-US securities and managers under $100M; Schedule 13D/G parsing covers the structured filings SEC has required since December 2024 (older ones are linked).
+
+## Every listed company (Universe)
+
+The **Universe** page and the sidebar search cover every stock and ETF in Twelve Data's public reference lists (about 267,000 listings on about 90 exchanges in 58 countries; no key needed), merged with SEC's company list (adds CIKs and any US filer missing). The directory downloads by itself on first launch and refreshes weekly. US listings keep their ticker (`AAPL`); others carry their exchange code (`VOD:XLON`, `7203:XJPX`). Prices for non-US listings come from Twelve Data with the exchange code, falling back to Alpha Vantage for the exchanges it documents (London, Toronto, TSX Venture, XETRA, Frankfurt, BSE, Shanghai, Shenzhen). Free plans mostly cover US markets, so some exchanges need a paid plan for prices. Non-USD listings are shown in their own currency and can't be paper-traded in the USD account.
+
 ## Implemented workflows
 
 | Workspace | Features |
 |---|---|
+| Universe | Every listed stock and ETF worldwide: country, exchange and type filters, search, open any listing |
+| Holders | `TICKER HDS`: 13F institutions with changes and conviction, manager portfolios, 13D/G 5%+ owners, Forms 3/4/5 insiders, options, ownership history, CSV export |
 | Overview | Asset lookup, saved watchlist, daily changes, local-universe movers, performance heatmap |
 | Research | Candlestick/line chart, volume, hover inspection, wheel zoom, time ranges, MA20/MA50, normalized comparison overlay, chart SVG export, source/date labels, company profile, ratios, annual/quarterly statements, linked news, earnings calendar, dividend metadata, EDGAR link, saved thesis |
 | Trade | Buy/sell beside chart, fractional shares, fees, manual slippage, rationale, execution markers, chronological ledger, cash/position checks, separate demo/market accounts, CSV journal |
