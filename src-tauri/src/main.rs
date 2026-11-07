@@ -738,7 +738,7 @@ fn quotes_start(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), St
         return Err("Add a Finnhub key in Settings → Data sources for real-time prices.".into());
     }
     let mut rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
-    rt.book.quotes.retain(|s, _| symbols.contains(s));
+    rt.book.retain(&symbols);
     rt.symbols = symbols;
     // A running stream picks up the new list within a second.
     if rt.task.is_some() && rt.status != "error" {
@@ -771,6 +771,13 @@ fn quotes_stop(b: tauri::State<Backend>) -> Result<(), String> {
 fn quotes_snapshot(b: tauri::State<Backend>) -> Result<Value, String> {
     let rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
     Ok(json!({"status":rt.status,"error":rt.error,"lastMessage":rt.last_message,"symbols":rt.symbols,"quotes":rt.book.quotes}))
+}
+/// Time-and-sales prints for one streamed symbol newer than `since` (Unix ms).
+#[tauri::command]
+fn quotes_tape(b: tauri::State<Backend>, symbol: String, since: Option<i64>) -> Result<Value, String> {
+    let rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
+    let symbol = symbol.trim().to_ascii_uppercase();
+    Ok(json!({"symbol":symbol,"streaming":rt.symbols.contains(&symbol),"prints":rt.book.prints(&symbol, since.unwrap_or(0))}))
 }
 async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, key: String) {
     use futures_util::{SinkExt, StreamExt};
@@ -857,5 +864,5 @@ async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, k
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

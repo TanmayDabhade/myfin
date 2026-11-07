@@ -19,9 +19,9 @@ import {
 const fixture = (n) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), "utf8");
 
 test("terminal commands accept either order and ignore filler words", () => {
-  assert.deepEqual(parseCommand("aapl hds"), { command: "HDS", page: "Holders", ticker: "AAPL" });
-  assert.deepEqual(parseCommand("HDS MSFT"), { command: "HDS", page: "Holders", ticker: "MSFT" });
-  assert.deepEqual(parseCommand("AAPL US Equity HDS <GO>"), { command: "HDS", page: "Holders", ticker: "AAPL" });
+  assert.deepEqual(parseCommand("aapl hds"), { command: "HDS", page: "Stock", view: "HDS", ticker: "AAPL" });
+  assert.deepEqual(parseCommand("HDS MSFT"), { command: "HDS", page: "Stock", view: "HDS", ticker: "MSFT" });
+  assert.deepEqual(parseCommand("AAPL US Equity HDS <GO>"), { command: "HDS", page: "Stock", view: "HDS", ticker: "AAPL" });
   assert.equal(parseCommand("HDS").ticker, null);
   assert.equal(parseCommand("AAPL"), null);
   assert.equal(parseCommand("EQS").page, "Universe");

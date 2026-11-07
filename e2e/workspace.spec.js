@@ -7,17 +7,16 @@ test("research, trading, persistence, and workspace separation", async ({
   await page.goto("/");
   await expect(page.locator("h1")).toContainText("Your market");
   for (const name of [
-    "Research",
+    "Stock",
     "Trade",
     "Portfolio",
     "Screener",
-    "Valuation",
     "Economy",
     "Alerts",
     "Settings",
   ]) {
     await page.click(`[data-page="${name}"]`);
-    await expect(page.locator("h1")).toHaveText(name);
+    await expect(page.locator("h1")).toHaveText(name === "Stock" ? "AAPL" : name);
     expect(
       await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth),
     ).toBe(false);
@@ -47,7 +46,8 @@ test("DCF invalid assumptions and overspending are rejected", async ({
   page,
 }) => {
   await page.goto("/");
-  await page.click('[data-page="Valuation"]');
+  await page.click('[data-page="Stock"]');
+  await page.click('.fn-strip [data-value="DCF"]');
   await page.fill("#terminal", "11");
   await page.click('[data-action="dcf"]');
   await expect(page.locator("#dcf-results")).toContainText(

@@ -53,7 +53,7 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 
    One key is enough to start. Choose where prices come from and press **Connect and load data**.
 2. That's it. Your watchlist loads right away and refreshes every 30 minutes while the app is open. Type any ticker in the search box (or the watchlist's **Add** field) and it is pulled from your price source.
-3. **Research** loads the company profile, financial statements and news automatically for the selected ticker. **Economy** loads all six FRED series, and **Commodities** loads FRED commodity prices and, with an AISStream key, a live vessel map.
+3. Click any stock (watchlist, search, Universe) to open its **stock page**: a grid of panels for that one stock, loaded automatically. See [The stock page](#the-stock-page). **Economy** loads all six FRED series, and **Commodities** loads FRED commodity prices and, with an AISStream key, a live vessel map.
 4. Keys are saved once, in `credentials.json` in the app-data folder with owner-only file permissions. Change or remove them in **Settings → Data sources**, where each provider's last error is also shown. `TWELVE_DATA_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `FRED_API_KEY`, `AISSTREAM_API_KEY` and `SEC_CONTACT_EMAIL` environment variables override saved values.
 5. **Demo data** (top-right switch) is a synthetic workspace with its own paper account. Use it to explore without keys.
 6. Use **Trade** to record simulated fills at the last daily close or your own price, including fees.
@@ -63,15 +63,38 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 - **Commodity prices**: WTI and Brent crude, Henry Hub natural gas, US gasoline and copper from FRED (series DCOILWTICO, DCOILBRENTEU, DHHNGSP, GASREGW, PCOPPUSDM), loaded automatically with your FRED key.
 - **Live vessels**: with an AISStream key, the app streams AIS positions within about 1° of the selected port or chokepoint while the Commodities page is open, on a zoomable map (Leaflet, Esri dark gray tiles; no tile key needed). Moving ships point along their course and are coloured by class; click a table row to find the ship, or another location marker to move there. The stream stops when you leave the page. Vessels are classed from their broadcast ship type (70–79 cargo, 80–89 tanker); a tanker class describes the hull, not its cargo or load. At most 2,000 vessels are kept, for 2 hours. The connection reconnects with exponential backoff and jitter, and stops for good if AISStream rejects the key. The key is only sent inside the encrypted subscription message and never reaches the UI.
 
+## The stock page
+
+Load a stock once and every view follows it. Type a ticker in the sidebar search, or click one in the watchlist, heatmap, Universe or a fund's portfolio. The stock page opens with a grid of panels, each a summary of one function:
+
+| Panel | Code | Full view |
+|---|---|---|
+| Description | `DES` | Profile, ratios, risk metrics, research journal, earnings calendar |
+| Chart | `GP` | Candles or line, ranges, MA20/MA50, comparison overlay, SVG export |
+| Financials | `FA` | Annual/quarterly statements (Alpha Vantage) and SEC revenue history |
+| News | `CN` | Company news with summaries |
+| Holders | `HDS` | Everything under [Holders (HDS)](#holders-hds) |
+| Ownership changes | `OWN` | One dated list of disclosed changes: the largest 13F fund moves last quarter, each 5%+ owner's latest 13D/G, insiders' open-market Form 4 buys and sales |
+| Suppliers & customers | `SPLC` (or `RELS`) | The relationship explorer, centred on the stock |
+| Valuation | `DCF` | Five-year DCF pre-filled from the company's SEC filings (cash flow − capital spending, debt − cash, shares outstanding, recent revenue growth), each input labelled with its source; your edits are saved per stock |
+| Time & sales | `TAS` (or `QR`) | Every trade print from the Finnhub stream since the stock was opened (time, price, size, conditions), VWAP, volume, largest print and a buy/sell estimate |
+| Filings | `CF` | Recent 10-K, 10-Q, 8-K and similar filings |
+
+- Click a panel's title, a tab under the stock header, or type `AAPL HDS`, `TSLA DCF`, `HDS` (current stock) and so on. **Esc** returns to the grid.
+- Typing another ticker on the stock page keeps the view you're on. The sidebar lists the loaded stock and the last few you opened.
+- Opening a stock that isn't in the workspace loads its prices without adding it to your watchlist; **Add to watchlist** in the header keeps it there.
+- Time and sales: buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because the free feed has no bid/ask. There is no order book (market depth) on free data. The tape is empty outside US market hours and needs a Finnhub key.
+- Ownership changes are disclosures as of their filing dates: 13F appears up to 45 days after quarter end, Forms 4 within two business days of the trade.
+
 ## SEC filing discovery
 
-- **Research → SEC filings** lists recent 10-K, 10-Q, 8-K and similar filings with links, plus annual revenue and year-over-year growth from XBRL company facts (latest restatement per period). No key needed. The company's CIK comes from Alpha Vantage, the relationship graph or SEC's company list.
-- **Relationships → Find suppliers & customers** reads the two latest annual reports, resolves company names against SEC's company list and graph aliases (legal suffixes ignored; one-word names need a legal suffix in the sentence), and adds sentences with supplier or customer wording as **unreviewed** candidates dated to the filing. Revenue concentration is stored only when the same sentence discloses it. The panel compares the two reports: counterparties new this year and no longer mentioned.
+- **Stock page → Filings (CF)** lists recent 10-K, 10-Q, 8-K and similar filings with links, plus annual revenue and year-over-year growth from XBRL company facts (latest restatement per period). No key needed. The company's CIK comes from Alpha Vantage, the relationship graph or SEC's company list.
+- **Stock page → Suppliers & customers (SPLC)** reads the two latest annual reports, resolves company names against SEC's company list and graph aliases (legal suffixes ignored; one-word names need a legal suffix in the sentence), and adds sentences with supplier or customer wording as **unreviewed** candidates dated to the filing. Revenue concentration is stored only when the same sentence discloses it. The panel compares the two reports: counterparties new this year and no longer mentioned.
 - Candidates never become reviewed automatically; use **Mark source reviewed** after reading the filing.
 
 ## Holders (HDS)
 
-Type **`AAPL HDS`** (or `HDS AAPL`, or just `HDS` for the current ticker) in the sidebar search box. The Holders page shows everyone who has disclosed a position, from SEC filings:
+Type **`AAPL HDS`** (or `HDS AAPL`, or just `HDS` for the current ticker) in the sidebar search box. The stock page's Holders view shows everyone who has disclosed a position, from SEC filings:
 
 - **Institutions (Form 13F)**: every manager with $100M+ in US-listed securities, for any US-listed stock, ETF or ADR. Per holder: shares, change vs the prior quarter, value, % of shares outstanding, **% of the manager's portfolio** (conviction), the position's rank in that portfolio, portfolio size and value, quarters held, voting authority and investment discretion, with a link to the filing. Filters for new positions, adds, reductions, sell-outs, prior holders that haven't filed yet, ≥1% of portfolio and top-10 holdings. Click a manager to see its whole portfolio and what it bought and sold.
 - **Summary**: holder count, institutional shares and % of shares outstanding, new/sold-out/added/reduced counts, net shares bought, top-10 concentration, high-conviction holders, median portfolio weight, 13F put/call ratio.
@@ -90,13 +113,14 @@ The **Universe** page and the sidebar search cover every stock and ETF in Twelve
 | Workspace | Features |
 |---|---|
 | Universe | Every listed stock and ETF worldwide: country, exchange and type filters, search, open any listing |
-| Holders | `TICKER HDS`: 13F institutions with changes and conviction, manager portfolios, 13D/G 5%+ owners, Forms 3/4/5 insiders, options, ownership history, CSV export |
+| Stock page | One loaded stock, a panel grid and ten full views: description, chart, financials, news, holders, ownership changes, suppliers & customers, valuation, time & sales, filings; terminal codes (`AAPL HDS`), recent stocks, Esc back to the grid |
+| Holders (on the stock page) | `TICKER HDS`: 13F institutions with changes and conviction, manager portfolios, 13D/G 5%+ owners, Forms 3/4/5 insiders, options, ownership history, CSV export |
 | Overview | Asset lookup, saved watchlist, daily changes, local-universe movers, performance heatmap |
-| Research | Candlestick/line chart, volume, hover inspection, wheel zoom, time ranges, MA20/MA50, normalized comparison overlay, chart SVG export, source/date labels, company profile, ratios, annual/quarterly statements, linked news, earnings calendar, dividend metadata, EDGAR link, saved thesis |
+| Description, chart, financials, news (on the stock page) | Candlestick/line chart, volume, hover inspection, wheel zoom, time ranges, MA20/MA50, normalized comparison overlay, chart SVG export, source/date labels, company profile, ratios, annual/quarterly statements, linked news, earnings calendar, dividend metadata, EDGAR link, saved thesis |
 | Trade | Buy/sell beside chart, fractional shares, fees, manual slippage, rationale, execution markers, chronological ledger, cash/position checks, separate demo/market accounts, CSV journal |
 | Portfolio | Holdings, average cost, cash, realized/unrealized P&L, allocation, historical paper-equity curve, volatility, drawdown, per-asset Sharpe, correlation matrix, uniform price-shock scenario, benchmark context, position export |
 | Screener | Local-universe P/E, growth and sector filters, saved screens, result export, peer comparison |
-| Valuation | Five-year unlevered DCF, bear/base/bull cases, terminal growth, net debt, diluted shares, discount/growth sensitivity, model export |
+| Valuation (on the stock page) | Inputs pre-filled from SEC XBRL filings with sources, five-year unlevered DCF, bear/base/bull cases, terminal growth, net debt, diluted shares, discount/growth sensitivity, model export |
 | Economy | FRED CPI, unemployment, policy rate, 2Y/10Y Treasury yields and real GDP, loaded automatically, with source links and history charts |
 | Alerts | Persistent above/below price conditions; latching status; reevaluated on workspace load and stored-data changes |
 | Settings | Saved provider keys, price-source choice, sync status and last errors, starting cash, JSON backup (restore under Advanced) |

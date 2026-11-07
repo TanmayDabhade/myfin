@@ -41,6 +41,7 @@ export async function nativeTrade(mode, order) {
 export const quotesStart = (symbols) => invoke("quotes_start", { symbols });
 export const quotesStop = () => (native ? invoke("quotes_stop") : Promise.resolve());
 export const quotesSnapshot = () => invoke("quotes_snapshot");
+export const quotesTape = (symbol, since = 0) => invoke("quotes_tape", { symbol, since });
 // Reference data: SEC 13F holdings and the world listing directory.
 const call = (cmd, args) => (native ? invoke(cmd, args) : Promise.reject(Error("Holder and listing data load in the desktop app.")));
 export const holdingsStatus = () => call("holdings_status");

@@ -58,6 +58,14 @@ function fakeBackend() {
         quotes: Object.fromEntries(symbols.map((s) => [s, { price: 150 + (Math.floor(now / 1000) % 7), time: now }])),
       };
     },
+    // One trade print per second, alternating up and down ticks.
+    quotes_tape: ({ symbol, since }) => {
+      const now = Date.now();
+      const prints = [0, 1, 2]
+        .map((i) => ({ price: 150 + (i % 2), size: 100 * (i + 1), time: Math.floor(now / 1000) * 1000 - (2 - i) * 1000, conditions: ["1"] }))
+        .filter((p) => p.time > (since || 0));
+      return { symbol, streaming: (window.__quoteSymbols || []).includes(symbol), prints };
+    },
     ais_stop: () => {
       window.__aisArea = null;
     },
@@ -137,7 +145,7 @@ function fakeBackend() {
     universe_facets: () => ({ countries: [["Japan", "", "", 1], ["United Kingdom", "", "", 1]], exchanges: [["XJPX", "JPX", "Japan", 1], ["XLON", "LSE", "United Kingdom", 1]], kinds: [["Common Stock", "", "", 2]] }),
     universe_get: ({ key }) => (key === "VOD:XLON" ? { key, symbol: "VOD", name: "Vodafone Group Plc", exchange: "LSE", mic: "XLON", country: "United Kingdom", currency: "GBp", kind: "Common Stock" } : null),
     fetch_sec: ({ kind, accession, doc }) => {
-      if (kind !== "submissions" && kind !== "revenue" && !(store("native-keys") || {}).sec)
+      if (!["submissions", "revenue", "concept", "shares"].includes(kind) && !(store("native-keys") || {}).sec)
         throw "SEC contact email required";
       const wrap = (data) => ({ data, fetchedAt: Date.now() / 1000, provider: "sec" });
       if (kind === "tickers")
@@ -172,6 +180,14 @@ function fakeBackend() {
         return wrap({ xml: "<ownershipDocument><documentType>4</documentType><issuer><issuerCik>0000320193</issuerCik><issuerName>Apple Inc.</issuerName><issuerTradingSymbol>AAPL</issuerTradingSymbol></issuer><reportingOwner><reportingOwnerId><rptOwnerCik>1</rptOwnerCik><rptOwnerName>Fixture Insider</rptOwnerName></reportingOwnerId><reportingOwnerRelationship><isOfficer>true</isOfficer><officerTitle>Chief Fixture Officer</officerTitle></reportingOwnerRelationship></reportingOwner><aff10b5One>true</aff10b5One><nonDerivativeTable><nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle><transactionDate><value>2026-11-03</value></transactionDate><transactionCoding><transactionCode>S</transactionCode></transactionCoding><transactionAmounts><transactionShares><value>2399</value></transactionShares><transactionPricePerShare><value>325.75</value></transactionPricePerShare><transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode></transactionAmounts><postTransactionAmounts><sharesOwnedFollowingTransaction><value>29997</value></sharesOwnedFollowingTransaction></postTransactionAmounts><ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction></nonDerivativeTable></ownershipDocument>" });
       if (kind === "xml")
         return wrap({ xml: "<edgarSubmission><headerData><submissionType>SCHEDULE 13G</submissionType><filerInfo><filer><filerCredentials><cik>0002100119</cik></filerCredentials></filer></filerInfo></headerData><formData><coverPageHeader><eventDateRequiresFilingThisStatement>03/31/2026</eventDateRequiresFilingThisStatement><issuerInfo><issuerCik>0000320193</issuerCik><issuerName>Apple Inc</issuerName><issuerCusips><issuerCusipNumber>037833100</issuerCusipNumber></issuerCusips></issuerInfo></coverPageHeader><coverPageHeaderReportingPersonDetails><reportingPersonName>Fixture Index Funds</reportingPersonName><reportingPersonBeneficiallyOwnedNumberOfShares><soleVotingPower>100</soleVotingPower><sharedVotingPower>0</sharedVotingPower><soleDispositivePower>1200</soleDispositivePower><sharedDispositivePower>0</sharedDispositivePower></reportingPersonBeneficiallyOwnedNumberOfShares><reportingPersonBeneficiallyOwnedAggregateNumberOfShares>1200</reportingPersonBeneficiallyOwnedAggregateNumberOfShares><classPercent>8.00</classPercent><typeOfReportingPerson>IA</typeOfReportingPerson></coverPageHeaderReportingPersonDetails></formData></edgarSubmission>" });
+      // Valuation inputs: cash flow, capital spending, debt and cash.
+      if (kind === "concept") {
+        const flow = { NetCashProvidedByUsedInOperatingActivities: 120e9, PaymentsToAcquirePropertyPlantAndEquipment: 12e9 }[doc];
+        const stock = { LongTermDebt: 100e9, CashAndCashEquivalentsAtCarryingValue: 30e9 }[doc];
+        if (flow) return wrap({ units: { USD: [{ start: "2025-09-28", end: "2026-09-26", val: flow, form: "10-K", filed: "2026-11-03", accn: "c" }] } });
+        if (stock) return wrap({ units: { USD: [{ end: "2026-09-26", val: stock, form: "10-K", filed: "2026-11-03", accn: "c" }] } });
+        throw "SEC has no data for this company or concept.";
+      }
       if (kind === "revenue")
         return wrap({ units: { USD: [
           { start: "2024-09-29", end: "2025-09-27", val: 400e9, form: "10-K", filed: "2025-10-31", accn: "b" },
@@ -225,13 +241,26 @@ async function liveFlow(browser, errors) {
     { timeout: 5000 },
   );
   if (!(await firstRow.evaluate((el) => el.isConnected))) throw Error("Live tick re-rendered the page");
-  await page.click('[data-page="Research"]');
-  await page.waitForSelector("text=Fixture company profile");
-  await page.waitForSelector("text=Fixture headline");
+  // A watchlist row opens the stock page: one grid of panels on that stock.
+  await page.locator(".watch-row .ticker", { hasText: "AAPL" }).click();
+  await page.waitForSelector(".stock-head h1:has-text('AAPL')");
+  await page.waitForSelector(".stock-grid [data-tile='DES'] >> text=Fixture company profile");
+  await page.waitForSelector(".stock-grid [data-tile='CN'] >> text=Fixture headline");
+  // The trade tape fills from the stream with tick-rule sides.
+  await page.waitForSelector("[data-tile='TAS'] table.tape td:has-text('Buy')", { timeout: 10000 });
+  // Valuation inputs come from the company's filings.
+  await page.waitForSelector("[data-tile='DCF'] >> text=Inputs from the company's SEC filings", { timeout: 10000 });
+  await page.click('.fn-strip [data-value="DCF"]');
+  if ((await page.inputValue("#fcf")) !== "108000" || (await page.inputValue("#netDebt")) !== "70000") throw Error("DCF inputs not taken from filings");
+  if (!(await page.locator("#dcf-results").innerText()).includes("vs ")) throw Error("DCF not compared to the price");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".stock-grid");
+  await page.click('.fn-strip [data-value="FA"]');
   await page.waitForSelector("td:has-text('totalRevenue')");
-  await page.waitForSelector("h2:has-text('CIK 0000320193')");
   if (!(await page.locator("body").innerText()).includes("10.00%")) throw Error("SEC revenue growth missing");
-  await page.click('[data-action="graph-open"]');
+  await page.click('.fn-strip [data-value="CF"]');
+  await page.waitForSelector("h2:has-text('CIK 0000320193')");
+  await page.click('.fn-strip [data-value="SPLC"]');
   // Opening a company scans its filings, and other companies' reports that
   // name it, without a click.
   await page.waitForSelector("text=New since prior report");
@@ -267,7 +296,9 @@ async function liveFlow(browser, errors) {
   if ((await page.locator("#vessel-panel .leaflet-container").count()) !== 1) throw Error("Map lost after location change");
   await page.fill("#search", "TSLA");
   await page.press("#search", "Enter");
-  await page.waitForSelector("h2:has-text('TSLA')");
+  await page.waitForSelector(".stock-head h1:has-text('TSLA')");
+  // From another page a ticker opens its panel grid.
+  await page.waitForSelector(".stock-grid");
   await page.reload();
   await page.waitForSelector("h1");
   if ((await page.locator("h1").innerText()).includes("Connect")) throw Error("Keys were not remembered");
@@ -277,7 +308,8 @@ async function liveFlow(browser, errors) {
   // Terminal-style command: holders of any ticker.
   await page.fill("#search", "AAPL HDS");
   await page.press("#search", "Enter");
-  await page.waitForSelector("h1:has-text('Holders')");
+  await page.waitForSelector(".stock-head h1:has-text('AAPL')");
+  await page.waitForSelector(".fn-strip .active:has-text('Holders')");
   await page.waitForSelector("td.holder:has-text('Fixture Capital')");
   const hds = await page.locator("body").innerText();
   for (const t of ["Newcomer Partners", "New", "Added", "+500"]) if (!hds.includes(t)) throw Error("Holders view missing " + t);
@@ -296,13 +328,27 @@ async function liveFlow(browser, errors) {
   await page.click('[data-action="hds-tab"][data-value="history"]');
   await page.waitForSelector("td:has-text('2026-03-31')");
   if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Holders");
+  // Ownership changes: 13F moves, 13D/G owners and insider trades in one list.
+  await page.click('.fn-strip [data-value="OWN"]');
+  await page.waitForSelector("td.holder:has-text('Fixture Insider')");
+  const ownText = await page.locator("body").innerText();
+  for (const t of ["Fixture Index Funds", "Fixture Capital", "Sold (10b5-1 plan)", "Added"]) if (!ownText.includes(t)) throw Error("Ownership changes missing " + t);
+  await page.click('[data-action="own-filter"][data-value="insider"]');
+  if ((await page.locator("td.holder").count()) !== 1) throw Error("Ownership filter wrong");
+  // Another ticker typed on the stock page keeps the view; the last one stays in the sidebar.
+  await page.fill("#search", "TSLA");
+  await page.press("#search", "Enter");
+  await page.waitForSelector(".stock-head h1:has-text('TSLA')");
+  if (!(await page.locator(".fn-strip .active").innerText()).includes("Ownership changes")) throw Error("View not kept for the new ticker");
+  await page.click('[data-recent="AAPL"]');
+  await page.waitForSelector(".stock-head h1:has-text('AAPL')");
   // Every listing: browse, and search suggestions from the whole directory.
   await page.click('[data-page="Universe"]');
   await page.waitForSelector("td:has-text('Toyota Motor')");
   await page.fill("#search", "voda");
   await page.waitForSelector("#search-results .combo-item:has-text('Vodafone')");
   await page.click("#search-results .combo-item:has-text('Vodafone')");
-  await page.waitForSelector("h2:has-text('VOD:XLON')");
+  await page.waitForSelector(".stock-head h1:has-text('VOD:XLON')");
   if (!(await page.locator(".head-price").innerText()).includes("GBp")) throw Error("Local currency not shown");
   await context.close();
 }
@@ -326,13 +372,10 @@ const server = spawn(
   await page.waitForSelector("h1");
   for (const name of [
     "Universe",
-    "Research",
-    "Holders",
-    "Relationships",
+    "Stock",
     "Trade",
     "Portfolio",
     "Screener",
-    "Valuation",
     "Economy",
     "Alerts",
     "Settings",
@@ -345,8 +388,8 @@ const server = spawn(
     )
       throw Error("Overflow on " + name);
   }
-  await page.click('[data-page="Research"]');
-  await page.click('[data-action="graph-open"]');
+  await page.click('[data-page="Stock"]');
+  await page.click('.fn-strip [data-value="SPLC"]');
   if ((await page.locator(".evidence-card").count()) !== 3)
     throw Error("Apple neighborhood absent");
   await page.click('g[data-entity="td-synnex"]');
@@ -398,7 +441,8 @@ const server = spawn(
       .then((t) => t.includes("Triggered")))
   )
     throw Error("Alert not triggered");
-  await page.click('[data-page="Valuation"]');
+  await page.click('[data-page="Stock"]');
+  await page.click('.fn-strip [data-value="DCF"]');
   await page.fill("#terminal", "11");
   await page.click('[data-action="dcf"]');
   if (!(await page.locator("#dcf-results").innerText()).includes("discount rate above"))
@@ -408,7 +452,7 @@ const server = spawn(
   if (!(await page.locator("#order-total").innerText()).includes("$"))
     throw Error("Order total did not compute");
   // No upload controls anywhere outside the collapsed Advanced section.
-  for (const name of ["Overview", "Research", "Relationships", "Economy", "Commodities", "Settings"]) {
+  for (const name of ["Overview", "Stock", "Economy", "Commodities", "Settings"]) {
     await page.click(`[data-page="${name}"]`);
     if ((await page.locator('input[type="file"]:visible').count()) !== 0)
       throw Error("Visible upload control on " + name);

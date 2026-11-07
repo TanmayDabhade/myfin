@@ -5,3 +5,14 @@ export const REVENUE_TAGS = [
   "Revenues",
   "SalesRevenueNet",
 ];
+// XBRL concepts for valuation inputs. Must match VALUE_TAGS in sec.rs.
+export const VALUE_TAGS = [
+  "NetCashProvidedByUsedInOperatingActivities",
+  "PaymentsToAcquirePropertyPlantAndEquipment",
+  "CashAndCashEquivalentsAtCarryingValue",
+  "LongTermDebt",
+  "LongTermDebtNoncurrent",
+  "LongTermDebtCurrent",
+  "ShortTermBorrowings",
+  "WeightedAverageNumberOfDilutedSharesOutstanding",
+];
