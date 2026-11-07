@@ -1,10 +1,19 @@
 # Market Lens Desktop
 
-A local-first financial research and paper-trading application built with **Tauri 2, Rust, SQLite, and a lightweight Vite/JavaScript interface**. There is no Electron runtime or hosted backend. All trades are simulations.
+A free, open-source, local-first financial research and paper-trading application built with **Tauri 2, Rust, SQLite, and a lightweight Vite/JavaScript interface**. There is no Electron runtime or hosted backend. All trades are simulations.
+
+## Download
+
+Get the latest installer from [Releases](https://github.com/TanmayDabhade/myfin/releases/latest): a universal `.dmg` for macOS (Intel and Apple Silicon), an `.exe` installer for Windows, and `.deb` / `.AppImage` for Linux.
+
+- **macOS:** the app isn't signed by Apple yet, so the first launch is blocked. Right-click **Market Lens** in Applications → **Open**, or go to **System Settings → Privacy & Security → Open Anyway**.
+- **Windows:** SmartScreen may ask you to confirm (**More info → Run anyway**).
+
+Releases are built by `.github/workflows/release.yml` when a version tag (`v0.3.0`) is pushed; the tag must match the app version.
 
 ## Install and update with Homebrew (preview channel)
 
-Available after the release workflow is merged and the first eligible PR build publishes:
+Tracks the newest PR build, ahead of releases:
 
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git

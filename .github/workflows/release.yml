@@ -1,0 +1,117 @@
+name: Release
+# Pushing a version tag (v0.3.0) builds the installers for that exact commit
+# and publishes a GitHub release with them. The tag must match the version
+# in package.json, tauri.conf.json and Cargo.toml.
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            timeout: 30
+            os: ubuntu-24.04
+            args: --bundles deb,appimage
+          - platform: windows-x64
+            timeout: 45
+            os: windows-2022
+            args: --bundles nsis
+          - platform: macos-universal
+            timeout: 60
+            os: macos-latest
+            args: --target universal-apple-darwin --bundles dmg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Tag matches the app version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v="${TAG#v}"
+          node -e 'const v=process.argv[1];const p=require("./package.json").version;const t=require("./src-tauri/tauri.conf.json").version;const c=require("fs").readFileSync("src-tauri/Cargo.toml","utf8").match(/^version = "([^"]+)"/m)[1];if([p,t,c].some(x=>x!==v)){console.error(`Tag ${v} does not match package.json ${p}, tauri.conf.json ${t}, Cargo.toml ${c}`);process.exit(1)}' "$v"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install both Mac targets
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npm test
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+      - run: npm run tauri build -- ${{ matrix.args }}
+      - name: Collect installers
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os, shutil
+          platform, tag = os.environ['PLATFORM'], os.environ['TAG']
+          out = Path('installers')
+          out.mkdir()
+          extensions = {'linux-x64': ['.deb', '.AppImage'], 'windows-x64': ['.exe'], 'macos-universal': ['.dmg']}[platform]
+          for ext in extensions:
+              files = list(Path('src-tauri/target').glob('**/release/bundle/**/*' + ext))
+              if len(files) != 1:
+                  raise SystemExit(f'Expected one {ext} installer, got {len(files)}')
+              shutil.copy2(files[0], out / f'Market-Lens-{tag}-{platform}{ext}')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.platform }}
+          path: installers/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cd ..
+          notes="docs/releases/${TAG}.md"
+          {
+            if [ -f "$notes" ]; then cat "$notes"; else echo "Market Lens ${TAG}"; fi
+            echo
+            echo "## Checksums (SHA-256)"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } > release-notes.md
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "Market Lens ${TAG}" --notes-file release-notes.md --verify-tag

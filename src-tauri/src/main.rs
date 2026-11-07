@@ -551,7 +551,7 @@ fn universe_refresh(b: tauri::State<Backend>) -> Result<(), String> {
     let (jobs, client, path) = (b.jobs.clone(), b.bulk.clone(), b.ref_path.clone());
     tauri::async_runtime::spawn(async move {
         let result: Result<String, String> = async {
-            let ua = "MarketLens/0.2 (desktop research app)";
+            let ua = "MarketLens/0.3 (desktop research app)";
             let stocks = fetch_bytes(&client, universe::STOCKS_URL, ua, &jobs, "universe").await?;
             set_job(&jobs, "universe", |j| j.stage = "Downloading the world ETF list…".into());
             let etfs = fetch_bytes(&client, universe::ETFS_URL, ua, &jobs, "universe").await?;
