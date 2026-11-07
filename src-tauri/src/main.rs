@@ -350,12 +350,9 @@ async fn fetch_bytes(client: &reqwest::Client, url: &str, ua: &str, jobs: &JobsR
     Ok(out)
 }
 fn first_zip_entry(bytes: Vec<u8>) -> Result<String, String> {
-    use std::io::Read;
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| "Not a zip file".to_string())?;
-    let mut f = z.by_index(0).map_err(|_| "Empty zip file".to_string())?;
-    let mut b = Vec::new();
-    f.read_to_end(&mut b).map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&b).into_owned())
+    let f = z.by_index(0).map_err(|_| "Empty zip file".to_string())?;
+    Ok(String::from_utf8_lossy(&f13::read_capped(f, f13::MAX_FTD)?).into_owned())
 }
 #[tauri::command]
 fn holdings_status(b: tauri::State<Backend>) -> Result<Value, String> {

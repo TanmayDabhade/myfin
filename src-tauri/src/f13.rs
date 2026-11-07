@@ -19,6 +19,25 @@ pub const FTD_URL: &str = "https://www.sec.gov/data-research/sec-markets-data/fa
 pub const COMPLETE: i64 = if cfg!(test) { 1 } else { 1000 };
 /// Fails-to-deliver files kept for the CUSIP map (two per month).
 pub const FTD_FILES: usize = 12;
+/// Largest uncompressed sizes accepted from SEC zips. Real files are about
+/// 400 MB (INFOTABLE), a few MB (other tables) and 5 MB (fails-to-deliver).
+pub const MAX_INFOTABLE: u64 = 2_000_000_000;
+pub const MAX_TABLE: u64 = 100_000_000;
+pub const MAX_FTD: u64 = 50_000_000;
+const MAX_LINE: u64 = 64 * 1024;
+
+/// Reads a whole zip entry, refusing anything over `max` bytes (declared or actual).
+pub fn read_capped<R: Read>(entry: zip::read::ZipFile<'_, R>, max: u64) -> Result<Vec<u8>, String> {
+    if entry.size() > max {
+        return Err("A file in the SEC download is larger than expected; stopped.".into());
+    }
+    let mut b = Vec::new();
+    entry.take(max + 1).read_to_end(&mut b).map_err(|e| e.to_string())?;
+    if b.len() as u64 > max {
+        return Err("A file in the SEC download is larger than expected; stopped.".into());
+    }
+    Ok(b)
+}
 
 pub fn init(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
@@ -277,10 +296,8 @@ fn merge(into: &mut HashMap<Key, Pos>, from: HashMap<Key, Pos>) {
 }
 
 fn entry_text<R: Read + Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Result<String, String> {
-    let mut f = zip.by_name(name).map_err(|_| format!("13F data set has no {name}"))?;
-    let mut b = Vec::new();
-    f.read_to_end(&mut b).map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&b).into_owned())
+    let f = zip.by_name(name).map_err(|_| format!("13F data set has no {name}"))?;
+    Ok(String::from_utf8_lossy(&read_capped(f, MAX_TABLE)?).into_owned())
 }
 
 /// Streams INFOTABLE.tsv, calling `run` once per filing with its rows.
@@ -293,16 +310,29 @@ fn each_filing<R: Read + Seek>(
     run: &mut dyn FnMut(&str, HashMap<Key, Pos>) -> Result<(), String>,
 ) -> Result<u64, String> {
     let entry = zip.by_name("INFOTABLE.tsv").map_err(|_| "13F data set has no INFOTABLE.tsv".to_string())?;
+    if entry.size() > MAX_INFOTABLE {
+        return Err("The 13F holdings table is larger than expected; stopped.".into());
+    }
     let total = entry.size().max(1);
-    let mut r = BufReader::with_capacity(1 << 20, entry);
+    let mut r = BufReader::with_capacity(1 << 20, entry.take(MAX_INFOTABLE + 1));
     let mut line = Vec::new();
-    r.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+    let next_line = |r: &mut BufReader<_>, line: &mut Vec<u8>| -> Result<usize, String> {
+        line.clear();
+        let n = r.by_ref().take(MAX_LINE).read_until(b'\n', line).map_err(|e| e.to_string())?;
+        if n as u64 == MAX_LINE && line.last() != Some(&b'\n') {
+            return Err("The 13F holdings table has an unexpectedly long line; stopped.".into());
+        }
+        Ok(n)
+    };
+    next_line(&mut r, &mut line)?;
     let idx = columns(&String::from_utf8_lossy(&line), &INFO_COLUMNS)?;
     let (mut read, mut lines, mut current, mut rows) = (line.len() as u64, 0u64, String::new(), HashMap::new());
     loop {
-        line.clear();
-        let n = r.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+        let n = next_line(&mut r, &mut line)?;
         read += n as u64;
+        if read > MAX_INFOTABLE {
+            return Err("The 13F holdings table is larger than expected; stopped.".into());
+        }
         let text = String::from_utf8_lossy(&line);
         let f: Vec<&str> = text.trim_end_matches(['\r', '\n']).split('\t').collect();
         let acc = if n == 0 { "" } else { f.get(idx[0]).copied().unwrap_or("") };
