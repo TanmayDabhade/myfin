@@ -45,11 +45,13 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 
 1. Launch the app. The first screen asks for your free API keys:
    - **Twelve Data**: daily prices with about 5 years of history (800 requests/day). [Get a key](https://twelvedata.com/register)
-   - **Alpha Vantage**: company profile, statements, news, earnings calendar (25 requests/day). [Get a key](https://www.alphavantage.co/support/#api-key)
+   - **Finnhub**: real-time US trades, company news, key metrics, company profile and the earnings calendar (60 requests/minute). [Get a key](https://finnhub.io/register)
+   - **Alpha Vantage**: financial statements and the company description (25 requests/day; its news endpoint is premium, so news comes from Finnhub). [Get a key](https://www.alphavantage.co/support/#api-key)
+   - **Alpaca** (optional, key ID and secret): the last session's trade prints for time and sales when the market is closed. [Sign up](https://app.alpaca.markets/signup)
    - **FRED**: US economic series. [Get a key](https://fredaccount.stlouisfed.org/apikeys)
 
    - **AISStream** (optional): live vessel positions on the Commodities page. [Get a key](https://aisstream.io/authenticate)
-   - **SEC EDGAR** (optional contact email): filing lists and revenue history load with no key; adding your email also lets the app read 10-K text to find suppliers and customers. SEC asks automated tools to declare a contact; it is sent only to sec.gov.
+   - **SEC EDGAR** (optional contact email): filing lists and revenue history load with no key; adding your email also starts the 13F holders download and lets the app read 10-K text, 13D/G and Form 4 filings. SEC asks automated tools to declare a contact; it is sent only to sec.gov.
 
    One key is enough to start. Choose where prices come from and press **Connect and load data**.
 2. That's it. Your watchlist loads right away and refreshes every 30 minutes while the app is open. Type any ticker in the search box (or the watchlist's **Add** field) and it is pulled from your price source.
@@ -69,21 +71,22 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 
 | Panel | Code | Full view |
 |---|---|---|
-| Description | `DES` | Profile, ratios, risk metrics, research journal, earnings calendar |
+| Description | `DES` | Profile, key statistics, risk metrics, research journal, earnings (reported and upcoming, EPS and revenue vs estimates) |
 | Chart | `GP` | Candles or line, ranges, MA20/MA50, comparison overlay, SVG export |
 | Financials | `FA` | Annual/quarterly statements (Alpha Vantage) and SEC revenue history |
-| News | `CN` | Company news with summaries |
+| News | `CN` | Company news from the last 7 days with summaries (Finnhub) |
 | Holders | `HDS` | Everything under [Holders (HDS)](#holders-hds) |
 | Ownership changes | `OWN` | One dated list of disclosed changes: the largest 13F fund moves last quarter, each 5%+ owner's latest 13D/G, insiders' open-market Form 4 buys and sales |
 | Suppliers & customers | `SPLC` (or `RELS`) | The relationship explorer, centred on the stock |
 | Valuation | `DCF` | Five-year DCF pre-filled from the company's SEC filings (cash flow − capital spending, debt − cash, shares outstanding, recent revenue growth), each input labelled with its source; your edits are saved per stock |
-| Time & sales | `TAS` (or `QR`) | Every trade print from the Finnhub stream since the stock was opened (time, price, size, conditions), VWAP, volume, largest print and a buy/sell estimate |
+| Time & sales | `TAS` (or `QR`) | Trade prints (time, price, size, conditions) with VWAP, volume, largest print and a buy/sell estimate: live from the Finnhub stream, or the last session's when the market is closed |
 | Filings | `CF` | Recent 10-K, 10-Q, 8-K and similar filings |
 
 - Click a panel's title, a tab under the stock header, or type `AAPL HDS`, `TSLA DCF`, `HDS` (current stock) and so on. **Esc** returns to the grid.
 - Typing another ticker on the stock page keeps the view you're on. The sidebar lists the loaded stock and the last few you opened.
 - Opening a stock that isn't in the workspace loads its prices without adding it to your watchlist; **Add to watchlist** in the header keeps it there.
-- Time and sales: buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because the free feed has no bid/ask. There is no order book (market depth) on free data. The tape is empty outside US market hours and needs a Finnhub key.
+- Key statistics (P/E, profit margin, revenue growth, market cap, 52-week range) are calculated from the live price, the latest statements (trailing four quarters when available) and SEC shares outstanding, then fall back to Finnhub's and Alpha Vantage's figures. Each figure names its source; a loss-making company's P/E shows NM.
+- Time and sales: live prints come from the Finnhub stream. When the market is closed, or before live prints arrive, the most recent session shows instead: the newest 10,000 trades on the IEX exchange from Alpaca's free plan (IEX is a small share of all volume, and the latest 15 minutes aren't available), or, without an Alpaca key, that session's 1-minute bars from Twelve Data. Buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because free feeds have no bid/ask. There is no order book (market depth) on free data.
 - Ownership changes are disclosures as of their filing dates: 13F appears up to 45 days after quarter end, Forms 4 within two business days of the trade.
 
 ## SEC filing discovery
@@ -102,7 +105,7 @@ Type **`AAPL HDS`** (or `HDS AAPL`, or just `HDS` for the current ticker) in the
 - **Insiders (Forms 3/4/5)**: each insider's role and direct/indirect holdings, open-market buys and sales, 10b5-1 plan sales, and the full transaction log.
 - **Options** (13F puts and calls) and **History** (holders, shares and % outstanding per stored quarter). Every tab exports to CSV.
 
-13F data comes from SEC's quarterly [Form 13F data sets](https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets): about 100 MB to download and about 200 MB on disk per quarter (choose 2, 4 or 8 quarters; the first download is started by you, later quarters are fetched automatically). It is loaded into `reference.sqlite` in the app-data folder, separate from the workspace. 13F reports identify securities by CUSIP; tickers are mapped with SEC's [fails-to-deliver files](https://www.sec.gov/data-research/sec-markets-data/fails-deliver-data), 13G cover pages and issuer names. Requires the SEC contact email. Limits: 13F data sets appear about a month after each filing deadline (45 days after quarter end); 13F excludes short positions, non-US securities and managers under $100M; Schedule 13D/G parsing covers the structured filings SEC has required since December 2024 (older ones are linked).
+13F data comes from SEC's quarterly [Form 13F data sets](https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets): about 100 MB to download and about 200 MB on disk per quarter (2 quarters by default, 4 or 8 in Settings → Reference data; the download starts by itself once the SEC contact email is saved, and new quarters are fetched automatically). It is loaded into `reference.sqlite` in the app-data folder, separate from the workspace. 13F reports identify securities by CUSIP; tickers are mapped with SEC's [fails-to-deliver files](https://www.sec.gov/data-research/sec-markets-data/fails-deliver-data), 13G cover pages and issuer names. Requires the SEC contact email. Limits: 13F data sets appear about a month after each filing deadline (45 days after quarter end); 13F excludes short positions, non-US securities and managers under $100M; Schedule 13D/G parsing covers the structured filings SEC has required since December 2024 (older ones are linked).
 
 ## Every listed company (Universe)
 
@@ -132,7 +135,7 @@ The **Universe** page and the sidebar search cover every stock and ETF in Twelve
 - Analytics/chart rendering use small pure JavaScript functions. Rust is used for native operations and the trade execution boundary; this is not a claim that every calculation runs in Rust.
 - SQLite uses WAL mode. Tables contain the versioned workspace, raw response cache, and request timestamps. The database is in the OS application-data directory for `com.marketlens.desktop`.
 - API keys are stored only in `credentials.json` (owner-only permissions) in the app-data folder, never in localStorage, SQLite, JSON backups or log messages. Provider error messages are shown with any key text masked. Keys are sent only to fixed HTTPS provider endpoints. Requests have a 20-second timeout and do not follow redirects.
-- Free-plan limits are enforced locally and requests are queued rather than rejected: Alpha Vantage 25/day, 13 s apart, reused for 6 h; Twelve Data 800/day, 8 s apart, reused for 1 h; FRED reused for 12 h. Failed calls count toward the budget. When a provider fails or the daily budget is spent, saved data is shown and marked stale.
+- Free-plan limits are enforced locally and requests are queued rather than rejected: Alpha Vantage 25/day, 13 s apart, reused for 6 h; Twelve Data 800/day, 8 s apart, reused for 1 h; Finnhub 1 s apart, reused for 30 min; Alpaca reused for 5 min; FRED reused for 12 h. Finnhub and Alpaca queue separately so they never wait behind Alpha Vantage. Failed calls count toward the budget. When a provider fails or the daily budget is spent, saved data is shown and marked stale.
 - Data loads automatically only from your own provider accounts and public APIs, within their free limits. No scraping, proxy rotation, key sharing, paywall bypass or quota evasion.
 - Source provenance and dates are visible. Missing ratios display “—”; absence is not zero. Every price series is labeled with its provider.
 
@@ -180,7 +183,7 @@ This is a substantial first implementation of the requested release and analysis
 - No live quotes, live orders, options chains, futures, multi-currency accounting, automatic dividends/splits, tax reports, or automatic brokerage import.
 - No whole-market fundamentals database: the screener covers downloaded companies only. Free daily history depth is determined by your provider plan.
 - Price alerts run when the app reads/updates stored data; no daemon, email, push notifications or monitoring while closed.
-- News and earnings calendars need provider entitlement. Economic-release calendars, earnings-call transcript search, comprehensive dividend calendars, full-text filings, drawing tools, automated adjusted total returns, and native multi-workspace layouts are not implemented.
+- News and earnings calendars cover US-listed stocks (Finnhub free plan). Economic-release calendars, earnings-call transcript search, comprehensive dividend calendars, full-text filings, drawing tools, automated adjusted total returns, and native multi-workspace layouts are not implemented.
 - No file uploads apart from restoring a full JSON backup (Settings → Advanced); broker-specific transaction import is not included.
 - No paid-feed workaround is represented as legally safe. An API denial is displayed, not bypassed.
 - Saved keys, database and backups are local plaintext protected by your OS account; no encryption-at-rest claim is made.

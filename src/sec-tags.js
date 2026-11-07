@@ -15,4 +15,5 @@ export const VALUE_TAGS = [
   "LongTermDebtCurrent",
   "ShortTermBorrowings",
   "WeightedAverageNumberOfDilutedSharesOutstanding",
+  "NetIncomeLoss",
 ];

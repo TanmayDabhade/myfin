@@ -16,7 +16,7 @@ function fakeBackend() {
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
       const k = store("native-keys") || {};
-      return Object.fromEntries(["alpha", "twelve", "fred", "sec", "ais", "finnhub"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
+      return Object.fromEntries(["alpha", "twelve", "fred", "sec", "ais", "finnhub", "alpaca", "alpacasecret"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
     },
     set_keys: ({ keys }) => {
       const k = store("native-keys") || {};
@@ -26,7 +26,17 @@ function fakeBackend() {
     },
     fetch_data: ({ provider, kind, symbol }) => {
       const wrap = (data) => ({ data, fetchedAt: Date.now() / 1000, cached: false, provider });
+      if (provider === "twelve" && kind === "TIME_SERIES_1MIN")
+        return wrap({ status: "ok", values: [{ datetime: "2026-11-06 15:59:00", open: "150", high: "151", low: "149", close: "150.5", volume: "1000" }] });
       if (provider === "twelve") return wrap({ status: "ok", values: bars(80) });
+      if (provider === "finnhub") {
+        if (kind === "company-news") return wrap([{ headline: "Fixture headline", url: "https://example.com/n", source: "Fixture", datetime: 1794070000, summary: "Test" }]);
+        if (kind === "metric") return wrap({ metric: { peTTM: 30, dividendYieldIndicatedAnnual: 0.5, netProfitMarginTTM: 25 } });
+        if (kind === "profile2") return wrap({ name: symbol + " Fixture Inc", finnhubIndustry: "Technology", weburl: "https://example.com", ipo: "1980-12-12" });
+        return wrap({ earningsCalendar: [{ date: "2026-10-30", quarter: 4, year: 2026, epsEstimate: 2, epsActual: 2.2, revenueEstimate: 1e11, revenueActual: 1.02e11, hour: "amc", symbol }] });
+      }
+      if (provider === "alpaca")
+        return wrap({ symbol, trades: [{ t: "2026-11-06T20:59:59Z", p: 150.2, s: 300, c: ["@"] }, { t: "2026-11-06T20:59:58Z", p: 150.1, s: 100, c: ["@"] }] });
       if (provider === "fred")
         return wrap({ observations: [{ date: "2026-10-01", value: "4.1" }, { date: "2026-09-01", value: "4.3" }] });
       if (kind === "OVERVIEW")
@@ -63,7 +73,7 @@ function fakeBackend() {
       const now = Date.now();
       const prints = [0, 1, 2]
         .map((i) => ({ price: 150 + (i % 2), size: 100 * (i + 1), time: Math.floor(now / 1000) * 1000 - (2 - i) * 1000, conditions: ["1"] }))
-        .filter((p) => p.time > (since || 0));
+        .filter((p) => p.time > (since || 0) && !window.__noLivePrints);
       return { symbol, streaming: (window.__quoteSymbols || []).includes(symbol), prints };
     },
     ais_stop: () => {
@@ -182,7 +192,7 @@ function fakeBackend() {
         return wrap({ xml: "<edgarSubmission><headerData><submissionType>SCHEDULE 13G</submissionType><filerInfo><filer><filerCredentials><cik>0002100119</cik></filerCredentials></filer></filerInfo></headerData><formData><coverPageHeader><eventDateRequiresFilingThisStatement>03/31/2026</eventDateRequiresFilingThisStatement><issuerInfo><issuerCik>0000320193</issuerCik><issuerName>Apple Inc</issuerName><issuerCusips><issuerCusipNumber>037833100</issuerCusipNumber></issuerCusips></issuerInfo></coverPageHeader><coverPageHeaderReportingPersonDetails><reportingPersonName>Fixture Index Funds</reportingPersonName><reportingPersonBeneficiallyOwnedNumberOfShares><soleVotingPower>100</soleVotingPower><sharedVotingPower>0</sharedVotingPower><soleDispositivePower>1200</soleDispositivePower><sharedDispositivePower>0</sharedDispositivePower></reportingPersonBeneficiallyOwnedNumberOfShares><reportingPersonBeneficiallyOwnedAggregateNumberOfShares>1200</reportingPersonBeneficiallyOwnedAggregateNumberOfShares><classPercent>8.00</classPercent><typeOfReportingPerson>IA</typeOfReportingPerson></coverPageHeaderReportingPersonDetails></formData></edgarSubmission>" });
       // Valuation inputs: cash flow, capital spending, debt and cash.
       if (kind === "concept") {
-        const flow = { NetCashProvidedByUsedInOperatingActivities: 120e9, PaymentsToAcquirePropertyPlantAndEquipment: 12e9 }[doc];
+        const flow = { NetCashProvidedByUsedInOperatingActivities: 120e9, PaymentsToAcquirePropertyPlantAndEquipment: 12e9, NetIncomeLoss: 100e9 }[doc];
         const stock = { LongTermDebt: 100e9, CashAndCashEquivalentsAtCarryingValue: 30e9 }[doc];
         if (flow) return wrap({ units: { USD: [{ start: "2025-09-28", end: "2026-09-26", val: flow, form: "10-K", filed: "2026-11-03", accn: "c" }] } });
         if (stock) return wrap({ units: { USD: [{ end: "2026-09-26", val: stock, form: "10-K", filed: "2026-11-03", accn: "c" }] } });
@@ -226,6 +236,8 @@ async function liveFlow(browser, errors) {
   await page.fill("#key-sec", "analyst@example.com");
   await page.fill("#key-ais", "FAKEKEY4");
   await page.fill("#key-finnhub", "FAKEKEY5");
+  await page.fill("#key-alpaca", "FAKEALPACA");
+  await page.fill("#key-alpacasecret", "FAKESECRET");
   await page.click('[data-action="setup-connect"]');
   await page.waitForSelector(".watch-row");
   await page.waitForFunction(() => document.querySelectorAll(".watch-row").length === 5);
@@ -246,6 +258,12 @@ async function liveFlow(browser, errors) {
   await page.waitForSelector(".stock-head h1:has-text('AAPL')");
   await page.waitForSelector(".stock-grid [data-tile='DES'] >> text=Fixture company profile");
   await page.waitForSelector(".stock-grid [data-tile='CN'] >> text=Fixture headline");
+  // Key statistics are calculated: market cap from price × SEC shares, P/E from net income.
+  await page.click('.fn-strip [data-value="DES"]');
+  await page.waitForSelector(".stat:has-text('Market cap') >> text=SEC cover page");
+  await page.waitForSelector(".stat:has-text('P/E') >> text=Price ÷ earnings per share");
+  await page.waitForSelector("text=Q4 2026");
+  await page.keyboard.press("Escape");
   // The trade tape fills from the stream with tick-rule sides.
   await page.waitForSelector("[data-tile='TAS'] table.tape td:has-text('Buy')", { timeout: 10000 });
   // Valuation inputs come from the company's filings.
@@ -294,11 +312,16 @@ async function liveFlow(browser, errors) {
   // Switching location restarts the stream there and keeps the same map.
   await page.waitForFunction(() => window.__aisArea === "chokepoint1");
   if ((await page.locator("#vessel-panel .leaflet-container").count()) !== 1) throw Error("Map lost after location change");
+  // Market closed (no live prints): the tape shows the last session's trades.
+  await page.evaluate(() => (window.__noLivePrints = true));
   await page.fill("#search", "TSLA");
   await page.press("#search", "Enter");
   await page.waitForSelector(".stock-head h1:has-text('TSLA')");
   // From another page a ticker opens its panel grid.
   await page.waitForSelector(".stock-grid");
+  await page.waitForSelector("[data-tile='TAS'] >> text=IEX exchange only, via Alpaca", { timeout: 10000 });
+  if (!(await page.locator("[data-tile='TAS'] table.tape").innerText()).includes("150.20")) throw Error("Past trades missing");
+  await page.evaluate(() => (window.__noLivePrints = false));
   await page.reload();
   await page.waitForSelector("h1");
   if ((await page.locator("h1").innerText()).includes("Connect")) throw Error("Keys were not remembered");

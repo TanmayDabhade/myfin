@@ -36,7 +36,7 @@ import {
   filingURL,
 } from "./filings.js";
 import { REVENUE_TAGS, VALUE_TAGS } from "./sec-tags.js";
-import { VIEWS, VIEW_CODES, viewLabel, pushRecent, tapeStats, ownershipFeed, valuationInputs } from "./stock.js";
+import { VIEWS, VIEW_CODES, viewLabel, pushRecent, tapeStats, ownershipFeed, valuationInputs, keyStats, pastPrints, minuteSession } from "./stock.js";
 import {
   parseCommand,
   sharesSeries,
@@ -91,7 +91,7 @@ import {
   stale,
 } from "./sources.js";
 import { sample } from "./sample.js";
-import { applyTrade } from "./live.js";
+import { applyTrade, nyDate } from "./live.js";
 import {
   risk,
   equityCurve,
@@ -867,10 +867,12 @@ async function autoReference() {
   await readReference();
   const week = 7 * 86400;
   if (uniStatus && (!uniStatus.listings || Date.now() / 1000 - (uniStatus.fetched || 0) > week)) await universeRefresh().catch((e) => (lastError.reference = message(e)));
-  const q = state.holdings?.quarters;
-  if (q && hasKey("sec") && Date.now() - (state.holdings.checked || 0) > 3 * 864e5) {
-    state.holdings.checked = Date.now();
-    await holdingsUpdate(q).catch((e) => (lastError.sec = message(e)));
+  // 13F holdings: the first download starts as soon as SEC's contact email
+  // is saved; after that the app checks for a new quarter every few days.
+  const first = !refStatus?.quarters?.length && !refStatus?.job?.running && !refStatus?.job?.error;
+  if (hasKey("sec") && (first || Date.now() - (state.holdings?.checked || 0) > 3 * 864e5)) {
+    state.holdings = { quarters: 2, ...(state.holdings || {}), checked: Date.now() };
+    await holdingsUpdate(state.holdings.quarters).catch((e) => (lastError.sec = message(e)));
     persist();
   }
   watchReference();
@@ -1018,11 +1020,16 @@ function holderRows(c) {
 function filingIndex(cik, accession) {
   return `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${String(accession).replace(/-/g, "")}/`;
 }
+// 13F data downloads by itself once SEC's contact email is saved; this
+// panel shows progress, or what's missing.
 function holdersSetup() {
   const job = refStatus?.job;
   const q = state.holdings?.quarters || 2;
-  const blocker = !hasKey("sec") ? `<p><b>SEC asks for a contact email before bulk downloads.</b> ${button("Add it in Settings", "goto-settings")}</p>` : "";
-  return `<section class="panel"><div class="panel-head"><h2>Download institutional holdings</h2></div><p>Every investment manager with $100 million or more in US-listed securities files Form 13F each quarter. SEC publishes all of them together as one file per quarter, about 100 MB to download and 200 MB once loaded. The app reads the whole file, so you see every disclosed manager for every US-listed stock, ETF and ADR, and each manager's full portfolio.</p>${blocker}<div class="filters"><label>Quarters to keep<select id="hds-quarters">${[2, 4, 8].map((n) => `<option value="${n}" ${n === q ? "selected" : ""}>${n} quarters · about ${n * 200} MB</option>`).join("")}</select></label>${button(job?.running ? "Downloading…" : "Download SEC 13F data", "hds-download", "primary")}</div><div class="job-line" data-job="holdings">${jobLine(job)}</div><small>Two quarters are the minimum for new positions, exits and changes. After the first download the app checks SEC for a new quarter every few days. 13F data sets are published about a month after the filing deadline (45 days after quarter end).</small></section>`;
+  const intro = `<p>Every investment manager with $100 million or more in US-listed securities files Form 13F each quarter. SEC publishes them together as one file per quarter (about 100 MB to download, 200 MB once loaded), so you see every disclosed manager for every US-listed stock, ETF and ADR.</p>`;
+  if (!hasKey("sec"))
+    return `<section class="panel"><div class="panel-head"><h2>Institutional holdings</h2></div>${intro}<p><b>SEC asks for a contact email before bulk downloads.</b> Add it once and the download starts by itself. ${button("Add it in Settings", "goto-settings", "primary")}</p></section>`;
+  const status = job?.running ? "Downloading SEC 13F data. You can keep using the app meanwhile." : job?.error ? "The last download failed." : "Starting the SEC 13F download…";
+  return `<section class="panel"><div class="panel-head"><h2>Institutional holdings</h2>${job?.error ? button("Try again", "hds-download", "primary") : ""}</div>${intro}<p>${esc(status)}</p><div class="job-line" data-job="holdings">${jobLine(job)}</div><small>Keeping ${q} quarters (about ${q * 200} MB); change it in Settings → Reference data. After the first download the app checks SEC for a new quarter every few days. 13F data sets appear about a month after the filing deadline (45 days after quarter end).</small></section>`;
 }
 function securitiesLine(d) {
   const h = d.holders;
@@ -1230,9 +1237,39 @@ function followGraph() {
   const a = activeMap()[symbol];
   if (!centerOnTicker(symbol, a?.overview?.Name || state.secData?.[symbol]?.name)) graphSymbol = symbol;
 }
+// Finnhub REST datasets for the loaded stock: news, metrics, profile, earnings.
+const fh = (kind, s = symbol) => (state.mode === "market" ? state.datasets[`${s}:FH_${kind}`]?.data : null);
+async function loadFinnhub(kind, s) {
+  const key = `${s}:FH_${kind}`;
+  try {
+    const d = await fetchData("finnhub", kind, s);
+    state.datasets[key] = d;
+    delete loadErrors[key];
+    if (d.warning) lastError.finnhub = d.warning;
+  } catch (e) {
+    loadErrors[key] = lastError.finnhub = message(e);
+    throw e;
+  }
+}
 function stockName() {
   const a = stockAsset();
-  return a?.overview?.Name || (a && a.name !== symbol ? a.name : "") || state.secData?.[symbol]?.name || hdsData[symbol]?.name || "";
+  return a?.overview?.Name || fh("profile2")?.name || (a && a.name !== symbol ? a.name : "") || state.secData?.[symbol]?.name || hdsData[symbol]?.name || "";
+}
+// Key statistics, calculated where possible (see keyStats in stock.js).
+function stockStats() {
+  const a = stockAsset();
+  return keyStats({
+    overview: a?.overview || {},
+    metric: fh("metric")?.metric || {},
+    income: state.mode === "market" ? state.datasets[`${symbol}:INCOME_STATEMENT`]?.data : null,
+    basis: (state.mode === "market" && state.valuationData?.[symbol]?.basis) || {},
+    price: price(a),
+    bars: a?.bars || [],
+  });
+}
+const statTile = (label, x, f) => stat(label, x.value == null ? (x.note ? "NM" : "—") : f(x.value), esc(x.value == null ? x.note || "Not available yet" : x.source));
+function statTiles(k) {
+  return `<div class="stats">${statTile("P/E", k.pe, (v) => fmt(v))}${statTile("Profit margin", k.margin, pct)}${statTile("Revenue growth YoY", k.growth, pct)}${statTile("Market cap", k.marketCap, compact)}</div>`;
 }
 function stockHead() {
   const a = stockAsset();
@@ -1272,37 +1309,78 @@ function chartBody() {
 // "20261105T120000" -> "2026-11-05 12:00"
 const newsTime = (t) => String(t || "").replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d).*$/, "$1-$2-$3 $4:$5");
 function newsList(n, full = false) {
-  const news = state.mode === "market" ? state.datasets[`${symbol}:NEWS_SENTIMENT`] : null;
-  const items = news?.data?.feed?.slice(0, n) || [];
-  if (!items.length) return empty(esc(waiting("NEWS_SENTIMENT", "company news")));
+  // Finnhub company news (free); older Alpha Vantage news if that's all there is.
+  const fhNews = state.mode === "market" ? state.datasets[`${symbol}:FH_company-news`] : null;
+  const avNews = state.mode === "market" ? state.datasets[`${symbol}:NEWS_SENTIMENT`] : null;
+  const items = Array.isArray(fhNews?.data)
+    ? [...fhNews.data].sort((x, y) => (y.datetime || 0) - (x.datetime || 0)).map((x) => ({ title: x.headline, url: x.url, source: x.source, when: x.datetime ? new Date(x.datetime * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "", summary: x.summary }))
+    : (avNews?.data?.feed || []).map((x) => ({ title: x.title, url: x.url, source: x.source, when: newsTime(x.time_published), summary: x.summary }));
+  const shown = items.filter((x) => x.title).slice(0, n);
+  if (!shown.length) {
+    const why =
+      state.mode === "sample"
+        ? "Switch to Live data for company news."
+        : !native
+          ? "Company news loads in the desktop app."
+          : !isUSKey(symbol)
+            ? "Finnhub's free company news covers US-listed stocks."
+            : !hasKey("finnhub")
+              ? "finnhub"
+              : loadErrors[`${symbol}:FH_company-news`] || (fhNews ? "No news for this company in the last 7 days." : "Loading company news…");
+    return why === "finnhub" ? `<div class="empty">Company news comes from Finnhub (free key).<br>${button("Add it in Settings", "goto-settings")}</div>` : empty(esc(why));
+  }
   return (
-    items
+    shown
       .map((x) => {
         const url = safeURL(x.url);
-        return `<article class="news-item">${url ? link(url, x.title) : esc(x.title)}<small>${esc(x.source)} · ${esc(newsTime(x.time_published))}</small>${full ? `<p>${esc(x.summary)}</p>` : ""}</article>`;
+        return `<article class="news-item">${url ? link(url, x.title) : esc(x.title)}<small>${esc(x.source)} · ${esc(x.when)}</small>${full && x.summary ? `<p>${esc(x.summary)}</p>` : ""}</article>`;
       })
-      .join("") + (full ? datasetStamp(news) : "")
+      .join("") + (full ? datasetStamp(fhNews || avNews) : "")
   );
 }
 function calendarPanel() {
-  return `<section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${state.mode === "market" ? button("Load calendar", "calendar-fetch") : ""}</div>${calendar()}<small>Calendar availability depends on provider access. Dividend date from the company overview: ${esc(stockAsset()?.overview?.DividendDate || "—")}.</small></section>`;
+  const rows = fh("earnings")?.earningsCalendar;
+  if (Array.isArray(rows)) {
+    const sorted = [...rows].sort((x, y) => String(y.date).localeCompare(String(x.date)));
+    const today = new Date().toISOString().slice(0, 10);
+    const big = (x) => (x == null ? "—" : compact(x));
+    return `<section class="panel"><div class="panel-head"><h2>Earnings <small>reported and upcoming</small></h2></div>${
+      sorted.length
+        ? table(
+            ["Date", "Quarter", "EPS estimate", "EPS actual", "Surprise", "Revenue estimate", "Revenue actual"],
+            sorted.slice(0, 12).map((r) => {
+              const surprise = r.epsActual != null && r.epsEstimate ? r.epsActual / Math.abs(r.epsEstimate) - Math.sign(r.epsEstimate) : null;
+              return `<tr><td>${esc(r.date)}${r.date >= today ? ' <span class="pill">upcoming</span>' : ""}${r.hour === "bmo" ? " <small>before open</small>" : r.hour === "amc" ? " <small>after close</small>" : ""}</td><td>Q${esc(r.quarter)} ${esc(r.year)}</td><td>${fmt(r.epsEstimate)}</td><td>${fmt(r.epsActual)}</td><td class="${surprise == null ? "" : tone(surprise)}">${surprise == null ? "—" : signed(surprise, pct)}</td><td>${big(r.revenueEstimate)}</td><td>${big(r.revenueActual)}</td></tr>`;
+            }),
+          )
+        : empty("No earnings dates in Finnhub's window.")
+    }<small>Finnhub earnings calendar. Surprise is actual EPS against the estimate.</small></section>`;
+  }
+  const why = state.mode !== "market" ? "Switch to Live data for earnings dates." : hasKey("finnhub") ? loadErrors[`${symbol}:FH_earnings`] || "Loading earnings dates…" : "";
+  return `<section class="panel"><div class="panel-head"><h2>Earnings calendar</h2>${state.mode === "market" && !hasKey("finnhub") && hasKey("alpha") ? button("Load calendar", "calendar-fetch") : ""}</div>${why ? empty(esc(why)) : calendar()}<small>${hasKey("finnhub") ? "Finnhub earnings calendar." : "Add a free Finnhub key for reported and upcoming earnings."} Dividend date from the company overview: ${esc(stockAsset()?.overview?.DividendDate || "—")}.</small></section>`;
 }
 function profileTile() {
   const a = stockAsset(),
     o = a?.overview || {};
-  return `<div class="metrics"><span>Sector</span><b>${esc(o.Sector || a?.sector || "—")}</b><span>Industry</span><b>${esc(o.Industry || "—")}</b><span>52-week range</span><b>${o["52WeekLow"] ? `${fmt(number(o["52WeekLow"]))} – ${fmt(number(o["52WeekHigh"]))}` : "—"}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b></div>${o.Description ? `<p class="clamp">${esc(o.Description)}</p>` : `<p class="muted">${esc(a ? waiting("OVERVIEW", "the company profile") : "No profile loaded.")}</p>`}`;
+  const k = stockStats(),
+    p = fh("profile2") || {};
+  const blurb = o.Description || (p.name ? `${p.name}${p.finnhubIndustry ? ` · ${p.finnhubIndustry}` : ""}${p.ipo ? ` · listed since ${p.ipo}` : ""}` : "");
+  return `<div class="metrics"><span>Sector</span><b>${esc(o.Sector || a?.sector || "—")}</b><span>Industry</span><b>${esc(o.Industry || p.finnhubIndustry || "—")}</b><span>52-week range</span><b>${k.low52.value == null ? "—" : `${fmt(k.low52.value)} – ${fmt(k.high52.value)}`}</b><span>Dividend yield</span><b>${pct(k.dividendYield.value)}</b></div>${blurb ? `<p class="clamp">${esc(blurb)}</p>` : `<p class="muted">${esc(a ? waiting("OVERVIEW", "the company profile") : "No profile loaded.")}</p>`}`;
 }
 function descriptionView() {
   const a = stockAsset();
   if (!a) return `<section class="panel">${noStock()}</section>`;
   const o = a.overview || {},
     r = risk(a.bars);
-  return `<div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2></div><p>${esc(o.Description || waiting("OVERVIEW", "the company profile"))}</p><div class="metrics"><span>Sector</span><b>${esc(o.Sector || a.sector || "—")}</b><span>Industry</span><b>${esc(o.Industry || "—")}</b><span>Dividend yield</span><b>${pct(number(o.DividendYield))}</b><span>52-week high / low</span><b>${fmt(number(o["52WeekHigh"]))} / ${fmt(number(o["52WeekLow"]))}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div><small>Metrics keep provider definitions and reported currencies.</small></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="10" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div>${calendarPanel()}`;
+  const k = stockStats(),
+    p = fh("profile2") || {};
+  const web = safeURL(p.weburl);
+  return `${statTiles(k)}<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company profile</h2>${web ? link(web, "Website") : ""}</div><p>${esc(o.Description || (p.name ? `${p.name}${p.finnhubIndustry ? `, ${p.finnhubIndustry}` : ""}${p.country ? `, ${p.country}` : ""}.` : waiting("OVERVIEW", "the company profile")))}</p><div class="metrics"><span>Sector</span><b>${esc(o.Sector || a.sector || "—")}</b><span>Industry</span><b>${esc(o.Industry || p.finnhubIndustry || "—")}</b>${p.ipo ? `<span>Listed since</span><b>${esc(p.ipo)}</b>` : ""}<span>Dividend yield</span><b>${pct(k.dividendYield.value)}</b><span>52-week high / low</span><b>${fmt(k.high52.value)} / ${fmt(k.low52.value)}</b><span>RSI (14, simple)</span><b>${fmt(rsi(a.bars))}</b><span>Annualized volatility</span><b>${pct(r?.vol)}</b><span>Max drawdown in data</span><b>${pct(r?.drawdown)}</b></div><small>Ratios are calculated from the live price, the latest statements and SEC shares outstanding where possible; the source is under each figure.</small></section><section class="panel"><div class="panel-head"><h2>Research journal</h2></div><textarea id="note" rows="10" placeholder="Thesis, catalysts, valuation assumptions, and what would change your mind…">${esc(state.notes[`${state.mode}:${symbol}`] || "")}</textarea>${button("Save thesis", "note-save", "primary")}</section></div>${calendarPanel()}`;
 }
 function financialsTile() {
-  const o = stockAsset()?.overview || {},
+  const k = stockStats(),
     rev = (state.mode === "market" ? state.secData?.[symbol]?.revenue : null) || [];
-  return `<div class="mini-stats"><span>P/E <b>${fmt(number(o.PERatio))}</b></span><span>Margin <b>${pct(number(o.ProfitMargin))}</b></span><span>Market cap <b>${compact(number(o.MarketCapitalization))}</b></span></div>${
+  return `<div class="mini-stats"><span>P/E <b>${k.pe.value == null ? (k.pe.note ? "NM" : "—") : fmt(k.pe.value)}</b></span><span>Margin <b>${pct(k.margin.value)}</b></span><span>Growth <b>${pct(k.growth.value)}</b></span><span>Market cap <b>${compact(k.marketCap.value)}</b></span></div>${
     rev.length
       ? table(
           ["Fiscal year end", "Revenue", "YoY"],
@@ -1325,44 +1403,88 @@ function statementsPanel() {
   }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. Raw provider figures; “None” is missing, not zero.</small></section>`;
 }
 function financialsView() {
-  const o = stockAsset()?.overview || {};
-  return `<div class="stats">${stat("P/E", fmt(number(o.PERatio)))}${stat("Profit margin", pct(number(o.ProfitMargin)))}${stat("Revenue growth YoY", pct(number(o.QuarterlyRevenueGrowthYOY)))}${stat("Market cap", compact(number(o.MarketCapitalization)))}</div>${statementsPanel()}<section class="panel"><div class="panel-head"><h2>Annual revenue <small>SEC XBRL</small></h2></div>${financialsTile()}</section>`;
+  return `${statTiles(stockStats())}${statementsPanel()}<section class="panel"><div class="panel-head"><h2>Annual revenue <small>SEC XBRL</small></h2></div>${financialsTile()}</section>`;
 }
 // ---- Time and sales (the trade tape) ----
 const tapes = {}; // symbol -> prints received this session, oldest first
 let tapeTimer = null,
   tapeError = "";
 const tapeClock = (ms) => new Date(ms).toLocaleTimeString("en-US", { hour12: false, timeZone: "America/New_York" }) + "." + String(ms % 1000).padStart(3, "0");
-function tapeBlocker() {
+// Live prints from the stream when there are any; otherwise the most recent
+// session's trades (Alpaca, IEX) or its 1-minute bars (Twelve Data).
+const pastTape = {}; // symbol -> { kind: "prints"|"minutes", date, ... }
+const hasAlpaca = () => hasKey("alpaca") && hasKey("alpacasecret");
+function streamBlocker() {
   if (!live()) return native ? "The trade tape streams with Live data." : "The trade tape streams in the desktop app.";
   if (!hasKey("finnhub")) return "finnhub";
-  if (!isUSKey(symbol)) return "Finnhub's free stream covers US-listed stocks only.";
+  if (!isUSKey(symbol)) return "US only";
   if (!stockAsset()) return "Waiting for prices…";
   return "";
 }
+const tapeBlocker = streamBlocker;
+function tapeTable(rows, full, big = Infinity) {
+  return `<div class="table-wrap"><table class="tape"><thead><tr><th>Time (NY)</th><th>Price</th><th>Size</th><th>Side</th>${full ? "<th>Conditions</th>" : ""}</tr></thead><tbody>${rows
+    .map((r) => `<tr class="${r.size >= big ? "big" : ""}"><td>${esc(tapeClock(r.time))}</td><td class="${r.tick > 0 ? "up" : r.tick < 0 ? "down" : ""}">${r.tick > 0 ? "▲" : r.tick < 0 ? "▼" : "·"} ${fmt(r.price)}</td><td>${int(r.size)}</td><td class="${r.side === "buy" ? "up" : r.side === "sell" ? "down" : ""}">${r.side ? (r.side === "buy" ? "Buy" : "Sell") : "—"}</td>${full ? `<td><small>${esc((r.conditions || []).join(" "))}</small></td>` : ""}</tr>`)
+    .join("")}</tbody></table></div>`;
+}
+function printsBody(s, n, full, label) {
+  const sum = `<p class="tape-label">${label}</p><div class="mini-stats"><span>VWAP <b>${fmt(s.vwap)}</b></span><span>Volume <b>${compact(s.volume)}</b></span><span>Buy · sell <b><span class="up">${pct(s.buyShare)}</span> · <span class="down">${s.buyShare == null ? "—" : pct(1 - s.buyShare)}</span></b></span></div>`;
+  const stats = `<p class="tape-label">${label}</p><div class="stats">${stat("Prints", int(s.count), `${esc(tapeClock(s.first.time))} – ${esc(tapeClock(s.last.time))} New York`)}${stat("Volume", compact(s.volume), `VWAP ${fmt(s.vwap)} · range ${fmt(s.low)} – ${fmt(s.high)}`)}${stat("Buy · sell volume", `${compact(s.buyVolume)} · ${compact(s.sellVolume)}`, `estimated, ${pct(s.buyShare)} buyer-initiated`)}${stat("Largest print", int(s.largest?.size), s.largest ? `at ${fmt(s.largest.price)}, ${esc(tapeClock(s.largest.time))}` : "")}</div>`;
+  return (full ? stats : sum) + tapeTable(s.rows.slice(-n).reverse(), full, full && s.largest ? s.largest.size : Infinity);
+}
+function minutesBody(m, n, full) {
+  const label = `Last session ${esc(m.date)} · 1-minute bars from Twelve Data (no individual trades without an Alpaca key)`;
+  const head = full
+    ? `<div class="stats">${stat("Open · close", `${fmt(m.open)} · ${fmt(m.close)}`, `${m.rows.length} minutes`)}${stat("Range", `${fmt(m.low)} – ${fmt(m.high)}`)}${stat("Volume", compact(m.volume), "consolidated, all exchanges")}${stat("VWAP", fmt(m.vwap), "from each minute's typical price")}</div>`
+    : `<div class="mini-stats"><span>VWAP <b>${fmt(m.vwap)}</b></span><span>Volume <b>${compact(m.volume)}</b></span><span>Range <b>${fmt(m.low)} – ${fmt(m.high)}</b></span></div>`;
+  const rows = m.rows.slice(-n).reverse();
+  return `<p class="tape-label">${label}</p>${head}<div class="table-wrap"><table class="tape"><thead><tr><th>Minute (NY)</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th></tr></thead><tbody>${rows
+    .map((r, i) => {
+      const prev = rows[i + 1]?.close;
+      return `<tr><td>${esc(r.time.slice(11, 16))}</td><td>${fmt(r.open)}</td><td>${fmt(r.high)}</td><td>${fmt(r.low)}</td><td class="${prev == null ? "" : tone(r.close - prev)}">${fmt(r.close)}</td><td>${int(r.volume)}</td></tr>`;
+    })
+    .join("")}</tbody></table></div>`;
+}
 function tapeBody(n, full = false) {
-  const why = tapeBlocker();
-  if (why === "finnhub") return `<div class="empty">Real-time trades need a free Finnhub key.<br>${button("Add it in Settings", "goto-settings")}</div>`;
-  if (why) return empty(esc(why));
-  const s = tapeStats(tapes[symbol] || []);
-  if (!s.count) return empty(esc(tapeError || "Waiting for trades. The tape fills from the moment this stock is open, and stays empty outside US market hours."));
-  const sum = `<div class="mini-stats"><span>VWAP <b>${fmt(s.vwap)}</b></span><span>Volume <b>${compact(s.volume)}</b></span><span>Buy · sell <b><span class="up">${pct(s.buyShare)}</span> · <span class="down">${s.buyShare == null ? "—" : pct(1 - s.buyShare)}</span></b></span></div>`;
-  const rows = s.rows.slice(-n).reverse();
-  const big = full && s.largest ? s.largest.size : Infinity;
-  return (
-    (full
-      ? `<div class="stats">${stat("Prints", int(s.count), `since ${esc(tapeClock(s.first.time))} New York`)}${stat("Volume", compact(s.volume), `VWAP ${fmt(s.vwap)}`)}${stat("Buy · sell volume", `${compact(s.buyVolume)} · ${compact(s.sellVolume)}`, `estimated, ${pct(s.buyShare)} buyer-initiated`)}${stat("Largest print", int(s.largest?.size), s.largest ? `at ${fmt(s.largest.price)}, ${esc(tapeClock(s.largest.time))}` : "")}</div>`
-      : sum) +
-    `<div class="table-wrap"><table class="tape"><thead><tr><th>Time (NY)</th><th>Price</th><th>Size</th><th>Side</th>${full ? "<th>Conditions</th>" : ""}</tr></thead><tbody>${rows
-      .map((r) => `<tr class="${r.size >= big ? "big" : ""}"><td>${esc(tapeClock(r.time))}</td><td class="${r.tick > 0 ? "up" : r.tick < 0 ? "down" : ""}">${r.tick > 0 ? "▲" : r.tick < 0 ? "▼" : "·"} ${fmt(r.price)}</td><td>${int(r.size)}</td><td class="${r.side === "buy" ? "up" : r.side === "sell" ? "down" : ""}">${r.side ? (r.side === "buy" ? "Buy" : "Sell") : "—"}</td>${full ? `<td><small>${esc((r.conditions || []).join(" "))}</small></td>` : ""}</tr>`)
-      .join("")}</tbody></table></div>`
-  );
+  const live_ = tapes[symbol] || [];
+  if (live_.length) return printsBody(tapeStats(live_), n, full, "Live · trades as Finnhub streams them since this stock was opened");
+  const past = pastTape[symbol];
+  if (past?.kind === "prints" && past.prints.length) {
+    const today = nyDate(Date.now()) === past.date;
+    return printsBody(tapeStats(past.prints), n, full, `${today ? "Today, up to 15 minutes ago" : `Last session ${esc(past.date)}`} · IEX exchange only, via Alpaca · newest ${int(past.prints.length)} prints${hasKey("finnhub") ? " · live prints replace this as they arrive" : ""}`);
+  }
+  if (past?.kind === "minutes" && past.rows.length) return minutesBody(past, n, full);
+  if (!live()) return empty(native ? "Time and sales loads with Live data." : "Time and sales loads in the desktop app.");
+  if (!isUSKey(symbol)) return empty("Trade data here covers US-listed stocks only.");
+  const loading = past?.loading;
+  if (!hasAlpaca() && !hasKey("twelve") && !hasKey("finnhub")) return `<div class="empty">Add a free Alpaca key for past trades, or Finnhub for live ones.<br>${button("Open Settings", "goto-settings")}</div>`;
+  return empty(esc(loading ? "Loading the last session's trades…" : past?.error || tapeError || "Waiting for trades…"));
 }
 function tapeView() {
-  return `<section class="panel"><div class="panel-head"><h2>Time and sales <small>every trade print, newest first</small></h2></div><div id="tape-slot">${tapeBody(500, true)}</div><small>Trades as Finnhub streams them, kept from the moment the stock is open (up to 500). Buy and sell are estimated with the tick rule: a print above the previous price counts as buyer-initiated, below as seller-initiated. The free feed has no bid/ask quotes, so this is an estimate and there is no order book (market depth).</small></section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Time and sales <small>trade prints, newest first</small></h2></div><div id="tape-slot">${tapeBody(stockView === "TAS" ? 2000 : 12, true)}</div><small>Live prints come from the Finnhub stream (up to 500 kept). When the market is closed, or before live prints arrive, the most recent session shows instead: individual trades on the IEX exchange from Alpaca's free plan (a small share of all volume; the free plan can't read the latest 15 minutes), or 1-minute bars from Twelve Data if there's no Alpaca key. Buy and sell are estimated with the tick rule (a print above the previous price counts as buyer-initiated); free feeds have no bid/ask quotes, so there's no order book (market depth).${hasAlpaca() ? "" : " Add a free Alpaca key in Settings for past trade prints."}</small></section>`;
+}
+async function loadPastTape(s) {
+  const p = (pastTape[s] ||= {});
+  p.loading = true;
+  try {
+    if (hasAlpaca()) {
+      const d = await fetchData("alpaca", "trades", s);
+      Object.assign(p, { kind: "prints", ...pastPrints(d.data), fetchedAt: d.fetchedAt, error: "" });
+      if (!p.prints.length) throw Error("Alpaca returned no IEX trades for the last few sessions.");
+    } else if (hasKey("twelve")) {
+      const d = await fetchData("twelve", "TIME_SERIES_1MIN", s);
+      Object.assign(p, { kind: "minutes", ...minuteSession(d.data), fetchedAt: d.fetchedAt, error: "" });
+      if (!p.rows.length) throw Error("Twelve Data returned no 1-minute bars.");
+    }
+  } catch (e) {
+    p.error = message(e);
+    lastError[hasAlpaca() ? "alpaca" : "twelve"] = p.error;
+  } finally {
+    p.loading = false;
+  }
 }
 function syncTape() {
-  const want = page === "Stock" && (!stockView || stockView === "TAS") && !tapeBlocker();
+  const want = page === "Stock" && (!stockView || stockView === "TAS") && !streamBlocker();
   if (!want) {
     clearInterval(tapeTimer);
     tapeTimer = null;
@@ -1380,7 +1502,7 @@ async function pollTape() {
     buf.push(...r.prints);
     if (buf.length > 500) buf.splice(0, buf.length - 500);
     const el = $("#tape-slot");
-    if (el && s === symbol && !el.matches(":hover")) el.innerHTML = stockView === "TAS" ? tapeBody(500, true) : tapeBody(12);
+    if (el && s === symbol && !el.matches(":hover")) el.innerHTML = stockView === "TAS" ? tapeBody(2000, true) : tapeBody(12);
   } catch (e) {
     tapeError = message(e);
   }
@@ -1389,7 +1511,10 @@ async function pollTape() {
 function holdersTile() {
   if (!native) return empty("Holder data loads in the desktop app.");
   if (!isUSKey(symbol)) return empty("SEC holder filings cover US-listed securities.");
-  if (!refStatus?.quarters?.length) return `<div class="empty">Institutional holders come from SEC's quarterly 13F data (about 200 MB per quarter).<br>${button("Set up holders", "stock-view", "", 'data-value="HDS"')}</div>`;
+  if (!refStatus?.quarters?.length)
+    return hasKey("sec")
+      ? `<div class="empty">Downloading SEC 13F holdings…<div class="job-line" data-job="holdings">${jobLine(refStatus?.job)}</div></div>`
+      : `<div class="empty">Holders need your SEC contact email; the 13F download then starts by itself.<br>${button("Add it in Settings", "goto-settings")}</div>`;
   const d = hdsEntry(symbol),
     c = holderComparison(d);
   if (d.errors.holders) return empty(esc(d.errors.holders));
@@ -2292,18 +2417,18 @@ function keyRow(p, setupMode) {
   const status = k?.configured
     ? `<span class="pill on">Connected${k.source === "environment" ? " · environment variable" : ""}</span>`
     : `<span class="pill">Not connected</span>`;
-  return `<div class="source-row"><div class="source-info"><h3>${info.name} ${setupMode ? "" : status}</h3><small>${info.provides}<br>${info.limits}</small>${!setupMode && lastError[p] ? `<small class="down">Last error: ${esc(lastError[p])}</small>` : ""}</div><div class="source-key"><input id="key-${p}" type="${info.email ? "email" : "password"}" autocomplete="off" spellcheck="false" placeholder="${info.email ? (k?.configured ? "Replace contact email" : "you@example.com (optional)") : k?.configured ? "Replace saved key" : "Paste API key"}" aria-label="${info.name} ${info.email ? "contact email" : "API key"}">${!setupMode && k?.source === "saved" ? button("Remove", "key-remove", "icon", `data-value="${p}"`) : ""}${link(info.keyURL, info.label || "Get a free key")}</div></div>`;
+  return `<div class="source-row"><div class="source-info"><h3>${info.name} ${setupMode ? "" : status}</h3><small>${info.provides}<br>${info.limits}</small>${!setupMode && lastError[p] ? `<small class="down">Last error: ${esc(lastError[p])}</small>` : ""}</div><div class="source-key"><input id="key-${p}" type="${info.email ? "email" : "password"}" autocomplete="off" spellcheck="false" placeholder="${info.email ? (k?.configured ? "Replace contact email" : "you@example.com (optional)") : k?.configured ? "Replace saved key" : "Paste API key"}" aria-label="${info.name} ${info.email ? "contact email" : info.secret ? "key ID" : "API key"}">${info.secret ? `<input id="key-${p}secret" type="password" autocomplete="off" spellcheck="false" placeholder="${keyInfo?.[p + "secret"]?.configured ? "Replace secret" : "Secret key"}" aria-label="${info.name} secret key">` : ""}${!setupMode && k?.source === "saved" ? button("Remove", "key-remove", "icon", `data-value="${p}"`) : ""}${link(info.keyURL, info.label || "Get a free key")}</div></div>`;
 }
 function priceSelect() {
   return `<label>Prices from<select id="price-source">${priceProviders.map((p) => `<option value="${p}" ${state.sources.prices === p ? "selected" : ""}>${providers[p].name}${hasKey(p) ? "" : " (no key)"}</option>`).join("")}</select></label>`;
 }
 function setup() {
-  return `<section class="panel setup"><p>Paste your free API keys once. They are saved on this computer, in a file only your user account can read, and the app loads data on its own from then on. One key is enough to start; all three gives you everything.</p>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, true)).join("")}${priceSelect()}<div class="setup-actions">${button("Connect and load data", "setup-connect", "primary")}${button("Explore demo data instead", "setup-demo")}</div><small>Recommended: Twelve Data for price history, Finnhub for real-time prices, Alpha Vantage for company research, FRED for the economy.</small></section>`;
+  return `<section class="panel setup"><p>Paste your free API keys once. They are saved on this computer, in a file only your user account can read, and the app loads data on its own from then on. One key is enough to start; all three gives you everything.</p>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, true)).join("")}${priceSelect()}<div class="setup-actions">${button("Connect and load data", "setup-connect", "primary")}${button("Explore demo data instead", "setup-demo")}</div><small>Recommended: Twelve Data for price history, Finnhub for real-time prices, news and key metrics, Alpha Vantage for financial statements, Alpaca for past trades, FRED for the economy.</small></section>`;
 }
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in market-lens.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -2438,20 +2563,43 @@ function autoLoad() {
       }
     }).catch(() => {});
   };
+  // Fast sources skip the shared queue so they never wait behind Alpha
+  // Vantage's 13-second spacing.
+  const now_ = (key, job) => {
+    if (attempted.has(key)) return;
+    attempted.add(key);
+    refresh();
+    job()
+      .catch(() => {})
+      .finally(async () => {
+        await persist();
+        refresh();
+      });
+  };
   const a = stockAsset();
-  if (["GRID", "DES", "FA", "CN"].includes(v) && a && hasKey("alpha") && isUSKey(a.symbol)) {
+  if (["GRID", "DES", "FA"].includes(v) && a && hasKey("alpha") && isUSKey(a.symbol)) {
     const s = a.symbol;
     if (!a.overview) once(`${s}:OVERVIEW`, () => loadDataset("OVERVIEW", s));
-    if (!state.datasets[`${s}:${statement}`])
-      once(`${s}:${statement}`, () => loadDataset(statement, s));
-    if (!state.datasets[`${s}:NEWS_SENTIMENT`])
-      once(`${s}:NEWS_SENTIMENT`, () => loadDataset("NEWS_SENTIMENT", s));
+    // The income statement also feeds P/E, margin and growth.
+    for (const kind of new Set(["INCOME_STATEMENT", statement]))
+      if (!state.datasets[`${s}:${kind}`]) once(`${s}:${kind}`, () => loadDataset(kind, s));
+  }
+  if (hasKey("finnhub") && isUSKey(symbol) && page === "Stock") {
+    const s = symbol;
+    const want = { "company-news": ["GRID", "CN"], metric: ["GRID", "DES", "FA"], profile2: ["GRID", "DES"], earnings: ["DES", "CN"] };
+    for (const [kind, views] of Object.entries(want))
+      if (views.includes(v) && stale(state.datasets[`${s}:FH_${kind}`], 1800)) now_(`${s}:FH_${kind}`, () => loadFinnhub(kind, s));
+  }
+  if (["GRID", "TAS"].includes(v) && isUSKey(symbol) && (hasAlpaca() || hasKey("twelve")) && !(tapes[symbol] || []).length) {
+    const s = symbol;
+    now_(`past:${s}:${Math.floor(Date.now() / 300000)}`, () => loadPastTape(s));
   }
   if (["GRID", "FA", "CF"].includes(v) && isUSKey(symbol) && (cikFor(symbol) || hasKey("sec")) && stale(state.secData?.[symbol], 86400)) {
     const s = symbol;
     once("sec:" + s, () => loadSEC(s));
   }
-  if (["GRID", "DCF"].includes(v) && isUSKey(symbol) && (cikFor(symbol) || hasKey("sec")) && stale(state.valuationData?.[symbol], 7 * 86400)) {
+  // Filing figures also feed the key statistics (shares, net income).
+  if (["GRID", "DCF", "DES", "FA"].includes(v) && isUSKey(symbol) && (cikFor(symbol) || hasKey("sec")) && (stale(state.valuationData?.[symbol], 7 * 86400) || !state.valuationData[symbol].basis)) {
     const s = symbol;
     once("val:" + s, () => loadValuation(s));
   }
@@ -2840,9 +2988,11 @@ async function action(act, value) {
     case "research-refresh": {
       const s = symbol;
       const jobs = [enqueue("prices:" + s, () => loadPrices(s))];
-      if (hasKey("alpha"))
-        for (const kind of ["OVERVIEW", statement, "NEWS_SENTIMENT"])
+      if (hasKey("alpha") && isUSKey(s))
+        for (const kind of new Set(["OVERVIEW", "INCOME_STATEMENT", statement]))
           jobs.push(enqueue(`${s}:${kind}`, () => loadDataset(kind, s)));
+      if (hasKey("finnhub") && isUSKey(s))
+        for (const kind of ["company-news", "metric", "profile2", "earnings"]) jobs.push(loadFinnhub(kind, s));
       notify("Refreshing " + s + "…");
       const results = await Promise.allSettled(jobs);
       await persist();
@@ -3001,7 +3151,7 @@ async function action(act, value) {
     case "setup-connect":
     case "keys-save": {
       const entered = Object.fromEntries(
-        ["twelve", "finnhub", "alpha", "fred", "ais", "sec"].map((p) => [p, $("#key-" + p).value.trim()]),
+        ["twelve", "finnhub", "alpha", "alpaca", "alpacasecret", "fred", "ais", "sec"].map((p) => [p, $("#key-" + p)?.value.trim() || ""]),
       );
       if (act === "setup-connect" && !Object.values(entered).some(Boolean))
         throw Error("Paste at least one API key, or explore the demo data.");
@@ -3023,10 +3173,13 @@ async function action(act, value) {
       render();
       notify("Keys saved. Loading your data…");
       syncWatchlist();
+      // The SEC contact email starts the 13F holdings download.
+      if (entered.sec) autoReference().then(() => refresh());
       break;
     }
     case "key-remove":
       keyInfo = await clearKey(value);
+      if (value === "alpaca") keyInfo = await clearKey("alpacasecret");
       render();
       notify(providers[value].name + " key removed.");
       break;

@@ -1069,3 +1069,4 @@ table.tape tr.big td { font-weight: 650; color: #fff; }
   .sh-actions { margin-left: 0; }
 }
 .sh-actions .tag { align-self: center; }
+.tape-label { font-size: 11px; color: #8a8a8a; margin: 0 0 8px; }

@@ -12,7 +12,7 @@ pub const REVENUE_TAGS: [&str; 3] = [
 /// XBRL concepts used to pre-fill the valuation model: cash flow, capital
 /// spending, cash, debt and diluted shares. Must match VALUE_TAGS in
 /// src/sec-tags.js.
-pub const VALUE_TAGS: [&str; 8] = [
+pub const VALUE_TAGS: [&str; 9] = [
     "NetCashProvidedByUsedInOperatingActivities",
     "PaymentsToAcquirePropertyPlantAndEquipment",
     "CashAndCashEquivalentsAtCarryingValue",
@@ -21,6 +21,7 @@ pub const VALUE_TAGS: [&str; 8] = [
     "LongTermDebtCurrent",
     "ShortTermBorrowings",
     "WeightedAverageNumberOfDilutedSharesOutstanding",
+    "NetIncomeLoss",
 ];
 
 pub fn cik(raw: &str) -> Result<String, String> {

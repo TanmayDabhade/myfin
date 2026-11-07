@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub const PROVIDERS: [&str; 6] = ["alpha", "twelve", "fred", "sec", "ais", "finnhub"];
+pub const PROVIDERS: [&str; 8] = ["alpha", "twelve", "fred", "sec", "ais", "finnhub", "alpaca", "alpacasecret"];
 
 const ALPHA_KINDS: [&str; 8] = [
     "TIME_SERIES_DAILY",
@@ -17,6 +17,10 @@ const ALPHA_KINDS: [&str; 8] = [
     "EARNINGS",
     "EARNINGS_CALENDAR",
 ];
+
+/// Finnhub REST datasets on the free plan: company news, key metrics,
+/// company profile and the earnings calendar.
+const FINNHUB_KINDS: [&str; 4] = ["company-news", "metric", "profile2", "earnings"];
 
 /// Free-plan limits, enforced locally so the app never burns a key.
 pub struct Budget {
@@ -31,6 +35,10 @@ pub fn budget(provider: &str) -> Budget {
     match provider {
         "alpha" => Budget { daily: 25, gap: 13, ttl: 21_600 },
         "twelve" => Budget { daily: 800, gap: 8, ttl: 3_600 },
+        // Finnhub allows 60 calls a minute; news and metrics are reused for 30 minutes.
+        "finnhub" => Budget { daily: 3_000, gap: 1, ttl: 1_800 },
+        // Past trades change only while the market is open.
+        "alpaca" => Budget { daily: 3_000, gap: 1, ttl: 300 },
         _ => Budget { daily: 2_000, gap: 1, ttl: 43_200 },
     }
 }
@@ -42,6 +50,8 @@ pub fn env_name(provider: &str) -> &'static str {
         "sec" => "SEC_CONTACT_EMAIL",
         "ais" => "AISSTREAM_API_KEY",
         "finnhub" => "FINNHUB_API_KEY",
+        "alpaca" => "ALPACA_API_KEY_ID",
+        "alpacasecret" => "ALPACA_API_SECRET_KEY",
         _ => "FRED_API_KEY",
     }
 }
@@ -61,6 +71,11 @@ pub struct Credentials {
     pub ais: String,
     #[serde(default)]
     pub finnhub: String,
+    /// Alpaca market data: key ID and secret, sent only as request headers.
+    #[serde(default)]
+    pub alpaca: String,
+    #[serde(default)]
+    pub alpacasecret: String,
 }
 
 impl Credentials {
@@ -72,6 +87,8 @@ impl Credentials {
             "sec" => &self.sec,
             "ais" => &self.ais,
             "finnhub" => &self.finnhub,
+            "alpaca" => &self.alpaca,
+            "alpacasecret" => &self.alpacasecret,
             _ => "",
         }
     }
@@ -93,13 +110,24 @@ impl Credentials {
             "fred" => self.fred = key,
             "ais" => self.ais = key,
             "finnhub" => self.finnhub = key,
+            "alpaca" => self.alpaca = key,
+            "alpacasecret" => self.alpacasecret = key,
             _ => return Err("Unknown provider".into()),
         }
         Ok(())
     }
     pub fn from_env() -> Self {
         let read = |p: &str| std::env::var(env_name(p)).unwrap_or_default().trim().to_string();
-        Credentials { alpha: read("alpha"), twelve: read("twelve"), fred: read("fred"), sec: read("sec"), ais: read("ais"), finnhub: read("finnhub") }
+        Credentials {
+            alpha: read("alpha"),
+            twelve: read("twelve"),
+            fred: read("fred"),
+            sec: read("sec"),
+            ais: read("ais"),
+            finnhub: read("finnhub"),
+            alpaca: read("alpaca"),
+            alpacasecret: read("alpacasecret"),
+        }
     }
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
@@ -154,44 +182,118 @@ pub fn validate(provider: &str, kind: &str, symbol: &str) -> Result<(), String> 
     {
         return Err("Invalid identifier".into());
     }
+    // Finnhub's free REST data and Alpaca's free trades cover US listings.
+    if (provider == "finnhub" || provider == "alpaca") && symbol.contains(':') {
+        return Err("This source covers US-listed stocks only.".into());
+    }
     let ok = match provider {
         "alpha" => ALPHA_KINDS.contains(&kind),
-        "twelve" => kind == "TIME_SERIES",
+        "twelve" => kind == "TIME_SERIES" || kind == "TIME_SERIES_1MIN",
         "fred" => kind == "observations",
+        "finnhub" => FINNHUB_KINDS.contains(&kind),
+        "alpaca" => kind == "trades",
         _ => false,
     };
     if ok { Ok(()) } else { Err("Unsupported dataset".into()) }
 }
 
-pub fn request(provider: &str, kind: &str, symbol: &str, key: &str) -> (&'static str, Vec<(String, String)>) {
+/// One provider request: URL, query and headers.
+pub struct Request {
+    pub url: String,
+    pub query: Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Calendar date (UTC) for Unix seconds, from Howard Hinnant's days-to-civil.
+fn civil(secs: i64) -> (i64, i64, i64, i64) {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d, tod)
+}
+pub fn ymd(secs: i64) -> String {
+    let (y, m, d, _) = civil(secs);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+pub fn rfc3339(secs: i64) -> String {
+    let (_, _, _, t) = civil(secs);
+    format!("{}T{:02}:{:02}:{:02}Z", ymd(secs), t / 3600, t / 60 % 60, t % 60)
+}
+
+/// Builds the request. `key` for Alpaca is "KEYID:SECRET"; `now` is Unix
+/// seconds, used for date windows.
+pub fn request(provider: &str, kind: &str, symbol: &str, key: &str, now: i64) -> Request {
     let q = |pairs: &[(&str, &str)]| pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let plain = |url: &str, query: Vec<(String, String)>| Request { url: url.to_string(), query, headers: vec![] };
+    const DAY: i64 = 86_400;
     match provider {
-        "fred" => (
+        "fred" => plain(
             "https://api.stlouisfed.org/fred/series/observations",
             q(&[("series_id", symbol), ("api_key", key), ("file_type", "json"), ("sort_order", "desc"), ("limit", "500")]),
         ),
         // Listings outside the US are keyed SYMBOL:MIC (VOD:XLON).
-        "twelve" => match symbol.split_once(':') {
-            Some((s, mic)) => (
-                "https://api.twelvedata.com/time_series",
-                q(&[("symbol", s), ("mic_code", mic), ("interval", "1day"), ("outputsize", "1300"), ("apikey", key)]),
-            ),
-            None => (
-                "https://api.twelvedata.com/time_series",
-                q(&[("symbol", symbol), ("interval", "1day"), ("outputsize", "1300"), ("apikey", key)]),
-            ),
-        },
+        "twelve" => {
+            let (interval, size) = if kind == "TIME_SERIES_1MIN" { ("1min", "390") } else { ("1day", "1300") };
+            match symbol.split_once(':') {
+                Some((s, mic)) => plain(
+                    "https://api.twelvedata.com/time_series",
+                    q(&[("symbol", s), ("mic_code", mic), ("interval", interval), ("outputsize", size), ("apikey", key)]),
+                ),
+                None => plain(
+                    "https://api.twelvedata.com/time_series",
+                    q(&[("symbol", symbol), ("interval", interval), ("outputsize", size), ("apikey", key)]),
+                ),
+            }
+        }
+        "finnhub" => {
+            let base = "https://finnhub.io/api/v1";
+            match kind {
+                "company-news" => plain(&format!("{base}/company-news"), q(&[("symbol", symbol), ("from", &ymd(now - 7 * DAY)), ("to", &ymd(now)), ("token", key)])),
+                "metric" => plain(&format!("{base}/stock/metric"), q(&[("symbol", symbol), ("metric", "all"), ("token", key)])),
+                "profile2" => plain(&format!("{base}/stock/profile2"), q(&[("symbol", symbol), ("token", key)])),
+                _ => plain(&format!("{base}/calendar/earnings"), q(&[("symbol", symbol), ("from", &ymd(now - 400 * DAY)), ("to", &ymd(now + 120 * DAY)), ("token", key)])),
+            }
+        }
+        // The newest IEX trades of the last six days. The free plan can't
+        // read the latest 15 minutes, so the window ends 16 minutes ago.
+        "alpaca" => {
+            let (id, secret) = key.split_once(':').unwrap_or((key, ""));
+            Request {
+                url: format!("https://data.alpaca.markets/v2/stocks/{symbol}/trades"),
+                query: q(&[("feed", "iex"), ("sort", "desc"), ("limit", "10000"), ("start", &rfc3339(now - 6 * DAY)), ("end", &rfc3339(now - 16 * 60))]),
+                headers: vec![("APCA-API-KEY-ID".into(), id.into()), ("APCA-API-SECRET-KEY".into(), secret.into())],
+            }
+        }
         _ => {
             let field = if kind == "NEWS_SENTIMENT" { "tickers" } else { "symbol" };
-            ("https://www.alphavantage.co/query", q(&[("function", kind), (field, symbol), ("apikey", key)]))
+            plain("https://www.alphavantage.co/query", q(&[("function", kind), (field, symbol), ("apikey", key)]))
         }
+    }
+}
+
+pub fn display_name(provider: &str) -> &'static str {
+    match provider {
+        "alpha" => "Alpha Vantage",
+        "twelve" => "Twelve Data",
+        "finnhub" => "Finnhub",
+        "alpaca" => "Alpaca",
+        _ => "FRED",
     }
 }
 
 fn clip(message: &str, key: &str) -> String {
     let mut m = message.trim().to_string();
-    if key.len() >= 6 {
-        m = m.replace(key, "***");
+    for part in key.split(':') {
+        if part.len() >= 6 {
+            m = m.replace(part, "***");
+        }
     }
     m.chars().take(300).collect()
 }
@@ -199,7 +301,7 @@ fn clip(message: &str, key: &str) -> String {
 /// Turns a provider body into data or a readable error. Providers often return
 /// HTTP 200 with an error payload, so the body is checked either way.
 pub fn interpret(provider: &str, kind: &str, http: u16, body: &str, key: &str) -> Result<Value, String> {
-    let name = match provider { "alpha" => "Alpha Vantage", "twelve" => "Twelve Data", _ => "FRED" };
+    let name = display_name(provider);
     if provider == "alpha" && kind == "EARNINGS_CALENDAR" && (200..300).contains(&http) && !body.trim_start().starts_with('{') {
         return Ok(json!({ "csv": body }));
     }
@@ -208,9 +310,12 @@ pub fn interpret(provider: &str, kind: &str, http: u16, body: &str, key: &str) -
         if provider == "twelve" && d.get("status").and_then(Value::as_str) == Some("error") {
             return d.get("message").and_then(Value::as_str).map(str::to_string);
         }
-        ["Error Message", "Information", "Note", "error_message"]
-            .iter()
-            .find_map(|k| d.get(*k).and_then(Value::as_str).map(str::to_string))
+        let keys: &[&str] = match provider {
+            "finnhub" => &["error"],
+            "alpaca" => &["message"],
+            _ => &["Error Message", "Information", "Note", "error_message"],
+        };
+        keys.iter().find_map(|k| d.get(*k).and_then(Value::as_str).map(str::to_string))
     });
     if let Some(m) = message {
         return Err(format!("{name}: {}", clip(&m, key)));
@@ -261,12 +366,36 @@ mod tests {
         assert!(validate("twelve", "OVERVIEW", "AAPL").is_err());
         assert!(validate("twelve", "TIME_SERIES", "VOD:XLON").is_ok());
         assert!(validate("twelve", "TIME_SERIES", "M&M:XNSE").is_ok());
-        let (_, q) = request("twelve", "TIME_SERIES", "VOD:XLON", "k");
-        assert!(q.contains(&("symbol".into(), "VOD".into())) && q.contains(&("mic_code".into(), "XLON".into())));
+        let r = request("twelve", "TIME_SERIES", "VOD:XLON", "k", 0);
+        assert!(r.query.contains(&("symbol".into(), "VOD".into())) && r.query.contains(&("mic_code".into(), "XLON".into())));
+        assert!(validate("finnhub", "company-news", "AAPL").is_ok());
+        assert!(validate("finnhub", "quote", "AAPL").is_err());
+        assert!(validate("finnhub", "metric", "VOD:XLON").is_err());
+        assert!(validate("alpaca", "trades", "AAPL").is_ok());
+        assert!(validate("twelve", "TIME_SERIES_1MIN", "AAPL").is_ok());
         assert!(validate("alpha", "OVERVIEW", "BRK.B").is_ok());
         assert!(validate("fred", "observations", "DGS10").is_ok());
         assert!(validate("alpha", "OVERVIEW", "AAPL&apikey=x").is_err());
         assert!(validate("other", "x", "AAPL").is_err());
+    }
+    #[test]
+    fn dates_and_new_provider_requests() {
+        // 2026-11-07 18:30:05 UTC
+        let now = 1_794_076_205;
+        assert_eq!(ymd(now), "2026-11-07");
+        assert_eq!(rfc3339(now), "2026-11-07T18:30:05Z");
+        assert_eq!(ymd(0), "1970-01-01");
+        assert_eq!(ymd(951_782_400), "2000-02-29");
+        let n = request("finnhub", "company-news", "AAPL", "FK", now);
+        assert_eq!(n.url, "https://finnhub.io/api/v1/company-news");
+        assert!(n.query.contains(&("from".into(), "2026-10-31".into())) && n.query.contains(&("to".into(), "2026-11-07".into())));
+        let t = request("alpaca", "trades", "AAPL", "ID123:SECRET456", now);
+        assert_eq!(t.url, "https://data.alpaca.markets/v2/stocks/AAPL/trades");
+        assert!(t.query.contains(&("feed".into(), "iex".into())) && t.query.contains(&("end".into(), "2026-11-07T18:14:05Z".into())));
+        assert!(t.headers.contains(&("APCA-API-SECRET-KEY".into(), "SECRET456".into())));
+        assert!(!t.query.iter().any(|(_, v)| v.contains("SECRET")), "secret must not be in the URL");
+        let m = request("twelve", "TIME_SERIES_1MIN", "AAPL", "k", now);
+        assert!(m.query.contains(&("interval".into(), "1min".into())));
     }
     #[test]
     fn surfaces_provider_messages_without_the_key() {
@@ -279,6 +408,11 @@ mod tests {
         assert!(interpret("fred", "observations", 500, "oops", "k").unwrap_err().contains("HTTP 500"));
         assert!(interpret("alpha", "EARNINGS_CALENDAR", 200, "symbol,name\nA,B", "k").unwrap()["csv"].is_string());
         assert!(interpret("twelve", "TIME_SERIES", 200, r#"{"values":[],"status":"ok"}"#, "k").is_ok());
+        let e = interpret("finnhub", "metric", 403, r#"{"error":"You don't have access to this resource."}"#, "k").unwrap_err();
+        assert_eq!(e, "Finnhub: You don't have access to this resource.");
+        let e = interpret("alpaca", "trades", 403, r#"{"message":"forbidden for ID123456"}"#, "ID123456:SECRET789").unwrap_err();
+        assert_eq!(e, "Alpaca: forbidden for ***");
+        assert!(interpret("finnhub", "company-news", 200, r#"[{"headline":"x"}]"#, "k").unwrap().is_array());
     }
 }
 
@@ -287,8 +421,8 @@ mod contract_tests {
     use super::*;
     async fn call(provider: &str, kind: &str, symbol: &str, key: &str) -> Result<Value, String> {
         let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap();
-        let (url, query) = request(provider, kind, symbol, key);
-        let resp = client.get(url).query(&query).send().await.map_err(|e| e.to_string())?;
+        let r = request(provider, kind, symbol, key, 0);
+        let resp = client.get(&r.url).query(&r.query).send().await.map_err(|e| e.to_string())?;
         let http = resp.status().as_u16();
         interpret(provider, kind, http, &resp.text().await.unwrap(), key)
     }
