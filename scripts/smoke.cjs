@@ -76,6 +76,27 @@ function fakeBackend() {
         .filter((p) => p.time > (since || 0) && !window.__noLivePrints);
       return { symbol, streaming: (window.__quoteSymbols || []).includes(symbol), prints };
     },
+    // S&P 500 market map: built on request, then served as a snapshot.
+    market_status: () => ({ built: window.__marketBuilt || null, job: { running: false, stage: "", done: 0, total: 0, error: "", finished: 0 } }),
+    market_refresh: () => {
+      window.__marketBuilt = Math.floor(Date.now() / 1000);
+    },
+    market_snapshot: () => {
+      if (!window.__marketBuilt) return null;
+      const sectors = ["Information Technology", "Financials", "Health Care", "Energy"];
+      const tiles = Array.from({ length: 40 }, (_, i) => ({
+        symbol: i === 0 ? "AAPL" : i === 1 ? "MSFT" : "T" + i,
+        name: i === 0 ? "Apple Inc." : i === 1 ? "Microsoft" : "Test " + i,
+        sector: sectors[i % 4],
+        industry: "Fixture industry",
+        price: 100 + i,
+        date: "2026-11-06",
+        returns: { d1: (i % 7) / 100 - 0.03, w1: 0.01, m1: 0.02, m3: 0.03, ytd: 0.1, y1: 0.2 },
+        cap: i === 0 ? 4e12 : 1e11 / (i + 1),
+        shares_date: "2026-10-20",
+      }));
+      return { source: "alpaca", built: window.__marketBuilt, date: "2026-11-06", complete: true, members: 40, tiles };
+    },
     ais_stop: () => {
       window.__aisArea = null;
     },
@@ -373,6 +394,21 @@ async function liveFlow(browser, errors) {
   await page.click("#search-results .combo-item:has-text('Vodafone')");
   await page.waitForSelector(".stock-head h1:has-text('VOD:XLON')");
   if (!(await page.locator(".head-price").innerText()).includes("GBp")) throw Error("Local currency not shown");
+  // Screener: the S&P 500 market map; a tile opens that company's stock page.
+  await page.click('[data-page="Screener"]');
+  await page.waitForSelector(".mm-tile[data-symbol='AAPL']", { timeout: 10000 });
+  if ((await page.locator(".mm-tile").count()) !== 40) throw Error("Market map tiles missing");
+  const big = await page.locator(".mm-tile[data-symbol='AAPL']").boundingBox();
+  const small = await page.locator(".mm-tile[data-symbol='T39']").boundingBox();
+  if (!(big.width * big.height > 20 * small.width * small.height)) throw Error("Tiles not sized by market cap");
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on market map");
+  await page.selectOption('[data-screen-field="mapPeriod"]', "ytd");
+  await page.waitForSelector("h3:has-text('Top gainers · Year to date')");
+  await page.click(".mm-tile[data-symbol='MSFT']");
+  await page.waitForSelector(".stock-head h1:has-text('MSFT')");
+  await page.click('[data-page="Screener"]');
+  await page.click('[data-action="screen-universe"][data-value="workspace"]');
+  await page.waitForSelector("text=Visual screener");
   await context.close();
 }
 const server = spawn(

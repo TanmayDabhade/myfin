@@ -89,6 +89,15 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 - Time and sales: live prints come from the Finnhub stream. When the market is closed, or before live prints arrive, the most recent session shows instead: the newest 10,000 trades on the IEX exchange from Alpaca's free plan (IEX is a small share of all volume, and the latest 15 minutes aren't available), or, without an Alpaca key, that session's 1-minute bars from Twelve Data. Buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because free feeds have no bid/ask. There is no order book (market depth) on free data.
 - Ownership changes are disclosures as of their filing dates: 13F appears up to 45 days after quarter end, Forms 4 within two business days of the trade.
 
+## Market map (Screener)
+
+**Screener** opens on a heatmap of every S&P 500 company, grouped by sector. Tile area is market cap and colour is the change over the chosen horizon (1 day, 1 week, 1 month, 3 months, year to date, 1 year). Click any tile, or a row in Top gainers / Top losers, to open that company's stock page. **Your workspace** switches to the screener for the stocks in your workspace.
+
+- Members, sectors and sub-industries come from the open [s-and-p-500-companies](https://github.com/datasets/s-and-p-500-companies) dataset.
+- Prices: with an Alpaca key, a year of split-adjusted daily bars for all members (IEX feed, about 20 requests), refreshed when older than 15 minutes. With only a Finnhub key, one quote per company inside the 60-a-minute limit (about 10 minutes for a full map; it fills in as it goes), today's change only, refreshed hourly.
+- Market cap = price × shares outstanding from SEC's XBRL frames (cover-page share counts for every filer in three requests, plus per-company lookups for multi-class companies). Share classes of one company (GOOGL, GOOG) split its cap evenly. Companies without a share count get a small tile.
+- Built in the background and cached in `market-lens.sqlite`, so the last map shows immediately on the next launch.
+
 ## SEC filing discovery
 
 - **Stock page → Filings (CF)** lists recent 10-K, 10-Q, 8-K and similar filings with links, plus annual revenue and year-over-year growth from XBRL company facts (latest restatement per period). No key needed. The company's CIK comes from Alpha Vantage, the relationship graph or SEC's company list.
@@ -122,7 +131,7 @@ The **Universe** page and the sidebar search cover every stock and ETF in Twelve
 | Description, chart, financials, news (on the stock page) | Candlestick/line chart, volume, hover inspection, wheel zoom, time ranges, MA20/MA50, normalized comparison overlay, chart SVG export, source/date labels, company profile, ratios, annual/quarterly statements, linked news, earnings calendar, dividend metadata, EDGAR link, saved thesis |
 | Trade | Buy/sell beside chart, fractional shares, fees, manual slippage, rationale, execution markers, chronological ledger, cash/position checks, separate demo/market accounts, CSV journal |
 | Portfolio | Holdings, average cost, cash, realized/unrealized P&L, allocation, historical paper-equity curve, volatility, drawdown, per-asset Sharpe, correlation matrix, uniform price-shock scenario, benchmark context, position export |
-| Screener | Local-universe P/E, growth and sector filters, saved screens, result export, peer comparison |
+| Screener | S&P 500 market map (treemap by sector, tiles sized by market cap, coloured by 1-day to 1-year change, top gainers/losers; click a company to open its stock page) and the workspace screener: P/E, growth and sector filters, saved screens, result export |
 | Valuation (on the stock page) | Inputs pre-filled from SEC XBRL filings with sources, five-year unlevered DCF, bear/base/bull cases, terminal growth, net debt, diluted shares, discount/growth sensitivity, model export |
 | Economy | FRED CPI, unemployment, policy rate, 2Y/10Y Treasury yields and real GDP, loaded automatically, with source links and history charts |
 | Alerts | Persistent above/below price conditions; latching status; reevaluated on workspace load and stored-data changes |

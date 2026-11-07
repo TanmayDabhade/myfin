@@ -218,6 +218,9 @@ fn civil(secs: i64) -> (i64, i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (yoe + era * 400 + i64::from(m <= 2), m, d, tod)
 }
+pub fn civil_date(secs: i64) -> (i64, i64, i64, i64) {
+    civil(secs)
+}
 pub fn ymd(secs: i64) -> String {
     let (y, m, d, _) = civil(secs);
     format!("{y:04}-{m:02}-{d:02}")

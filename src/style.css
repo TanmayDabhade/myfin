@@ -1070,3 +1070,17 @@ table.tape tr.big td { font-weight: 650; color: #fff; }
 }
 .sh-actions .tag { align-self: center; }
 .tape-label { font-size: 11px; color: #8a8a8a; margin: 0 0 8px; }
+
+/* ---- Market map */
+.screen-universe { display: flex; gap: 6px; margin-bottom: 16px; }
+.screen-universe button { font-size: 12px; padding: 7px 14px; border-radius: 999px; background: #111; border-color: #262626; }
+.screen-universe button.active { background: #fff; color: #000; border-color: #fff; }
+.mm-wrap { position: relative; width: 100%; overflow: hidden; border-radius: 6px; background: #050505; margin: 6px 0 10px; }
+.mm-sector { position: absolute; height: 17px; padding: 1px 6px; font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; color: #bdbdbd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.mm-tile { position: absolute; border: 0; border-radius: 0; padding: 0; color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; line-height: 1.15; text-shadow: 0 1px 2px #0008; }
+.mm-tile b { font-weight: 650; }
+.mm-tile span { font-size: 0.72em; opacity: 0.92; font-variant-numeric: tabular-nums; }
+.mm-tile:hover { outline: 2px solid #fff; z-index: 2; filter: brightness(1.15); }
+.mm-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 18px; }
+.mm-legend span { font-size: 10.5px; padding: 3px 8px; color: #fff; border-radius: 3px; font-variant-numeric: tabular-nums; }
+.mm-legend small { margin-left: 10px; }

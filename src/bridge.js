@@ -55,3 +55,7 @@ export const universeSearch = (q, limit = 10) => call("universe_search", { q, li
 export const universeBrowse = (f) => call("universe_browse", f);
 export const universeFacets = () => call("universe_facets");
 export const universeGet = (key) => call("universe_get", { key });
+// S&P 500 market map, built in the background by the desktop app.
+export const marketStatus = () => call("market_status");
+export const marketRefresh = () => call("market_refresh");
+export const marketSnapshot = () => call("market_snapshot");

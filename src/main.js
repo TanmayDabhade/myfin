@@ -18,6 +18,7 @@ import {
 } from "./relationships.js";
 import {
   screenerView,
+  marketMapView,
   screenRows,
   defaults as screenDefaults,
 } from "./screener.js";
@@ -82,6 +83,9 @@ import {
   universeBrowse,
   universeFacets,
   universeGet,
+  marketStatus,
+  marketRefresh,
+  marketSnapshot,
 } from "./bridge.js";
 import {
   providers,
@@ -466,7 +470,7 @@ let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    if (inGraph()) render();
+    if (inGraph() || page === "Screener") render();
     else drawCharts();
   }, 150);
 });
@@ -494,7 +498,8 @@ function render() {
   drawCharts();
   // One corrective pass at most (a scrollbar appearing could otherwise loop).
   const g = document.querySelector(".relationship-graph");
-  if (!fixingWidth && g && Math.abs(Math.max(760, g.clientWidth - 2) - lastGraphWidth) > 4) {
+  const mm = document.querySelector(".mm-wrap");
+  if (!fixingWidth && ((g && Math.abs(Math.max(760, g.clientWidth - 2) - lastGraphWidth) > 4) || (mm && Math.abs(mm.clientWidth - lastMapWidth) > 4))) {
     fixingWidth = true;
     render();
     fixingWidth = false;
@@ -832,7 +837,8 @@ function jobLine(job, idle = "") {
 }
 function paintJobs() {
   document.querySelectorAll("[data-job]").forEach((el) => {
-    el.innerHTML = jobLine(el.dataset.job === "holdings" ? refStatus?.job : uniStatus?.job);
+    const j = el.dataset.job;
+    el.innerHTML = jobLine(j === "holdings" ? refStatus?.job : j === "market" ? marketInfo?.job : uniStatus?.job);
   });
 }
 async function readReference() {
@@ -2278,7 +2284,73 @@ function filtered() {
 function screenConfig() {
   return ((state.visualScreens ||= {})[state.mode] ||= { ...screenDefaults });
 }
+// ---- Screener: the S&P 500 market map, or your workspace -----------------
+let marketSnap = null, // latest map snapshot from the desktop app
+  marketInfo = null, // { built, job }
+  marketTimer = null,
+  marketError = "",
+  marketChecked = 0,
+  lastMapWidth = 0;
+const screenUniverse = () => screenConfig().universe || (native ? "sp500" : "workspace");
+function mapWidth() {
+  const el = document.querySelector(".mm-wrap") || document.querySelector(".content");
+  const w = el?.classList.contains("mm-wrap") ? el.clientWidth : (el?.clientWidth || window.innerWidth - 260) - 42;
+  return (lastMapWidth = Math.max(320, Math.round(w)));
+}
+async function readMarket(full = false) {
+  try {
+    marketInfo = await marketStatus();
+    if (full || (marketInfo.built && marketInfo.built !== marketSnap?.built)) marketSnap = await marketSnapshot();
+  } catch (e) {
+    marketError = message(e);
+  }
+}
+// Rebuilds the map when it's missing or old (15 minutes with every horizon,
+// an hour for Finnhub's slower quote-by-quote build), then polls while it runs.
+async function ensureMarket(force = false) {
+  if (!native) return;
+  if (!marketInfo) await readMarket(true);
+  const age = Date.now() / 1000 - (marketInfo?.built || 0);
+  const maxAge = marketSnap?.source === "finnhub" ? 3600 : 900;
+  if ((force || age > maxAge) && !marketInfo?.job?.running && live() && (hasAlpaca() || hasKey("finnhub"))) {
+    try {
+      await marketRefresh();
+      marketError = "";
+    } catch (e) {
+      marketError = message(e);
+    }
+    await readMarket();
+  }
+  if (marketTimer || !marketInfo?.job?.running) return refresh();
+  let tick = 0;
+  marketTimer = setInterval(async () => {
+    await readMarket(++tick % 5 === 0);
+    paintJobs();
+    if (marketInfo?.job?.running && tick % 5) return;
+    if (!marketInfo?.job?.running) {
+      clearInterval(marketTimer);
+      marketTimer = null;
+      await readMarket(true);
+    }
+    if (page === "Screener") refresh();
+  }, 1000);
+}
+function marketPanel() {
+  if (!native) return `<section class="panel">${empty("The S&P 500 market map loads in the desktop app.")}</section>`;
+  const job = marketInfo?.job;
+  const status = `<div class="job-line" data-job="market">${jobLine(job)}</div>`;
+  if (marketSnap?.tiles?.length) return (job?.running ? `<p class="muted">Updating the map…</p>${status}` : "") + marketMapView(marketSnap, screenConfig(), mapWidth());
+  if (!hasAlpaca() && !hasKey("finnhub"))
+    return `<section class="panel"><div class="empty">The market map needs a free Alpaca key (every horizon) or a Finnhub key (today's change).<br>${button("Add one in Settings", "goto-settings", "primary")}</div></section>`;
+  if (state.mode !== "market") return `<section class="panel">${empty("Switch to Live data to load the S&P 500 market map.")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>S&amp;P 500 market map</h2>${job?.error || marketError ? button("Try again", "market-refresh", "primary") : ""}</div>${empty(esc(job?.error || marketError || "Building the market map: the S&P 500 list, shares outstanding from SEC, then prices."))}${status}</section>`;
+}
 function screener() {
+  const which = screenUniverse();
+  const tabs = `<div class="screen-universe">${button("S&amp;P 500 market map", "screen-universe", which === "sp500" ? "active" : "", 'data-value="sp500"')}${button(`Your workspace <small>${assets().length}</small>`, "screen-universe", which === "workspace" ? "active" : "", 'data-value="workspace"')}</div>`;
+  return tabs + (which === "sp500" ? marketPanel() : workspaceScreener());
+}
+function workspaceScreener() {
   return screenerView(
     assets(),
     screenConfig(),
@@ -2550,6 +2622,11 @@ function autoLoad() {
     loadOwnership(symbol);
   }
   if (page === "Universe") loadUniverse();
+  // Check the map's age at most once a minute while the Screener is open.
+  if (page === "Screener" && screenUniverse() === "sp500" && Date.now() - marketChecked > 60000) {
+    marketChecked = Date.now();
+    ensureMarket();
+  }
   if (!live()) return;
   const once = (key, job) => {
     if (attempted.has(key)) return;
@@ -2880,6 +2957,15 @@ async function action(act, value) {
     case "goto-trade":
       page = "Trade";
       render();
+      break;
+    case "screen-universe":
+      screenConfig().universe = value;
+      await persist();
+      render();
+      break;
+    case "market-refresh":
+      await ensureMarket(true);
+      notify("Rebuilding the S&P 500 market map…");
       break;
     case "own-filter":
       own.filter = value;
