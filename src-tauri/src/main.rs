@@ -6,10 +6,12 @@ mod ais;
 mod quotes;
 mod f13;
 mod universe;
+mod market;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -48,6 +50,7 @@ struct Job {
 struct Jobs {
     holdings: Job,
     universe: Job,
+    market: Job,
 }
 fn open_reference(path: &std::path::Path) -> rusqlite::Result<Connection> {
     let db = Connection::open(path)?;
@@ -328,7 +331,11 @@ async fn fetch_sec(
 type JobsRef = std::sync::Arc<Mutex<Jobs>>;
 fn set_job(jobs: &JobsRef, which: &str, f: impl FnOnce(&mut Job)) {
     if let Ok(mut j) = jobs.lock() {
-        f(if which == "holdings" { &mut j.holdings } else { &mut j.universe });
+        f(match which {
+            "holdings" => &mut j.holdings,
+            "market" => &mut j.market,
+            _ => &mut j.universe,
+        });
     }
 }
 fn sec_contact(b: &Backend) -> Result<String, String> {
@@ -787,6 +794,200 @@ fn quotes_snapshot(b: tauri::State<Backend>) -> Result<Value, String> {
     let rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
     Ok(json!({"status":rt.status,"error":rt.error,"lastMessage":rt.last_message,"symbols":rt.symbols,"quotes":rt.book.quotes}))
 }
+// ---- Market map: the S&P 500 by sector, market cap and returns -------------
+const MARKET_KEY: &str = "market:sp500";
+#[tauri::command]
+fn market_status(b: tauri::State<Backend>) -> Result<Value, String> {
+    let built: Option<i64> = b.db.lock().map_err(|_| "Database unavailable")?.query_row("SELECT stamp FROM cache WHERE id=?1", [MARKET_KEY], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+    let job = b.jobs.lock().map_err(|_| "Jobs unavailable")?.market.clone();
+    Ok(json!({"built":built,"job":job}))
+}
+#[tauri::command]
+fn market_snapshot(b: tauri::State<Backend>) -> Result<Value, String> {
+    let body: Option<String> = b.db.lock().map_err(|_| "Database unavailable")?.query_row("SELECT body FROM cache WHERE id=?1", [MARKET_KEY], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+    match body {
+        Some(b) => serde_json::from_str(&b).map_err(|e| e.to_string()),
+        None => Ok(Value::Null),
+    }
+}
+fn save_market(db_path: &std::path::Path, snapshot: &Value) -> Result<(), String> {
+    let db = Connection::open(db_path).map_err(|e| e.to_string())?;
+    db.busy_timeout(std::time::Duration::from_secs(10)).ok();
+    db.execute("INSERT INTO cache(id,body,stamp) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body,stamp=excluded.stamp", params![MARKET_KEY, snapshot.to_string(), now()])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+fn market_json(source: &str, members: &[market::Member], prices: &HashMap<String, (String, f64, market::Returns)>, shares: &HashMap<u64, (String, f64)>, complete: bool) -> Value {
+    let tiles = market::tiles(members, prices, shares);
+    let date = tiles.iter().map(|t| t.date.as_str()).max().unwrap_or("").to_string();
+    json!({"source":source,"built":now(),"date":date,"complete":complete,"members":members.len(),"tiles":tiles})
+}
+/// Rebuilds the market map in the background: the S&P 500 list, shares
+/// outstanding from SEC, then daily bars from Alpaca (every horizon) or
+/// quotes from Finnhub (today's change only, about 10 minutes for all).
+#[tauri::command]
+fn market_refresh(b: tauri::State<Backend>) -> Result<(), String> {
+    let (alpaca, finnhub, contact) = {
+        let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+        let r = |p: &str| providers::resolve(&b.env_keys, &saved, p).0.to_string();
+        let (id, secret) = (r("alpaca"), r("alpacasecret"));
+        (if id.is_empty() || secret.is_empty() { None } else { Some((id, secret)) }, r("finnhub"), r("sec"))
+    };
+    if alpaca.is_none() && finnhub.is_empty() {
+        return Err("The market map needs a free Alpaca key (every horizon) or a Finnhub key (today's change). Add one in Settings → Data sources.".into());
+    }
+    {
+        let mut j = b.jobs.lock().map_err(|_| "Jobs unavailable")?;
+        if j.market.running {
+            return Ok(());
+        }
+        j.market = Job { running: true, stage: "Downloading the S&P 500 list…".into(), ..Default::default() };
+    }
+    let (jobs, http, db_path) = (b.jobs.clone(), b.http.clone(), b.key_path.with_file_name("market-lens.sqlite"));
+    tauri::async_runtime::spawn(async move {
+        let result: Result<String, String> = async {
+            let get = |url: String| http.get(url);
+            let text = get(market::CONSTITUENTS_URL.into()).send().await.map_err(|_| "Could not download the S&P 500 list.".to_string())?;
+            if !text.status().is_success() {
+                return Err(format!("The S&P 500 list returned HTTP {}", text.status().as_u16()));
+            }
+            let members = market::parse_constituents(&text.text().await.map_err(|e| e.to_string())?)?;
+            // Shares outstanding: three quarterly frames, then each missing company.
+            set_job(&jobs, "market", |j| j.stage = "Reading shares outstanding from SEC…".into());
+            let ua = sec::user_agent(&contact);
+            let mut shares: HashMap<u64, (String, f64)> = HashMap::new();
+            for url in market::frame_urls(now()) {
+                if let Ok(r) = get(url).header(reqwest::header::USER_AGENT, &ua).send().await {
+                    if r.status().is_success() {
+                        if let Ok(v) = r.json::<Value>().await {
+                            market::merge_frame(&mut shares, &v);
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            let missing: Vec<u64> = {
+                let mut m: Vec<u64> = members.iter().map(|m| m.cik).filter(|c| *c > 0 && !shares.contains_key(c)).collect();
+                m.sort_unstable();
+                m.dedup();
+                m.into_iter().take(80).collect()
+            };
+            for cik in missing {
+                let url = format!("https://data.sec.gov/api/xbrl/companyconcept/CIK{cik:010}/dei/EntityCommonStockSharesOutstanding.json");
+                if let Ok(r) = get(url).header(reqwest::header::USER_AGENT, &ua).send().await {
+                    if r.status().is_success() {
+                        if let Some(x) = r.json::<Value>().await.ok().as_ref().and_then(market::concept_shares) {
+                            shares.insert(cik, x);
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            let mut prices: HashMap<String, (String, f64, market::Returns)> = HashMap::new();
+            let total = members.len() as u64;
+            if let Some((id, secret)) = &alpaca {
+                // Daily bars for 100 symbols per request, about 400 calendar days.
+                let start = providers::ymd(now() - 400 * 86_400);
+                for (i, chunk) in members.chunks(100).enumerate() {
+                    set_job(&jobs, "market", |j| {
+                        j.stage = "Loading daily prices from Alpaca…".into();
+                        j.done = (i * 100) as u64;
+                        j.total = total;
+                    });
+                    let symbols = chunk.iter().map(|m| m.symbol.as_str()).collect::<Vec<_>>().join(",");
+                    let mut closes: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+                    let mut token = String::new();
+                    for _ in 0..20 {
+                        let mut q = vec![("symbols", symbols.clone()), ("timeframe", "1Day".into()), ("start", start.clone()), ("limit", "10000".into()), ("adjustment", "split".into()), ("feed", "iex".into())];
+                        if !token.is_empty() {
+                            q.push(("page_token", token.clone()));
+                        }
+                        let r = get("https://data.alpaca.markets/v2/stocks/bars".into())
+                            .query(&q)
+                            .header("APCA-API-KEY-ID", id)
+                            .header("APCA-API-SECRET-KEY", secret)
+                            .send()
+                            .await
+                            .map_err(|_| "Could not reach Alpaca.".to_string())?;
+                        let code = r.status().as_u16();
+                        let v: Value = r.json().await.unwrap_or(Value::Null);
+                        if code != 200 {
+                            let m = v["message"].as_str().unwrap_or("request refused");
+                            return Err(format!("Alpaca: {} (HTTP {code})", m.replace(id.as_str(), "***")));
+                        }
+                        for (sym, bars) in v["bars"].as_object().into_iter().flatten() {
+                            let list = closes.entry(sym.clone()).or_default();
+                            for bar in bars.as_array().into_iter().flatten() {
+                                if let (Some(t), Some(c)) = (bar["t"].as_str(), bar["c"].as_f64()) {
+                                    list.push((t.chars().take(10).collect(), c));
+                                }
+                            }
+                        }
+                        match v["next_page_token"].as_str() {
+                            Some(t) if !t.is_empty() => token = t.to_string(),
+                            _ => break,
+                        }
+                    }
+                    for (sym, mut list) in closes {
+                        list.sort_by(|a, b| a.0.cmp(&b.0));
+                        list.dedup_by(|a, b| a.0 == b.0);
+                        if let Some((d, c)) = list.last().cloned() {
+                            prices.insert(sym, (d, c, market::returns(&list)));
+                        }
+                    }
+                }
+                save_market(&db_path, &market_json("alpaca", &members, &prices, &shares, true))?;
+            } else {
+                // Finnhub quotes, one per company, inside its 60-a-minute limit.
+                for (i, m) in members.iter().enumerate() {
+                    set_job(&jobs, "market", |j| {
+                        j.stage = "Loading today's prices from Finnhub…".into();
+                        j.done = i as u64;
+                        j.total = total;
+                    });
+                    for attempt in 0..2 {
+                        let r = get("https://finnhub.io/api/v1/quote".into()).query(&[("symbol", m.symbol.as_str()), ("token", finnhub.as_str())]).send().await;
+                        let Ok(r) = r else { break };
+                        if r.status().as_u16() == 429 && attempt == 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                        if r.status().as_u16() == 401 || r.status().as_u16() == 403 {
+                            return Err("Finnhub refused the key. Check it in Settings → Data sources.".into());
+                        }
+                        if let Ok(v) = r.json::<Value>().await {
+                            let (c, pc, t) = (v["c"].as_f64().unwrap_or(0.0), v["pc"].as_f64().unwrap_or(0.0), v["t"].as_i64().unwrap_or(0));
+                            if c > 0.0 {
+                                let d1 = (pc > 0.0).then(|| c / pc - 1.0);
+                                prices.insert(m.symbol.clone(), (providers::ymd(t), c, market::Returns { d1, ..Default::default() }));
+                            }
+                        }
+                        break;
+                    }
+                    if i % 25 == 24 {
+                        save_market(&db_path, &market_json("finnhub", &members, &prices, &shares, false))?;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                }
+                save_market(&db_path, &market_json("finnhub", &members, &prices, &shares, true))?;
+            }
+            Ok(format!("{} of {} companies priced", prices.len(), members.len()))
+        }
+        .await;
+        set_job(&jobs, "market", |j| {
+            j.running = false;
+            j.finished = now();
+            match result {
+                Ok(stage) => {
+                    j.stage = stage;
+                    j.error.clear();
+                }
+                Err(e) => j.error = e,
+            }
+        });
+    });
+    Ok(())
+}
 /// Time-and-sales prints for one streamed symbol newer than `since` (Unix ms).
 #[tauri::command]
 fn quotes_tape(b: tauri::State<Backend>, symbol: String, since: Option<i64>) -> Result<Value, String> {
@@ -879,5 +1080,5 @@ async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, k
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+        .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;std::fs::create_dir_all(&path)?;let db=Connection::open(path.join("market-lens.sqlite"))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }
