@@ -7,3 +7,4 @@ pub mod f13;
 pub mod universe;
 pub mod market;
 pub mod legacy;
+pub mod quant;

@@ -84,6 +84,7 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 | Ownership changes | `OWN` | One dated list of disclosed changes: the largest 13F fund moves last quarter, each 5%+ owner's latest 13D/G, insiders' open-market Form 4 buys and sales |
 | Suppliers & customers | `SPLC` (or `RELS`) | The relationship explorer, centred on the stock |
 | Valuation | `DCF` | Five-year DCF pre-filled from the company's SEC filings (cash flow − capital spending, debt − cash, shares outstanding, recent revenue growth), each input labelled with its source; your edits are saved per stock |
+| Risk analytics | `RSK` | Volatility, Sharpe, drawdown, beta and correlation vs SPY, RSI, z-score and Bollinger bands from Goldman Sachs' GS Quant, which ships with the app. See [Risk analytics (GS Quant)](#risk-analytics-gs-quant) |
 | Time & sales | `TAS` (or `QR`) | Trade prints (time, price, size, conditions) with VWAP, volume, largest print and a buy/sell estimate: live from the Finnhub stream, or the last session's when the market is closed |
 | Filings | `CF` | Recent 10-K, 10-Q, 8-K and similar filings |
 
@@ -93,6 +94,17 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 - Key statistics (P/E, profit margin, revenue growth, market cap, 52-week range) are calculated from the live price, the latest statements (trailing four quarters when available) and SEC shares outstanding, then fall back to Finnhub's and Alpha Vantage's figures. Each figure names its source; a loss-making company's P/E shows NM.
 - Time and sales: live prints come from the Finnhub stream. When the market is closed, or before live prints arrive, the most recent session shows instead: the newest 10,000 trades on the IEX exchange from Alpaca's free plan (IEX is a small share of all volume, and the latest 15 minutes aren't available), or, without an Alpaca key, that session's 1-minute bars from Twelve Data. Buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because free feeds have no bid/ask. There is no order book (market depth) on free data.
 - Ownership changes are disclosures as of their filing dates: 13F appears up to 45 days after quarter end, Forms 4 within two business days of the trade.
+
+## Risk analytics (GS Quant)
+
+The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldman Sachs' open-source Python toolkit, on the daily closes already in your workspace. The installers include their own Python 3.13 with gs-quant 2.2.5 and its dependencies (about 250–350 MB per platform; the universal Mac app carries both Mac builds), so there is nothing to install. On a Mac it needs macOS 12 or later (scipy's oldest Apple Silicon build); the rest of the app still runs on macOS 11.
+
+- **Building the bundle**: `node scripts/bundle-python.cjs` downloads a checksum-pinned standalone CPython ([python-build-standalone](https://github.com/astral-sh/python-build-standalone)), installs only the wheels whose SHA-256 hashes are in `src-tauri/python/requirements.lock` (`pip --require-hashes --no-deps`; regenerate with `node scripts/lock-python.cjs` after changing `constraints.txt`), removes test suites, precompiles everything, and checks the result by running the analysis script. CI runs it before every installer build (both Mac architectures on the Mac runner). Without it, a dev build looks for Python on your computer instead.
+- **Another Python**: **Settings → GS Quant → Choose Python…** or `APERTURE_PYTHON` uses a different interpreter with gs-quant installed (`python3 -m pip install gs-quant`), for example a newer gs-quant version.
+- **What it calculates**: 1-month, 3-month and 1-year annualized volatility, 1-year return, Sharpe ratio, maximum drawdown, distance below the 1-year high, 3-month and 1-year beta and 3-month correlation against SPY (when SPY is in the workspace), 14-day RSI, 3-month z-score and 20-day Bollinger bands. The view names the `gs_quant.timeseries` function behind each figure, and also shows charts of rolling volatility, drawdown and beta.
+- **Cash rate**: the Sharpe ratio uses the latest FRED fed funds rate once Economy has loaded it, and 0% until then.
+- **Offline only**: only `gs_quant.timeseries` functions that work on local data are used. Nothing is sent to Goldman Sachs and no Marquee account is needed. gs-quant's Marquee features (GS datasets, derivatives pricing, Sortino and drawdown-length reports) need institutional GS credentials and are not used.
+- **How it runs**: the desktop app runs a fixed script (`src-tauri/src/quant.py`) with `python -I -B`, passes the prices on stdin and validates the result. The page can't choose which program runs: it's the built-in Python, `APERTURE_PYTHON`, or one you pick in a file dialog.
 
 ## Market map (Screener)
 

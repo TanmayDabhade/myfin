@@ -95,6 +95,8 @@ import {
   stale,
 } from "./sources.js";
 import { sample } from "./sample.js";
+import { BENCHMARK, quantRequest, quantKey, fredRate, RISK_ROWS, formatRisk, bandPosition } from "./quant.js";
+import { quantStatus, quantChoose, quantForget, quantAnalyze } from "./bridge.js";
 import { applyTrade, nyDate } from "./live.js";
 import {
   risk,
@@ -1293,7 +1295,7 @@ function stockPage() {
 function stockGrid() {
   const tile = (code, body, cls = "") =>
     `<section class="panel tile ${cls}" data-tile="${code}"><div class="panel-head"><h2><button class="tile-title" data-action="stock-view" data-value="${code}">${viewLabel(code)}</button><kbd>${code}</kbd></h2><button class="icon" data-action="stock-view" data-value="${code}" title="Open ${viewLabel(code)}" aria-label="Open ${viewLabel(code)}">⤢</button></div>${body}</section>`;
-  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
+  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("RSK", riskTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
 }
 function stockBody() {
   const views = {
@@ -1305,6 +1307,7 @@ function stockBody() {
     OWN: ownershipView,
     SPLC: relationsView,
     DCF: valuation,
+    RSK: riskView,
     TAS: tapeView,
     CF: secPanel,
   };
@@ -2505,7 +2508,7 @@ function setup() {
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${quantPanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in aperture.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -2527,6 +2530,102 @@ function download(name, content, type = "text/plain") {
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+// ---- Risk analytics (GS Quant) ---------------------------------------------------
+// gs-quant runs in the Python built into the desktop app, or one the user
+// chooses (quant.rs).
+// Results live for the session and are recomputed when prices change.
+let quantEnv = null, // quant_status: { python, version, gsQuant, chosen, bundled, install } or { error }
+  quantChecking = null;
+const quantRuns = {}; // symbol -> { key, running } | { key, data, fed } | { key, error }
+function checkQuant(again = false) {
+  if (!native) return Promise.resolve(null);
+  if (quantChecking) return quantChecking;
+  quantChecking = quantStatus(again)
+    .then((s) => (quantEnv = s))
+    .catch((e) => (quantEnv = { error: message(e) }))
+    .finally(() => {
+      quantChecking = null;
+      refresh();
+    });
+  return quantChecking;
+}
+function runQuant(force = false) {
+  const a = stockAsset();
+  if (!native || !quantEnv?.gsQuant || !a?.bars?.length) return;
+  const bench = assets().find((x) => x.symbol === BENCHMARK) || null;
+  const fed = state.mode === "market" ? fredRate(state.macro.FEDFUNDS) : null;
+  const req = quantRequest(a.symbol, a.bars, bench, fed?.rate || 0);
+  const key = quantKey(req),
+    s = a.symbol,
+    prev = quantRuns[s];
+  if (prev?.running || (!force && prev?.key === key)) return;
+  quantRuns[s] = { key, running: true };
+  quantAnalyze(req)
+    .then((data) => (quantRuns[s] = { key, data, fed }))
+    .catch((e) => (quantRuns[s] = { key, error: message(e) }))
+    .finally(refresh);
+}
+const gsQuantLink = () => link("https://github.com/goldmansachs/gs-quant", "gs-quant on GitHub");
+// What's missing before analytics can run, or "" when ready.
+function quantBlocker(full) {
+  if (!native) return empty("Risk analytics run in the desktop app, which includes GS Quant.");
+  const e = quantEnv;
+  if (!e) return empty("Looking for Python and GS Quant…");
+  if (e.error) return empty(esc(e.error));
+  const actions = full ? `<div class="quant-actions">${button("Check again", "quant-check")}${button("Choose Python…", "quant-choose")}</div>` : "";
+  if (!e.python) return `<div class="empty">No Python 3 found. Install Python 3, then run<code class="cmd-line">${esc(e.install)}</code>${actions}</div>`;
+  if (!e.gsQuant) return `<div class="empty">GS Quant isn't installed for Python ${esc(e.version)}. Run<code class="cmd-line">${esc(e.install)}</code>${actions || "then open this panel."}</div>`;
+  return "";
+}
+function quantResult(full) {
+  const r = quantRuns[symbol];
+  if (!stockAsset()) return noStock();
+  if (!r || r.running) return empty(`Calculating with GS Quant…${full ? "<br><small>The first run on a computer can take longer while the system checks the library's files.</small>" : ""}`);
+  if (r.error) return `<div class="empty">${esc(r.error)}${full ? `<div class="quant-actions">${button("Try again", "quant-run")}${button("Choose Python…", "quant-choose")}</div>` : ""}</div>`;
+  return "";
+}
+function riskTile() {
+  const wait = quantBlocker(false) || quantResult(false);
+  if (wait) return wait;
+  const d = quantRuns[symbol].data,
+    m = d.metrics;
+  const cell = (label, kind, v, note) => `<div class="scenario"><span>${label}</span><strong>${formatRisk(kind, v)}</strong><small>${note}</small></div>`;
+  return `<div class="scenarios compact risk-cells">${cell("Volatility · 3M", "vol", m.vol3m, "annualized")}${cell("Sharpe · 1Y", "x", m.sharpe1y, "over cash")}${cell("Max drawdown · 1Y", "pct", m.maxDrawdown1y, "peak to trough")}${cell("Beta · 3M", "x", m.beta3m, d.benchmark ? "vs " + esc(d.benchmark) : "add " + BENCHMARK + " to compare")}</div>${spark(d.series.vol.map((x) => x[1]))}<small>Rolling 1-month volatility · GS Quant ${esc(d.gsQuant)}</small>`;
+}
+function riskChart(title, rows, kind) {
+  if (!rows?.length) return "";
+  return `<section class="macro-card"><h3>${title}</h3><strong>${formatRisk(kind, rows.at(-1)[1])}</strong><small>${esc(rows[0][0])} to ${esc(rows.at(-1)[0])}</small>${spark(rows.map((x) => x[1]))}</section>`;
+}
+function riskView() {
+  const ready = native && quantEnv?.gsQuant;
+  const head = `<div class="panel-head"><h2>Risk analytics · GS Quant</h2>${ready ? button("Recalculate", "quant-run") : ""}</div>`;
+  const about = `<p class="muted">Calculated on this computer by Goldman Sachs' open-source gs-quant library (gs_quant.timeseries), from the daily closes in this workspace. Only offline functions are used: nothing is sent to Goldman Sachs and no Marquee account is needed. ${gsQuantLink()}</p>`;
+  const wait = quantBlocker(true) || quantResult(true);
+  if (wait) return `<section class="panel">${head}${about}${wait}</section>`;
+  const r = quantRuns[symbol],
+    d = r.data,
+    m = d.metrics;
+  const rows = RISK_ROWS.map((x) => [
+    x.label,
+    `<b>${formatRisk(x.kind, m[x.key])}</b>`,
+    `<code>${esc(x.fn)}</code>`,
+    esc(x.bench ? (d.benchmark ? `vs ${d.benchmark}, daily returns` : `Add ${BENCHMARK} to the watchlist to compare against the market`) : x.note || ""),
+  ]);
+  const band = bandPosition(stockAsset()?.bars?.at(-1)?.close, m.bollingerLow, m.bollingerHigh);
+  if (m.bollingerLow != null)
+    rows.push(["Bollinger band · 20 days", `<b>${fmt(m.bollingerLow)} – ${fmt(m.bollingerHigh)}</b>`, "<code>bollinger_bands(x, 20, 2)</code>", band == null ? "" : `last close at ${Math.round(band * 100)}% of the band`]);
+  const rate = d.riskFree
+    ? `Sharpe uses the fed funds rate from FRED, ${pct(d.riskFree)}${r.fed?.date ? ` (${esc(r.fed.date)})` : ""}, as the cash rate.`
+    : `Sharpe uses a 0% cash rate${hasKey("fred") ? "; open Economy to load the fed funds rate" : ""}.`;
+  return `<section class="panel">${head}${about}${table(["Measure", "Value", "gs_quant.timeseries", "Notes"], rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`))}<small>${esc(d.points)} daily closes through ${esc(d.asOf)} · GS Quant ${esc(d.gsQuant)} · Python ${esc(d.python)}. ${rate} Prices are not adjusted for dividends.</small></section><div class="macro-grid risk-charts">${riskChart("Rolling volatility · 1 month", d.series.vol, "vol")}${riskChart("Below 1-year high", d.series.drawdown, "pct")}${riskChart(`Rolling beta vs ${esc(d.benchmark || BENCHMARK)} · 3 months`, d.series.beta, "x")}</div>`;
+}
+function quantPanel() {
+  const e = quantEnv;
+  const status = !e ? '<span class="pill">Checking…</span>' : e.gsQuant ? `<span class="pill on">GS Quant ${esc(e.gsQuant)}</span>` : '<span class="pill">Not installed</span>';
+  const where = e?.python ? `<p>Python ${esc(e.version)} · <code>${esc(e.python)}</code> · ${e.bundled ? "built into Aperture" : e.chosen ? "chosen by you" : "found automatically"}</p>` : e?.error ? `<p class="down">${esc(e.error)}</p>` : e ? "<p>No Python 3 found on this computer.</p>" : "";
+  const install = e && !e.gsQuant ? `<p>Install it with <code class="cmd-line">${esc(e.install)}</code>then press Check again. Using a virtual environment? Choose its Python.</p>` : "";
+  return `<section class="panel"><div class="panel-head"><h2>GS Quant ${status}</h2>${button("Check again", "quant-check")}${button("Choose Python…", "quant-choose")}${e?.chosen ? button("Find automatically", "quant-forget") : ""}</div><p>Risk analytics (<kbd>RSK</kbd> on each stock page) come from Goldman Sachs' open-source gs-quant library, which ships with Aperture in its own Python. Choose another Python here to use a different gs-quant version. Only its offline timeseries functions are used; nothing is sent to Goldman Sachs and no Marquee account is needed. Set <code>APERTURE_PYTHON</code> to point at a specific interpreter. ${gsQuantLink()}</p>${where}${install}</section>`;
 }
 // ---- Data loading -------------------------------------------------------
 // Every provider call goes through one queue so requests never pile up and
@@ -2632,6 +2731,11 @@ function autoLoad() {
     marketChecked = Date.now();
     ensureMarket();
   }
+  if (native && page === "Stock" && ["GRID", "RSK"].includes(v) && symbol) {
+    if (!quantEnv) checkQuant().then(() => runQuant());
+    else runQuant();
+  }
+  if (native && page === "Settings" && !quantEnv) checkQuant();
   if (!live()) return;
   const once = (key, job) => {
     if (attempted.has(key)) return;
@@ -3240,6 +3344,32 @@ async function action(act, value) {
     case "goto-settings":
       page = "Settings";
       render();
+      break;
+    case "quant-check":
+      checkQuant(true).then(() => runQuant(true));
+      break;
+    case "quant-choose":
+      quantChoose()
+        .then((s) => {
+          if (!s) return;
+          quantEnv = s;
+          notify(s.gsQuant ? `Using GS Quant ${s.gsQuant} from ${s.python}` : `GS Quant isn't installed for ${s.python}.`, !s.gsQuant);
+          runQuant(true);
+          render();
+        })
+        .catch((e) => notify(message(e), true));
+      break;
+    case "quant-forget":
+      quantForget()
+        .then((s) => {
+          quantEnv = s;
+          runQuant(true);
+          render();
+        })
+        .catch((e) => notify(message(e), true));
+      break;
+    case "quant-run":
+      runQuant(true);
       break;
     case "setup-connect":
     case "keys-save": {

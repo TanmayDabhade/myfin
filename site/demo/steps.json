@@ -38,12 +38,20 @@
       "image": "demo/05-valuation.jpg",
       "caption": "Valuation: a DCF pre-filled from the company's own SEC filings, each input sourced.",
       "click": {
-        "x": 1261,
+        "x": 1264,
         "y": 101
       }
     },
     {
-      "image": "demo/06-tape.jpg",
+      "image": "demo/06-risk.jpg",
+      "caption": "Risk analytics: volatility, Sharpe, drawdown and beta, calculated by Goldman Sachs' open-source GS Quant.",
+      "click": {
+        "x": 301,
+        "y": 138
+      }
+    },
+    {
+      "image": "demo/07-tape.jpg",
       "caption": "Time and sales: every trade print with VWAP and a buy/sell estimate, or the last session's when the market is closed.",
       "click": {
         "x": 1004,
@@ -51,7 +59,7 @@
       }
     },
     {
-      "image": "demo/07-relationships.jpg",
+      "image": "demo/08-relationships.jpg",
       "caption": "Suppliers and customers, traced from annual reports with the evidence attached.",
       "click": {
         "x": 105,
@@ -59,7 +67,7 @@
       }
     },
     {
-      "image": "demo/08-market-map.jpg",
+      "image": "demo/09-market-map.jpg",
       "caption": "The whole S&P 500 at a glance: sized by market cap, coloured by today's move.",
       "click": {
         "x": 629,
@@ -67,7 +75,7 @@
       }
     },
     {
-      "image": "demo/09-nvda.jpg",
+      "image": "demo/10-nvda.jpg",
       "caption": "Click any company to open its stock page.",
       "click": {
         "x": 105,
@@ -75,13 +83,13 @@
       }
     },
     {
-      "image": "demo/10-command.jpg",
+      "image": "demo/11-command.jpg",
       "caption": "Or type a terminal-style command: MSFT HDS.",
       "click": null,
       "key": "Enter"
     },
     {
-      "image": "demo/11-msft-holders.jpg",
+      "image": "demo/12-msft-holders.jpg",
       "caption": "Microsoft's holders, one keystroke later.",
       "click": null
     }
