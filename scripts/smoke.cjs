@@ -1,5 +1,6 @@
 const { chromium } = require("playwright");
 const { spawn } = require("child_process");
+const quantStandin = require("./quant-standin.cjs");
 // Stand-in for the Rust backend with fixed fake responses, so the desktop
 // data flow can be exercised in a browser without network or real keys.
 function fakeBackend() {
@@ -12,6 +13,10 @@ function fakeBackend() {
       return { datetime: d, open: String(c - 1), high: String(c + 2), low: String(c - 2), close: String(c), volume: "1000000" };
     }).reverse();
   const handlers = {
+    quant_status: (a) => window.__quantStandin.status(a),
+    quant_analyze: (a) => window.__quantStandin.analyze(a),
+    quant_choose: () => null,
+    quant_forget: (a) => window.__quantStandin.status(a),
     load_state: () => store("native-state"),
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
@@ -246,6 +251,7 @@ async function pickCompany(page, q) {
 }
 async function liveFlow(browser, errors) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  await context.addInitScript(quantStandin);
   await context.addInitScript(fakeBackend);
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
@@ -292,6 +298,15 @@ async function liveFlow(browser, errors) {
   await page.click('.fn-strip [data-value="DCF"]');
   if ((await page.inputValue("#fcf")) !== "108000" || (await page.inputValue("#netDebt")) !== "70000") throw Error("DCF inputs not taken from filings");
   if (!(await page.locator("#dcf-results").innerText()).includes("vs ")) throw Error("DCF not compared to the price");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".stock-grid");
+  // Risk analytics from GS Quant (stand-in backend).
+  await page.waitForSelector("[data-tile='RSK'] >> text=Rolling 1-month volatility", { timeout: 10000 });
+  await page.click('.fn-strip [data-value="RSK"]');
+  await page.waitForSelector("td:has-text('Volatility · 1 month')");
+  const rsk = await page.locator("main").innerText();
+  for (const t of ["volatility(x, 22)", "GS Quant 2.2.5", "Rolling volatility · 1 month", "Bollinger band"]) if (!rsk.includes(t)) throw Error("Risk analytics missing " + t);
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Risk analytics");
   await page.keyboard.press("Escape");
   await page.waitForSelector(".stock-grid");
   await page.click('.fn-strip [data-value="FA"]');
@@ -349,6 +364,7 @@ async function liveFlow(browser, errors) {
   await page.click('[data-page="Settings"]');
   if ((await page.locator(".pill.on").count()) < 3) throw Error("Connected sources not shown");
   if (!(await page.locator("body").innerText()).includes("SEC 13F institutional holdings")) throw Error("Reference data panel missing");
+  await page.waitForSelector(".pill.on:has-text('GS Quant 2.2.5')");
   // Terminal-style command: holders of any ticker.
   await page.fill("#search", "AAPL HDS");
   await page.press("#search", "Enter");

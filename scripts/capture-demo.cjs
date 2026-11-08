@@ -6,6 +6,7 @@ const { chromium } = require("playwright");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const quantStandin = require("./quant-standin.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const OUT = path.join(ROOT, "site", "demo");
@@ -106,6 +107,10 @@ function demoBackend(constituents) {
     return { source: "alpaca", built: Math.floor(Date.now() / 1000), date: "2026-11-06", complete: true, members: tiles.length, tiles };
   }
   const handlers = {
+    quant_status: (a) => window.__quantStandin.status(a),
+    quant_analyze: (a) => window.__quantStandin.analyze(a),
+    quant_choose: () => null,
+    quant_forget: (a) => window.__quantStandin.status(a),
     load_state: () => store("native-state"),
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
@@ -260,6 +265,7 @@ async function constituents() {
   await new Promise((r) => setTimeout(r, 1800));
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport: VIEW, deviceScaleFactor: 2 });
+  await context.addInitScript(quantStandin);
   await context.addInitScript(demoBackend, members);
   const page = await context.newPage();
   const errors = [];
@@ -305,7 +311,9 @@ async function constituents() {
     await shot("holders", "Holders: every fund that disclosed a position in SEC 13F filings, with what it bought or sold last quarter.", '.fn-strip [data-value="OWN"]');
     await page.waitForSelector("td.holder:has-text('Dana Whitfield')");
     await shot("ownership", "Ownership changes: fund moves, 5%+ owners and insider trades in one dated feed.", '.fn-strip [data-value="DCF"]');
-    await shot("valuation", "Valuation: a DCF pre-filled from the company's own SEC filings, each input sourced.", '.fn-strip [data-value="TAS"]');
+    await shot("valuation", "Valuation: a DCF pre-filled from the company's own SEC filings, each input sourced.", '.fn-strip [data-value="RSK"]');
+    await page.waitForSelector("td:has-text('Volatility · 1 month')");
+    await shot("risk", "Risk analytics: volatility, Sharpe, drawdown and beta, calculated by Goldman Sachs' open-source GS Quant.", '.fn-strip [data-value="TAS"]');
     await page.waitForSelector("#tape-slot table.tape");
     await shot("tape", "Time and sales: every trade print with VWAP and a buy/sell estimate, or the last session's when the market is closed.", '.fn-strip [data-value="SPLC"]');
     await page.waitForSelector(".g-node.center");

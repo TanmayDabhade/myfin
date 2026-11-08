@@ -81,6 +81,7 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 | Ownership changes | `OWN` | One dated list of disclosed changes: the largest 13F fund moves last quarter, each 5%+ owner's latest 13D/G, insiders' open-market Form 4 buys and sales |
 | Suppliers & customers | `SPLC` (or `RELS`) | The relationship explorer, centred on the stock |
 | Valuation | `DCF` | Five-year DCF pre-filled from the company's SEC filings (cash flow − capital spending, debt − cash, shares outstanding, recent revenue growth), each input labelled with its source; your edits are saved per stock |
+| Risk analytics | `RSK` | Volatility, Sharpe, drawdown, beta and correlation vs SPY, RSI, z-score and Bollinger bands from Goldman Sachs' GS Quant, run in your own Python. See [Risk analytics (GS Quant)](#risk-analytics-gs-quant) |
 | Time & sales | `TAS` (or `QR`) | Trade prints (time, price, size, conditions) with VWAP, volume, largest print and a buy/sell estimate: live from the Finnhub stream, or the last session's when the market is closed |
 | Filings | `CF` | Recent 10-K, 10-Q, 8-K and similar filings |
 
@@ -90,6 +91,21 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 - Key statistics (P/E, profit margin, revenue growth, market cap, 52-week range) are calculated from the live price, the latest statements (trailing four quarters when available) and SEC shares outstanding, then fall back to Finnhub's and Alpha Vantage's figures. Each figure names its source; a loss-making company's P/E shows NM.
 - Time and sales: live prints come from the Finnhub stream. When the market is closed, or before live prints arrive, the most recent session shows instead: the newest 10,000 trades on the IEX exchange from Alpaca's free plan (IEX is a small share of all volume, and the latest 15 minutes aren't available), or, without an Alpaca key, that session's 1-minute bars from Twelve Data. Buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because free feeds have no bid/ask. There is no order book (market depth) on free data.
 - Ownership changes are disclosures as of their filing dates: 13F appears up to 45 days after quarter end, Forms 4 within two business days of the trade.
+
+## Risk analytics (GS Quant)
+
+The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldman Sachs' open-source Python toolkit, on the daily closes already in your workspace. Python isn't bundled with the app, so install gs-quant once into any Python 3:
+
+```sh
+python3 -m pip install gs-quant
+```
+
+The app looks for Python on your PATH, in Homebrew, pyenv and conda locations, and in `APERTURE_PYTHON` if set. To use a virtual environment, pick its interpreter in **Settings → GS Quant → Choose Python…**. The first run after installing can take about a minute while Python compiles the library; later runs take a few seconds.
+
+- **What it calculates**: 1-month, 3-month and 1-year annualized volatility, 1-year return, Sharpe ratio, maximum drawdown, distance below the 1-year high, 3-month and 1-year beta and 3-month correlation against SPY (when SPY is in the workspace), 14-day RSI, 3-month z-score and 20-day Bollinger bands. The view names the `gs_quant.timeseries` function behind each figure, and also shows charts of rolling volatility, drawdown and beta.
+- **Cash rate**: the Sharpe ratio uses the latest FRED fed funds rate once Economy has loaded it, and 0% until then.
+- **Offline only**: only `gs_quant.timeseries` functions that work on local data are used. Nothing is sent to Goldman Sachs and no Marquee account is needed. gs-quant's Marquee features (GS datasets, derivatives pricing, Sortino and drawdown-length reports) need institutional GS credentials and are not used.
+- **How it runs**: the desktop app runs a fixed script (`src-tauri/src/quant.py`) with `python -I`, passes the prices on stdin and validates the result. The page can't choose which program runs: the interpreter is either found automatically or picked by you in a file dialog.
 
 ## Market map (Screener)
 

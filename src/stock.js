@@ -13,6 +13,7 @@ export const VIEWS = [
   { code: "OWN", label: "Ownership changes" },
   { code: "SPLC", label: "Suppliers & customers" },
   { code: "DCF", label: "Valuation" },
+  { code: "RSK", label: "Risk analytics" },
   { code: "TAS", label: "Time & sales" },
   { code: "CF", label: "Filings" },
 ];

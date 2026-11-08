@@ -65,3 +65,8 @@ export const universeGet = (key) => call("universe_get", { key });
 export const marketStatus = () => call("market_status");
 export const marketRefresh = () => call("market_refresh");
 export const marketSnapshot = () => call("market_snapshot");
+// Risk analytics from GS Quant, run by the user's Python in the desktop app.
+export const quantStatus = (refresh = false) => call("quant_status", { refresh });
+export const quantChoose = () => call("quant_choose");
+export const quantForget = () => call("quant_forget");
+export const quantAnalyze = (input) => call("quant_analyze", { input });
