@@ -305,14 +305,14 @@ export function checkAlerts(alerts, assets) {
     };
   });
 }
-// Workspace schema. v1 = Market Lens 0.1; v2 adds data sources, first-run
+// Workspace schema. v1 = 0.1 (then called Aperture); v2 adds data sources, first-run
 // state, SEC and commodity data. Older workspaces are upgraded in place.
 export const SCHEMA = 2;
 export function migrate(s) {
   if (!s || typeof s !== "object") return s;
   const from = s.schema || 1;
   if (from > SCHEMA)
-    throw Error("This workspace was saved by a newer Market Lens. Update the app to open it.");
+    throw Error("This workspace was saved by a newer version of Aperture. Update the app to open it.");
   if (from < 2) {
     s.sources ||= { prices: "twelve" };
     s.marketAssets ||= {};
@@ -360,7 +360,7 @@ export function validateWorkspace(s) {
     !s.accounts.sample ||
     !s.accounts.market
   )
-    throw Error("Not a Market Lens v1 backup.");
+    throw Error("Not an Aperture v1 backup.");
   for (const [symbol, a] of Object.entries({
     ...s.assets,
     ...s.marketAssets,

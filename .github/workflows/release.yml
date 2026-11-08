@@ -74,7 +74,7 @@ jobs:
               files = list(Path('src-tauri/target').glob('**/release/bundle/**/*' + ext))
               if len(files) != 1:
                   raise SystemExit(f'Expected one {ext} installer, got {len(files)}')
-              shutil.copy2(files[0], out / f'Market-Lens-{tag}-{platform}{ext}')
+              shutil.copy2(files[0], out / f'Aperture-{tag}-{platform}{ext}')
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -106,7 +106,7 @@ jobs:
           cd ..
           notes="docs/releases/${TAG}.md"
           {
-            if [ -f "$notes" ]; then cat "$notes"; else echo "Market Lens ${TAG}"; fi
+            if [ -f "$notes" ]; then cat "$notes"; else echo "Aperture ${TAG}"; fi
             echo
             echo "## Checksums (SHA-256)"
             echo
@@ -114,4 +114,4 @@ jobs:
             cat dist/SHA256SUMS.txt
             echo '```'
           } > release-notes.md
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "Market Lens ${TAG}" --notes-file release-notes.md --verify-tag
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "Aperture ${TAG}" --notes-file release-notes.md --verify-tag

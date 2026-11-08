@@ -1,4 +1,4 @@
-# Market Lens Desktop
+# Aperture
 
 **Website and product tour:** https://tanmaydabhade.github.io/myfin/
 
@@ -10,14 +10,14 @@ Tracks the newest PR build, ahead of releases:
 
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
-brew install --cask tanmaydabhade/myfin/market-lens-preview
+brew install --cask tanmaydabhade/myfin/aperture-preview
 ```
 
 To replace the installed app with the newer build:
 
 ```sh
 brew update
-brew upgrade --cask tanmaydabhade/myfin/market-lens-preview
+brew upgrade --cask tanmaydabhade/myfin/aperture-preview
 ```
 
 The cask uses versioned, checksum-verified universal Mac builds. These are unsigned/unnotarized previews of individual PRs. See [release behavior, activation, and install-or-upgrade command](docs/RELEASES.md). Windows and Linux installers are attached to each successful PR prerelease.
@@ -98,7 +98,7 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 - Members, sectors and sub-industries come from the open [s-and-p-500-companies](https://github.com/datasets/s-and-p-500-companies) dataset.
 - Prices: with an Alpaca key, a year of split-adjusted daily bars for all members (IEX feed, about 20 requests), refreshed when older than 15 minutes. With only a Finnhub key, one quote per company inside the 60-a-minute limit (about 10 minutes for a full map; it fills in as it goes), today's change only, refreshed hourly.
 - Market cap = price × shares outstanding from SEC's XBRL frames (cover-page share counts for every filer in three requests, plus per-company lookups for multi-class companies). Share classes of one company (GOOGL, GOOG) split its cap evenly. Companies without a share count get a small tile.
-- Built in the background and cached in `market-lens.sqlite`, so the last map shows immediately on the next launch.
+- Built in the background and cached in `aperture.sqlite`, so the last map shows immediately on the next launch.
 
 ## SEC filing discovery
 
@@ -144,7 +144,7 @@ The **Universe** page and the sidebar search cover every stock and ETF in Twelve
 - Rust handles provider HTTP requests, request accounting, response caching, native exports, and SQLite persistence.
 - Native paper trades are validated in Rust and appended within a SQLite transaction. The browser preview uses the tested JavaScript counterpart.
 - Analytics/chart rendering use small pure JavaScript functions. Rust is used for native operations and the trade execution boundary; this is not a claim that every calculation runs in Rust.
-- SQLite uses WAL mode. Tables contain the versioned workspace, raw response cache, and request timestamps. The database is in the OS application-data directory for `com.marketlens.desktop`.
+- SQLite uses WAL mode. Tables contain the versioned workspace, raw response cache, and request timestamps. The database is in the OS application-data directory for `com.aperture.desktop`. Data from before the rename (Market Lens, `com.marketlens.desktop`) is moved there on the first launch.
 - API keys are stored only in `credentials.json` (owner-only permissions) in the app-data folder, never in localStorage, SQLite, JSON backups or log messages. Provider error messages are shown with any key text masked. Keys are sent only to fixed HTTPS provider endpoints. Requests have a 20-second timeout and do not follow redirects.
 - Free-plan limits are enforced locally and requests are queued rather than rejected: Alpha Vantage 25/day, 13 s apart, reused for 6 h; Twelve Data 800/day, 8 s apart, reused for 1 h; Finnhub 1 s apart, reused for 30 min; Alpaca reused for 5 min; FRED reused for 12 h. Finnhub and Alpaca queue separately so they never wait behind Alpha Vantage. Failed calls count toward the budget. When a provider fails or the daily budget is spent, saved data is shown and marked stale.
 - Data loads automatically only from your own provider accounts and public APIs, within their free limits. No scraping, proxy rotation, key sharing, paywall bypass or quota evasion.

@@ -30,7 +30,7 @@ function fixture() {
     },
     artifacts: ["linux-x64", "windows-x64", "macos-universal"].map((p, i) => ({
       id: i + 1,
-      name: `Market-Lens-${p}`,
+      name: `Aperture-${p}`,
       size_in_bytes: 50,
       expired: false,
     })),
@@ -127,9 +127,9 @@ test("publishes complete prerelease with actual archive checksums and updates ca
   assert.ok(content.includes(`sha256 "${expected}"`));
   assert.ok(content.includes('version "0.0.8"'));
   assert.ok(
-    content.includes('container nested: "Market-Lens-macos-universal.dmg"'),
+    content.includes('container nested: "Aperture-macos-universal.dmg"'),
   );
-  assert.equal(f.state.tap[0].path, "Casks/market-lens-preview.rb");
+  assert.equal(f.state.tap[0].path, "Casks/aperture-preview.rb");
   assert.equal(f.state.tap[0].branch, "main");
 });
 test("failed, unrelated or non-PR workflow runs cannot publish", async () => {
@@ -187,7 +187,7 @@ test("partial, duplicate, expired or oversized artifacts cannot create releases"
   }
 });
 test("a missing Linux or Windows build does not block the Mac release and tap", async () => {
-  for (const name of ["Market-Lens-linux-x64", "Market-Lens-windows-x64"]) {
+  for (const name of ["Aperture-linux-x64", "Aperture-windows-x64"]) {
     const f = fixture();
     f.state.artifacts = f.state.artifacts.filter((a) => a.name !== name);
     await publish(f);
@@ -198,7 +198,7 @@ test("a missing Linux or Windows build does not block the Mac release and tap", 
 });
 test("the Mac build is required", async () => {
   const f = fixture();
-  f.state.artifacts = f.state.artifacts.filter((a) => a.name !== "Market-Lens-macos-universal");
+  f.state.artifacts = f.state.artifacts.filter((a) => a.name !== "Aperture-macos-universal");
   await assert.rejects(publish(f), /macos-universal artifact/);
   assert.equal(f.state.releases.length, 0);
 });

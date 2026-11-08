@@ -1,17 +1,23 @@
 import { sample } from "./sample.js";
 const invoke = window.__TAURI__?.core.invoke;
 export const native = !!invoke;
+const KEY = "aperture-v1";
 export async function load() {
   return (
     (native
       ? await invoke("load_state")
-      : JSON.parse(localStorage.getItem("market-lens-v1") || "null")) ||
+      : JSON.parse(
+          localStorage.getItem(KEY) ||
+            // Saved before the app was renamed from Market Lens.
+            localStorage.getItem("market-lens-v1") ||
+            "null",
+        )) ||
     sample()
   );
 }
 export async function save(state) {
   if (native) await invoke("save_state", { state });
-  else localStorage.setItem("market-lens-v1", JSON.stringify(state));
+  else localStorage.setItem(KEY, JSON.stringify(state));
 }
 // Which providers have a key. Never returns the keys themselves.
 export async function keyStatus() {
