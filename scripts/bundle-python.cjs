@@ -1,7 +1,8 @@
 // Builds the Python runtime that ships inside the app for GS Quant risk
 // analytics: a standalone CPython (astral-sh/python-build-standalone,
 // checksum-pinned below) with gs-quant and its dependencies installed from
-// wheels pinned in src-tauri/python/constraints.txt.
+// the hash-locked wheels in src-tauri/python/requirements.lock (regenerate it
+// with scripts/lock-python.cjs after changing constraints.txt).
 //
 //   node scripts/bundle-python.cjs                       # this machine's platform
 //   node scripts/bundle-python.cjs aarch64-apple-darwin x86_64-apple-darwin
@@ -12,6 +13,7 @@
 const { execFileSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -133,7 +135,7 @@ function verify(dir, t) {
   for (const t of targets) {
     const dir = t === host ? toolDir : await unpack(t);
     console.log(`Installing gs-quant for ${t}`);
-    run(tool, ["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-cache-dir", "--no-compile", "--only-binary=:all:", "--target", sitePackages(dir, t), "--platform", BUILDS[t].platform, "--python-version", PY, "--implementation", "cp", "--abi", `cp${PY.replace(".", "")}`, "-r", path.join(SPEC, "requirements.txt"), "-c", path.join(SPEC, "constraints.txt")]);
+    run(tool, ["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-cache-dir", "--no-compile", "--only-binary=:all:", "--target", sitePackages(dir, t), "--platform", BUILDS[t].platform, "--python-version", PY, "--implementation", "cp", "--abi", `cp${PY.replace(".", "")}`, "--require-hashes", "--no-deps", "--index-url", "https://pypi.org/simple", "-r", path.join(SPEC, "requirements.lock")], { env: { ...process.env, PIP_CONFIG_FILE: os.devnull } });
     prune(dir);
     for (const rel of PRUNE_TOP) fs.rmSync(path.join(dir, rel), { recursive: true, force: true });
     // Precompiled with hash checks off: the installed app is read-only and

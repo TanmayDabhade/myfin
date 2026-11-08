@@ -44,4 +44,5 @@ tzdata==2026.6
 uncertainties==3.2.3
 urllib3==2.8.0
 websockets==17.4
-wrapt==2.6.0.dev1
+wrapt==2.5.2
+colorama==0.4.6
