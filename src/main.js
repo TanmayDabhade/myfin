@@ -96,6 +96,7 @@ import {
 } from "./sources.js";
 import { sample } from "./sample.js";
 import { BENCHMARK, quantRequest, quantKey, fredRate, RISK_ROWS, formatRisk, bandPosition } from "./quant.js";
+import { fanChart, outcomeHistogram, scenarioChart, dailyHistogram, lineChart, hover, money as rcMoney, pct as signedPct, plain as plainPct } from "./riskcharts.js";
 import { quantStatus, quantChoose, quantForget, quantAnalyze } from "./bridge.js";
 import { applyTrade, nyDate } from "./live.js";
 import {
@@ -473,7 +474,10 @@ window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     if (inGraph() || page === "Screener") render();
-    else drawCharts();
+    else {
+      drawCharts();
+      drawRiskCharts();
+    }
   }, 150);
 });
 function render() {
@@ -498,6 +502,7 @@ function render() {
   bind();
   bindVessel();
   drawCharts();
+  drawRiskCharts();
   // One corrective pass at most (a scrollbar appearing could otherwise loop).
   const g = document.querySelector(".relationship-graph");
   const mm = document.querySelector(".mm-wrap");
@@ -2585,40 +2590,98 @@ function quantResult(full) {
   if (r.error) return `<div class="empty">${esc(r.error)}${full ? `<div class="quant-actions">${button("Try again", "quant-run")}${button("Choose Python…", "quant-choose")}</div>` : ""}</div>`;
   return "";
 }
+// The simulation horizon shown, in trading days.
+let riskHorizon = 252;
+const HORIZONS = [
+  [21, "1 month"],
+  [63, "3 months"],
+  [126, "6 months"],
+  [252, "1 year"],
+];
+// A chart slot; drawRiskCharts() fills it at its real pixel width.
+const rc = (id, h, label) => `<div class="rc" data-rc="${id}" style="min-height:${h}px" aria-label="${esc(label)}"><div class="rc-tip" hidden></div></div>`;
 function riskTile() {
   const wait = quantBlocker(false) || quantResult(false);
   if (wait) return wait;
   const d = quantRuns[symbol].data,
     m = d.metrics;
-  const cell = (label, kind, v, note) => `<div class="scenario"><span>${label}</span><strong>${formatRisk(kind, v)}</strong><small>${note}</small></div>`;
-  return `<div class="scenarios compact risk-cells">${cell("Volatility · 3M", "vol", m.vol3m, "annualized")}${cell("Sharpe · 1Y", "x", m.sharpe1y, "over cash")}${cell("Max drawdown · 1Y", "pct", m.maxDrawdown1y, "peak to trough")}${cell("Beta · 3M", "x", m.beta3m, d.benchmark ? "vs " + esc(d.benchmark) : "add " + BENCHMARK + " to compare")}</div>${spark(d.series.vol.map((x) => x[1]))}<small>Rolling 1-month volatility · GS Quant ${esc(d.gsQuant)}</small>`;
+  const y1 = d.sim?.horizons?.["252"];
+  if (!y1)
+    return `<div class="scenarios compact risk-cells"><div class="scenario"><span>Typical yearly move</span><strong>${m.vol1y != null ? "±" + formatRisk("vol", m.vol1y) : formatRisk("vol", m.vol3m)}</strong></div><div class="scenario"><span>Biggest drop · 1Y</span><strong>${formatRisk("pct", m.maxDrawdown1y)}</strong></div></div>`;
+  return `${rc("fan-mini", 150, "Simulated price range for the next year")}<div class="mini-stats"><span>Chance higher in a year<b>${plainPct(y1.up, 0)}</b></span><span>Middle 90%<b>${rcMoney(y1.p5)} – ${rcMoney(y1.p95)}</b></span><span>Typical yearly move<b>±${formatRisk("vol", m.vol1y ?? m.vol3m)}</b></span></div>`;
 }
-function riskChart(title, rows, kind) {
-  if (!rows?.length) return "";
-  return `<section class="macro-card"><h3>${title}</h3><strong>${formatRisk(kind, rows.at(-1)[1])}</strong><small>${esc(rows[0][0])} to ${esc(rows.at(-1)[0])}</small>${spark(rows.map((x) => x[1]))}</section>`;
-}
+const kpi = (label, value, note) => `<div class="stat"><span>${label}</span><strong>${value}</strong><small>${note}</small></div>`;
+const meter = (label, value, min, max, marks, note) => {
+  if (value == null) return "";
+  const at = (v) => `${(Math.max(0, Math.min(1, (v - min) / (max - min))) * 100).toFixed(1)}%`;
+  return `<div class="meter"><div class="meter-head"><span>${label}</span><b>${esc(note)}</b></div><div class="meter-track" role="meter" aria-valuemin="${min}" aria-valuemax="${max}" aria-valuenow="${value}" aria-label="${esc(label)}">${marks.map(([v, l]) => `<i style="left:${at(v)}"><em>${esc(l)}</em></i>`).join("")}<span class="meter-dot" style="left:${at(value)}"></span></div></div>`;
+};
 function riskView() {
   const ready = native && quantEnv?.gsQuant;
   const head = `<div class="panel-head"><h2>Risk analytics · GS Quant</h2>${ready ? button("Recalculate", "quant-run") : ""}</div>`;
-  const about = `<p class="muted">Calculated on this computer by Goldman Sachs' open-source gs-quant library (gs_quant.timeseries), from the daily closes in this workspace. Only offline functions are used: nothing is sent to Goldman Sachs and no Marquee account is needed. ${gsQuantLink()}</p>`;
+  const about = `<p class="muted">Calculated on this computer from the daily closes in this workspace, with Goldman Sachs' open-source gs-quant library for the risk measures and numpy for the simulations. Nothing is sent to Goldman Sachs. ${gsQuantLink()}</p>`;
   const wait = quantBlocker(true) || quantResult(true);
   if (wait) return `<section class="panel">${head}${about}${wait}</section>`;
   const r = quantRuns[symbol],
     d = r.data,
-    m = d.metrics;
-  const rows = RISK_ROWS.map((x) => [
-    x.label,
-    `<b>${formatRisk(x.kind, m[x.key])}</b>`,
-    `<code>${esc(x.fn)}</code>`,
-    esc(x.bench ? (d.benchmark ? `vs ${d.benchmark}, daily returns` : `Add ${BENCHMARK} to the watchlist to compare against the market`) : x.note || ""),
-  ]);
+    m = d.metrics,
+    sim = d.sim,
+    h = sim?.horizons?.[String(riskHorizon)] || sim?.horizons?.["252"],
+    y1 = sim?.horizons?.["252"];
+  const name = esc(symbol);
+  const kpis = `<div class="stats risk-kpis">${kpi("Typical move in a year", m.vol1y != null ? "±" + formatRisk("vol", m.vol1y) : "—", "one standard deviation (volatility)")}${y1 ? kpi("Likely range in a year", `${rcMoney(y1.p5)} – ${rcMoney(y1.p95)}`, "middle 90% of 10,000 simulations") + kpi("Chance of being higher", plainPct(y1.up, 0), "in a year, simulated") : ""}${kpi("Biggest drop, past year", formatRisk("pct", m.maxDrawdown1y), "peak to trough")}${kpi("Moves with the market", m.beta1y != null ? m.beta1y.toFixed(2) + "×" : m.beta3m != null ? m.beta3m.toFixed(2) + "×" : "—", d.benchmark ? `beta vs ${esc(d.benchmark)}: a 1% market move ≈ ${(m.beta1y ?? m.beta3m ?? 0).toFixed(2)}% for ${name}` : `add ${BENCHMARK} to compare`)}</div>`;
+  const horizonPick = `<div class="seg" role="group" aria-label="Simulation horizon">${HORIZONS.map(([n, l]) => button(l, "risk-horizon", riskHorizon === n ? "active" : "", `data-value="${n}" aria-pressed="${riskHorizon === n}"`)).join("")}</div>`;
+  const outcome = h
+    ? `<div class="outcome"><h3>In ${HORIZONS.find(([n]) => n === h.days)?.[1] || h.days + " trading days"} (${esc(h.date)})</h3><p class="big-range">${rcMoney(h.p25)} – ${rcMoney(h.p75)}</p><small>Half of the simulations end in this range. 9 in 10 end between ${rcMoney(h.p5)} and ${rcMoney(h.p95)}.</small>${rc("outcomes", 150, "Distribution of simulated prices")}<dl class="odds"><div><dt>Higher than today</dt><dd>${plainPct(h.up, 0)}</dd></div><div><dt>Up 10% or more</dt><dd>${plainPct(h.up10, 0)}</dd></div><div><dt>Down 10% or more</dt><dd>${plainPct(h.down10, 0)}</dd></div><div><dt>Down 20% or more</dt><dd>${plainPct(h.down20, 0)}</dd></div><div><dt>Worst 1 in 20 outcomes average</dt><dd>${rcMoney(h.cvar5)}</dd></div><div><dt>Typical worst dip along the way</dt><dd>${formatRisk("pct", h.drawdownMedian)}</dd></div></dl></div>`
+    : "";
+  const simPanel = sim
+    ? `<section class="panel"><div class="panel-head"><h2>Where ${name} could be</h2>${horizonPick}</div><p class="muted">10,000 simulated futures built from ${name}'s own daily moves over the last ${sim.lookback >= 378 ? Math.round(sim.lookback / 252) + " years" : "year"}, replayed in random 5-day blocks so calm and stormy stretches stay together. The paths grow at the cash rate (${plainPct(sim.drift)}) rather than repeating past performance, so this shows the range of outcomes, not a prediction of direction. It can't anticipate earnings, news or moves bigger than anything in that history.</p><div class="sim-grid"><div>${rc("fan", 300, "Price history and simulated range")}<div class="rc-legend"><span><i class="k-line"></i>Price</span><span><i class="k-dash"></i>Median simulation</span><span><i class="k-band"></i>Middle 50%</span><span><i class="k-band light"></i>Middle 90%</span><span><i class="k-thin"></i>A few single simulations</span></div></div>${outcome}</div></section>`
+    : `<section class="panel"><div class="panel-head"><h2>Where ${name} could be</h2></div>${empty("Simulations need at least 6 months of daily prices.")}</section>`;
+  const scen = d.market
+    ? `<section class="panel"><div class="panel-head"><h2>If the market moves</h2></div><p class="muted">Simulated months for ${name} and ${esc(d.market.benchmark)} drawn from the same days, grouped by what ${esc(d.market.benchmark)} did. The dot is ${name}'s typical month; the line spans 8 in 10 outcomes.</p>${rc("scenarios", 240, "Stock move by market move")}</section>`
+    : `<section class="panel"><div class="panel-head"><h2>If the market moves</h2></div>${empty(`Add ${BENCHMARK} to the watchlist to see how ${name} moves with the market.`)}</section>`;
+  const dl = d.daily;
+  const daily = dl
+    ? `<section class="panel"><div class="panel-head"><h2>Daily moves</h2></div><p class="muted">${esc(dl.days)} trading days. A normal day moves about ±${plainPct(dl.sd)}. Days beyond 3× that: ${esc(dl.bigDays)}, where a bell curve expects ${fmt(dl.bigExpected, 1)}. Best day ${signedPct(dl.best.move)} (${esc(dl.best.date)}), worst ${signedPct(dl.worst.move)} (${esc(dl.worst.date)}).</p>${rc("daily", 190, "Distribution of daily moves")}<div class="rc-legend"><span><i class="k-bar"></i>Actual days</span><span><i class="k-line"></i>Bell curve with the same spread</span></div></section>`
+    : "";
+  const lines = `<section class="panel"><div class="panel-head"><h2>Risk over time</h2></div><div class="risk-lines"><div><h3>How much it swings</h3><small>Volatility over the past month, annualized${m.vol1y != null ? ` · gray line: 1-year level, ${formatRisk("vol", m.vol1y)}` : ""}</small>${rc("vol", 160, "Rolling volatility")}</div><div><h3>Distance from its high</h3><small>Below the highest close of the past year</small>${rc("drawdown", 160, "Drawdown from 1-year high")}</div>${d.series.beta?.length ? `<div><h3>How tied to the market</h3><small>Beta vs ${esc(d.benchmark)} over 3 months · gray line at 1: moves with the market</small>${rc("beta", 160, "Rolling beta")}</div>` : ""}</div></section>`;
   const band = bandPosition(stockAsset()?.bars?.at(-1)?.close, m.bollingerLow, m.bollingerHigh);
-  if (m.bollingerLow != null)
-    rows.push(["Bollinger band · 20 days", `<b>${fmt(m.bollingerLow)} – ${fmt(m.bollingerHigh)}</b>`, "<code>bollinger_bands(x, 20, 2)</code>", band == null ? "" : `last close at ${Math.round(band * 100)}% of the band`]);
+  const momentum = `<section class="panel"><div class="panel-head"><h2>Momentum right now</h2></div><div class="meters">${meter("RSI · 14 days", m.rsi14, 0, 100, [[30, "30 oversold"], [70, "70 overbought"]], m.rsi14 == null ? "" : `${m.rsi14.toFixed(0)} · ${m.rsi14 >= 70 ? "overbought" : m.rsi14 <= 30 ? "oversold" : "neutral"}`)}${meter("Within its 20-day Bollinger band", band == null ? null : band * 100, 0, 100, [[0, "lower"], [100, "upper"]], band == null ? "" : `${Math.round(band * 100)}% of the way up`)}${meter("Versus its 3-month average", m.zscore3m, -3, 3, [[-2, "−2σ"], [0, "average"], [2, "+2σ"]], m.zscore3m == null ? "" : `${m.zscore3m >= 0 ? "+" : ""}${m.zscore3m.toFixed(2)} std devs`)}</div></section>`;
+  const rows = RISK_ROWS.map((x) => [x.label, `<b>${formatRisk(x.kind, m[x.key])}</b>`, `<code>${esc(x.fn)}</code>`, esc(x.bench ? (d.benchmark ? `vs ${d.benchmark}, daily returns` : `Add ${BENCHMARK} to the watchlist`) : x.note || "")]);
+  if (m.bollingerLow != null) rows.push(["Bollinger band · 20 days", `<b>${fmt(m.bollingerLow)} – ${fmt(m.bollingerHigh)}</b>`, "<code>bollinger_bands(x, 20, 2)</code>", band == null ? "" : `last close at ${Math.round(band * 100)}% of the band`]);
+  if (h) rows.push([`Simulated range · ${HORIZONS.find(([n]) => n === h.days)?.[1]}`, `<b>${rcMoney(h.p5)} – ${rcMoney(h.p95)}</b>`, "<code>numpy block bootstrap, 10,000 paths</code>", `median ${rcMoney(h.p50)}`]);
   const rate = d.riskFree
-    ? `Sharpe uses the fed funds rate from FRED, ${pct(d.riskFree)}${r.fed?.date ? ` (${esc(r.fed.date)})` : ""}, as the cash rate.`
-    : `Sharpe uses a 0% cash rate${hasKey("fred") ? "; open Economy to load the fed funds rate" : ""}.`;
-  return `<section class="panel">${head}${about}${table(["Measure", "Value", "gs_quant.timeseries", "Notes"], rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`))}<small>${esc(d.points)} daily closes through ${esc(d.asOf)} · GS Quant ${esc(d.gsQuant)} · Python ${esc(d.python)}. ${rate} Prices are not adjusted for dividends.</small></section><div class="macro-grid risk-charts">${riskChart("Rolling volatility · 1 month", d.series.vol, "vol")}${riskChart("Below 1-year high", d.series.drawdown, "pct")}${riskChart(`Rolling beta vs ${esc(d.benchmark || BENCHMARK)} · 3 months`, d.series.beta, "x")}</div>`;
+    ? `Sharpe and the simulations use the fed funds rate from FRED, ${pct(d.riskFree)}${r.fed?.date ? ` (${esc(r.fed.date)})` : ""}, as the cash rate.`
+    : `Sharpe and the simulations use a 0% cash rate${hasKey("fred") ? "; open Economy to load the fed funds rate" : ""}.`;
+  const details = `<details class="panel risk-details"><summary>All figures and the functions behind them</summary>${table(["Measure", "Value", "Function", "Notes"], rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`))}<small>${esc(d.points)} daily closes through ${esc(d.asOf)} · GS Quant ${esc(d.gsQuant)} · Python ${esc(d.python)}. ${rate} Prices are not adjusted for dividends. Simulations are seeded from the symbol and date, so the same data gives the same picture.</small></details>`;
+  return `<section class="panel">${head}${about}${kpis}</section>${simPanel}<div class="grid halves">${scen}${daily}</div>${lines}${momentum}${details}`;
+}
+// 12 -> "12", 2.5 -> "2.5": axis labels without needless decimals.
+const short = (v) => (Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, ""));
+// Fills every chart slot on the page at its real width.
+function drawRiskCharts() {
+  const d = quantRuns[symbol]?.data;
+  if (!d) return;
+  const closes = (stockAsset()?.bars || []).map((b) => [b.date, b.close]);
+  const build = {
+    fan: (W) => d.sim && fanChart(d.sim, closes, riskHorizon, W, 300),
+    "fan-mini": (W) => d.sim && fanChart(d.sim, closes, 252, W, 150, { examples: false }),
+    outcomes: (W) => d.sim && outcomeHistogram(d.sim.horizons[String(riskHorizon)] || d.sim.horizons["252"], d.sim.start, W, 150),
+    scenarios: (W) => d.market && scenarioChart(d.market, symbol, W),
+    daily: (W) => d.daily && dailyHistogram(d.daily, W, 190),
+    vol: (W) => d.series.vol?.length && lineChart(d.series.vol, { fmt: (v) => short(v) + "%", ref: d.metrics.vol1y }, W),
+    drawdown: (W) => d.series.drawdown?.length && lineChart(d.series.drawdown, { fmt: (v) => short(v * 100) + "%", wash: "below" }, W),
+    beta: (W) => d.series.beta?.length && lineChart(d.series.beta, { fmt: (v) => v.toFixed(2), ref: 1 }, W),
+  };
+  document.querySelectorAll("[data-rc]").forEach((el) => {
+    const W = Math.max(240, Math.round(el.clientWidth));
+    const chart = build[el.dataset.rc]?.(W);
+    el.querySelector("svg")?.remove();
+    if (!chart) return;
+    el.insertAdjacentHTML("afterbegin", chart.svg);
+    el.style.minHeight = "";
+    hover(el, chart);
+  });
 }
 function quantPanel() {
   const e = quantEnv;
@@ -3370,6 +3433,10 @@ async function action(act, value) {
       break;
     case "quant-run":
       runQuant(true);
+      break;
+    case "risk-horizon":
+      riskHorizon = +value || 252;
+      render();
       break;
     case "setup-connect":
     case "keys-save": {

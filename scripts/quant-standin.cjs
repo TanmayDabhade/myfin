@@ -16,7 +16,61 @@ module.exports = function quantStandin() {
       const r = c.slice(1).map((v, i) => v / c[i] - 1);
       const dd = c.map((v, i) => [d[i], v / Math.max(...c.slice(Math.max(0, i - 251), i + 1)) - 1]).slice(-252);
       const b = !!input.benchmark;
+      // A small block bootstrap with a fixed seed, shaped like quant.py's output.
+      let seed = 7;
+      const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+      const lr = c.slice(1).map((v, i) => Math.log(v / c[i])).slice(-756);
+      const mean = lr.reduce((s, x) => s + x, 0) / lr.length;
+      const drift = Math.log1p(input.riskFree || 0) / 252;
+      const steps = lr.map((x) => x - mean + drift);
+      const start = c.at(-1), P = 2000, Hz = 252;
+      const paths = Array.from({ length: P }, () => {
+        const out = [];
+        let v = start;
+        while (out.length < Hz) {
+          const s0 = Math.floor(rand() * (steps.length - 5));
+          for (let k = 0; k < 5 && out.length < Hz; k++) out.push((v *= Math.exp(steps[s0 + k])));
+        }
+        return out;
+      });
+      const q = (arr, p) => {
+        const a = [...arr].sort((x, y) => x - y);
+        return a[Math.min(a.length - 1, Math.floor(p * a.length))];
+      };
+      const dates = [];
+      for (let t = new Date(d.at(-1) + "T00:00:00Z"); dates.length < Hz; ) {
+        t = new Date(t.getTime() + 864e5);
+        if (t.getUTCDay() % 6) dates.push(t.toISOString().slice(0, 10));
+      }
+      const bands = { p5: [], p25: [], p50: [], p75: [], p95: [] };
+      for (let j = 0; j < Hz; j++) {
+        const col = paths.map((p) => p[j]);
+        for (const [k, pq] of [["p5", 0.05], ["p25", 0.25], ["p50", 0.5], ["p75", 0.75], ["p95", 0.95]]) bands[k].push(q(col, pq));
+      }
+      const horizons = {};
+      for (const hz of [21, 63, 126, 252]) {
+        const end = paths.map((p) => p[hz - 1]);
+        const lo = q(end, 0.005), hi = q(end, 0.995);
+        const edges = Array.from({ length: 41 }, (_, i) => lo + ((hi - lo) * i) / 40);
+        const counts = Array(40).fill(0);
+        for (const v of end) if (v >= lo && v <= hi) counts[Math.min(39, Math.floor(((v - lo) / (hi - lo)) * 40))]++;
+        const share = (f) => end.filter(f).length / P;
+        horizons[hz] = { days: hz, date: dates[hz - 1], p5: q(end, 0.05), p25: q(end, 0.25), p50: q(end, 0.5), p75: q(end, 0.75), p95: q(end, 0.95), up: share((v) => v > start), up10: share((v) => v >= start * 1.1), down10: share((v) => v <= start * 0.9), down20: share((v) => v <= start * 0.8), cvar5: q(end, 0.02), drawdownMedian: -0.08, drawdown5: -0.2, hist: { edges, counts } };
+      }
+      const sim = { method: "block bootstrap", paths: P, block: 5, lookback: lr.length, drift: input.riskFree || 0, start, dates, bands, examples: [paths[1], paths[2], paths[3]], horizons };
+      const market = b ? { benchmark: input.benchmark.symbol, days: 21, rows: [["Down 10%+", 0.01, null], ["Down 5–10%", 0.08, -0.07], ["Down 0–5%", 0.41, -0.02], ["Up 0–5%", 0.42, 0.025], ["Up 5–10%", 0.07, 0.07], ["Up 10%+", 0.01, null]].map(([label, share, p50]) => ({ label, share, count: Math.round(share * 40000), ...(p50 == null ? {} : { p10: p50 - 0.05, p50, p90: p50 + 0.05 }) })) } : null;
+      const sd = Math.sqrt(r.reduce((s, x) => s + x * x, 0) / r.length);
+      const lo = Math.min(...r), hi = Math.max(...r);
+      const edges = Array.from({ length: 51 }, (_, i) => lo + ((hi - lo) * i) / 50);
+      const counts = Array(50).fill(0);
+      for (const x of r) counts[Math.min(49, Math.floor(((x - lo) / (hi - lo || 1)) * 50))]++;
+      const w = edges[1] - edges[0];
+      const normal = counts.map((_, i) => { const m = (edges[i] + edges[i + 1]) / 2; return (r.length * w * Math.exp(-(m * m) / (2 * sd * sd))) / (sd * Math.sqrt(2 * Math.PI)); });
+      const daily = { days: r.length, edges, counts, normal, sd, bigDays: 2, bigExpected: r.length * 0.0027, best: { date: d.at(-5), move: hi }, worst: { date: d.at(-9), move: lo } };
       return {
+        sim,
+        market,
+        daily,
         gsQuant: "2.2.5",
         python: "3.13.16",
         symbol: input.symbol,

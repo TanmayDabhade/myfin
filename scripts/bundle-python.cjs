@@ -119,7 +119,7 @@ function verify(dir, t) {
   const started = Date.now();
   const out = execFileSync(pythonExe(dir, t), ["-I", "-B", path.join(ROOT, "src-tauri", "src", "quant.py")], { input, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } }).toString();
   const r = JSON.parse(out);
-  if (r.error || !(r.metrics?.vol1y > 0) || Math.abs(r.metrics.beta3m - 1) > 1e-6) throw Error(`Bundled Python failed the analytics check: ${out.slice(0, 300)}`);
+  if (r.error || !(r.metrics?.vol1y > 0) || Math.abs(r.metrics.beta3m - 1) > 1e-6 || !(r.sim?.horizons?.["252"]?.p95 > 0) || !r.market?.rows?.length || !r.daily?.counts?.length) throw Error(`Bundled Python failed the analytics check: ${out.slice(0, 300)}`);
   console.log(`Verified ${t}: gs-quant ${r.gsQuant}, analytics in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }
 

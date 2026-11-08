@@ -301,11 +301,21 @@ async function liveFlow(browser, errors) {
   await page.keyboard.press("Escape");
   await page.waitForSelector(".stock-grid");
   // Risk analytics from GS Quant (stand-in backend).
-  await page.waitForSelector("[data-tile='RSK'] >> text=Rolling 1-month volatility", { timeout: 10000 });
+  await page.waitForSelector("[data-tile='RSK'] >> text=Chance higher in a year", { timeout: 10000 });
   await page.click('.fn-strip [data-value="RSK"]');
+  await page.waitForSelector("[data-rc='fan'] svg polygon");
+  for (const id of ["outcomes", "scenarios", "daily", "vol", "drawdown", "beta"]) if (!(await page.locator(`[data-rc='${id}'] svg`).count())) throw Error("Risk chart missing: " + id);
+  // Hovering the fan shows simulated percentiles; the horizon switch redraws.
+  const fan = await page.locator("[data-rc='fan']").boundingBox();
+  await page.mouse.move(fan.x + fan.width * 0.9, fan.y + fan.height / 2);
+  if (!(await page.locator("[data-rc='fan'] .rc-tip").innerText()).includes("Median")) throw Error("Fan tooltip missing");
+  await page.click('[data-action="risk-horizon"][data-value="63"]');
+  await page.waitForSelector('[data-action="risk-horizon"][data-value="63"].active');
+  if (!(await page.locator(".outcome h3").innerText()).includes("3 months")) throw Error("Horizon switch failed");
+  await page.click(".risk-details summary");
   await page.waitForSelector("td:has-text('Volatility · 1 month')");
   const rsk = await page.locator("main").innerText();
-  for (const t of ["volatility(x, 22)", "GS Quant 2.2.5", "Rolling volatility · 1 month", "Bollinger band"]) if (!rsk.includes(t)) throw Error("Risk analytics missing " + t);
+  for (const t of ["volatility(x, 22)", "GS Quant 2.2.5", "Chance of being higher", "If the market moves", "Bollinger band"]) if (!rsk.includes(t)) throw Error("Risk analytics missing " + t);
   if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Risk analytics");
   await page.keyboard.press("Escape");
   await page.waitForSelector(".stock-grid");

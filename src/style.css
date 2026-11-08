@@ -1091,3 +1091,58 @@ table.tape tr.big td { font-weight: 650; color: #fff; }
 .cmd-line { display: block; margin: 10px auto; padding: 8px 12px; width: fit-content; max-width: 100%; overflow-wrap: anywhere; border: 1px solid #333; border-radius: 6px; background: #111; color: #e5e5e5; font-size: 12px; }
 .quant-actions { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
 @media (max-width: 1100px) { .risk-charts { grid-template-columns: 1fr; } }
+
+/* Risk analytics charts */
+.rc { position: relative; outline: none; }
+.rc:focus-visible { box-shadow: 0 0 0 1px #8d8d8d; border-radius: 6px; }
+.rc svg { display: block; width: 100%; height: auto; overflow: visible; }
+.rc svg text { fill: #8d8d8d; font: 10px ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.rc svg text.strong, .rc svg text.end-label { fill: #d6d6d6; }
+.rc svg text.muted { fill: #6b6b6b; }
+.rc svg [data-i] { transition: opacity 0.1s; }
+.rc svg rect.rc-on { opacity: 0.75; }
+.rc svg rect[data-i][fill="transparent"].rc-on { fill: rgba(255, 255, 255, 0.03); opacity: 1; }
+.rc-tip { position: absolute; z-index: 5; pointer-events: none; min-width: 150px; padding: 8px 10px; background: #111; border: 1px solid #3a3a3a; border-radius: 6px; font-size: 11px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); }
+.rc-tip-head { color: #9a9a9a; margin-bottom: 4px; }
+.rc-tip div:not(.rc-tip-head) { display: flex; gap: 10px; justify-content: space-between; align-items: baseline; }
+.rc-tip b { color: #f2f2f2; font-weight: 600; font-variant-numeric: tabular-nums; order: 2; }
+.rc-tip span { color: #9a9a9a; }
+.rc-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 11px; color: #9a9a9a; }
+.rc-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.rc-legend i { display: inline-block; width: 16px; height: 0; border-top: 2px solid #ededed; }
+.rc-legend i.k-dash { border-top-style: dashed; }
+.rc-legend i.k-thin { border-top: 1px solid #6b6b6b; }
+.rc-legend i.k-band { height: 10px; border: 0; background: rgba(237, 237, 237, 0.24); border-radius: 2px; }
+.rc-legend i.k-band.light { background: rgba(237, 237, 237, 0.08); }
+.rc-legend i.k-bar { width: 10px; height: 10px; border: 0; background: #6b6b6b; border-radius: 2px; }
+.seg { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.seg button { padding: 5px 10px; font-size: 12px; }
+.seg button.active { background: #f2f2f2; color: #000; border-color: #f2f2f2; }
+.risk-kpis { grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 16px 0 0; }
+.risk-kpis .stat strong { font-size: 22px; }
+.sim-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: 28px; margin-top: 12px; }
+.outcome h3 { margin: 0 0 6px; font-size: 12px; font-weight: 500; color: #a6a6a6; }
+.outcome .big-range { margin: 0 0 4px; font-size: 26px; font-weight: 500; letter-spacing: -0.4px; }
+.outcome > small { display: block; color: #8f8f8f; margin-bottom: 12px; }
+.odds { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; margin: 12px 0 0; }
+.odds div { border-top: 1px solid #2a2a2a; padding-top: 6px; }
+.odds dt { font-size: 11px; color: #8f8f8f; }
+.odds dd { margin: 2px 0 0; font-size: 15px; font-variant-numeric: tabular-nums; }
+.risk-lines { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.risk-lines h3 { margin: 0; font-size: 13px; font-weight: 500; }
+.risk-lines small { display: block; color: #8f8f8f; margin-bottom: 8px; }
+.meters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; padding-bottom: 14px; }
+.meter-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: #a6a6a6; margin-bottom: 10px; }
+.meter-head b { color: #ededed; font-weight: 500; }
+.meter-track { position: relative; height: 6px; border-radius: 3px; background: #2e2e2e; }
+.meter-track i { position: absolute; top: -3px; width: 1px; height: 12px; background: #555; }
+.meter-track i em { position: absolute; top: 16px; transform: translateX(-50%); white-space: nowrap; font-style: normal; font-size: 10px; color: #7a7a7a; }
+.meter-track i:first-child em { transform: none; }
+.meter-track i:last-child:not(:first-child) em { transform: translateX(-100%); }
+.meter-dot { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: #ededed; box-shadow: 0 0 0 2px #1d1d1d; }
+.risk-details summary { cursor: pointer; font-weight: 500; }
+.risk-details[open] summary { margin-bottom: 12px; }
+@media (max-width: 1200px) {
+  .risk-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sim-grid, .risk-lines, .meters { grid-template-columns: 1fr; }
+}
