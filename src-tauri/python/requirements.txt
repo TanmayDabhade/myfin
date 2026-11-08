@@ -1,0 +1,2 @@
+# Bundled Python packages. Versions are pinned in constraints.txt.
+gs-quant==2.2.5

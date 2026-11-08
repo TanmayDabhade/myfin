@@ -25,6 +25,14 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+      - name: Bundle Python and GS Quant
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            node scripts/bundle-python.cjs aarch64-apple-darwin x86_64-apple-darwin
+          else
+            node scripts/bundle-python.cjs
+          fi
       - run: npm run tauri build
       - uses: actions/upload-artifact@v4
         with:

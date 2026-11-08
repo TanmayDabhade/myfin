@@ -8,7 +8,7 @@ module.exports = function quantStandin() {
     return Math.sqrt((a.reduce((s, x) => s + (x - m) ** 2, 0) / (a.length - 1)) * 252) * 100;
   };
   window.__quantStandin = {
-    status: () => ({ python: "/usr/local/bin/python3", version: "3.13.7", gsQuant: "2.2.5", chosen: false, install: "/usr/local/bin/python3 -m pip install gs-quant" }),
+    status: () => ({ python: "/Applications/Aperture.app/Contents/Resources/python/aarch64-apple-darwin/bin/python3", version: "3.13.16", gsQuant: "2.2.5", chosen: false, bundled: true, install: "" }),
     analyze: ({ input }) => {
       const c = input.closes.map((x) => x[1]),
         d = input.closes.map((x) => x[0]),
@@ -18,7 +18,7 @@ module.exports = function quantStandin() {
       const b = !!input.benchmark;
       return {
         gsQuant: "2.2.5",
-        python: "3.13.7",
+        python: "3.13.16",
         symbol: input.symbol,
         benchmark: b ? input.benchmark.symbol : null,
         asOf: d.at(-1),

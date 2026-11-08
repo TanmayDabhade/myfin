@@ -31,6 +31,8 @@ struct Backend {
     /// Python with gs-quant: (detection has run, what it found).
     quant: tokio::sync::Mutex<(bool, Option<quant::Env>)>,
     quant_gate: tokio::sync::Mutex<()>,
+    /// The Python with gs-quant that ships inside the app, when present.
+    bundled_python: Option<std::path::PathBuf>,
     ais: std::sync::Arc<Mutex<AisRuntime>>,
     quotes: std::sync::Arc<Mutex<QuoteRuntime>>,
     http: reqwest::Client,
@@ -1096,10 +1098,13 @@ async fn quant_env(b: &Backend, refresh: bool) -> Option<quant::Env> {
         env = quant::probe(&p, true).await.ok();
     }
     if env.is_none() {
+        // An explicit APERTURE_PYTHON wins, then the app's own Python, then
+        // whatever is installed on this computer.
         let mut list: Vec<std::path::PathBuf> = std::env::var_os("APERTURE_PYTHON").map(Into::into).into_iter().collect();
+        list.extend(b.bundled_python.clone());
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from);
         list.extend(quant::candidates(std::env::var("PATH").ok().as_deref(), home.as_deref()));
-        env = quant::detect(&list).await;
+        env = quant::detect(&list, b.bundled_python.as_deref()).await;
     }
     *q = (true, env.clone());
     env
@@ -1134,7 +1139,8 @@ async fn quant_analyze(b: tauri::State<'_, Backend>, input: Value) -> Result<Val
         return Err(format!("gs-quant is not installed for {}. Run: {} -m pip install gs-quant", env.python.display(), env.python.display()));
     }
     let _one_at_a_time = b.quant_gate.lock().await;
-    // The first import after installing compiles gs-quant and can take a minute.
+    // The first run on a computer can be slow while the OS checks the
+    // library's native files; later runs take a few seconds.
     let out = quant::run(&env.python, quant::SCRIPT, request.as_bytes(), std::time::Duration::from_secs(240)).await?;
     quant::response(&out)
 }
@@ -1149,5 +1155,5 @@ fn main() {
                     _ => {}
                 }
             }
-            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d))});Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

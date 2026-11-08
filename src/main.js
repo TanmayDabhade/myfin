@@ -2532,9 +2532,10 @@ function download(name, content, type = "text/plain") {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 // ---- Risk analytics (GS Quant) ---------------------------------------------------
-// gs-quant runs in the user's own Python through the desktop app (quant.rs).
+// gs-quant runs in the Python built into the desktop app, or one the user
+// chooses (quant.rs).
 // Results live for the session and are recomputed when prices change.
-let quantEnv = null, // quant_status: { python, version, gsQuant, chosen, install } or { error }
+let quantEnv = null, // quant_status: { python, version, gsQuant, chosen, bundled, install } or { error }
   quantChecking = null;
 const quantRuns = {}; // symbol -> { key, running } | { key, data, fed } | { key, error }
 function checkQuant(again = false) {
@@ -2568,7 +2569,7 @@ function runQuant(force = false) {
 const gsQuantLink = () => link("https://github.com/goldmansachs/gs-quant", "gs-quant on GitHub");
 // What's missing before analytics can run, or "" when ready.
 function quantBlocker(full) {
-  if (!native) return empty("Risk analytics run in the desktop app, using GS Quant in your own Python.");
+  if (!native) return empty("Risk analytics run in the desktop app, which includes GS Quant.");
   const e = quantEnv;
   if (!e) return empty("Looking for Python and GS Quant…");
   if (e.error) return empty(esc(e.error));
@@ -2580,7 +2581,7 @@ function quantBlocker(full) {
 function quantResult(full) {
   const r = quantRuns[symbol];
   if (!stockAsset()) return noStock();
-  if (!r || r.running) return empty(`Calculating with GS Quant…${full ? "<br><small>The first run after installing can take a minute while Python compiles the library.</small>" : ""}`);
+  if (!r || r.running) return empty(`Calculating with GS Quant…${full ? "<br><small>The first run on a computer can take longer while the system checks the library's files.</small>" : ""}`);
   if (r.error) return `<div class="empty">${esc(r.error)}${full ? `<div class="quant-actions">${button("Try again", "quant-run")}${button("Choose Python…", "quant-choose")}</div>` : ""}</div>`;
   return "";
 }
@@ -2599,7 +2600,7 @@ function riskChart(title, rows, kind) {
 function riskView() {
   const ready = native && quantEnv?.gsQuant;
   const head = `<div class="panel-head"><h2>Risk analytics · GS Quant</h2>${ready ? button("Recalculate", "quant-run") : ""}</div>`;
-  const about = `<p class="muted">Calculated by Goldman Sachs' open-source gs-quant library (gs_quant.timeseries) in your own Python, from the daily closes in this workspace. Only offline functions are used: nothing is sent to Goldman Sachs and no Marquee account is needed. ${gsQuantLink()}</p>`;
+  const about = `<p class="muted">Calculated on this computer by Goldman Sachs' open-source gs-quant library (gs_quant.timeseries), from the daily closes in this workspace. Only offline functions are used: nothing is sent to Goldman Sachs and no Marquee account is needed. ${gsQuantLink()}</p>`;
   const wait = quantBlocker(true) || quantResult(true);
   if (wait) return `<section class="panel">${head}${about}${wait}</section>`;
   const r = quantRuns[symbol],
@@ -2622,9 +2623,9 @@ function riskView() {
 function quantPanel() {
   const e = quantEnv;
   const status = !e ? '<span class="pill">Checking…</span>' : e.gsQuant ? `<span class="pill on">GS Quant ${esc(e.gsQuant)}</span>` : '<span class="pill">Not installed</span>';
-  const where = e?.python ? `<p>Python ${esc(e.version)} · <code>${esc(e.python)}</code> · ${e.chosen ? "chosen by you" : "found automatically"}</p>` : e?.error ? `<p class="down">${esc(e.error)}</p>` : e ? "<p>No Python 3 found on this computer.</p>" : "";
+  const where = e?.python ? `<p>Python ${esc(e.version)} · <code>${esc(e.python)}</code> · ${e.bundled ? "built into Aperture" : e.chosen ? "chosen by you" : "found automatically"}</p>` : e?.error ? `<p class="down">${esc(e.error)}</p>` : e ? "<p>No Python 3 found on this computer.</p>" : "";
   const install = e && !e.gsQuant ? `<p>Install it with <code class="cmd-line">${esc(e.install)}</code>then press Check again. Using a virtual environment? Choose its Python.</p>` : "";
-  return `<section class="panel"><div class="panel-head"><h2>GS Quant ${status}</h2>${button("Check again", "quant-check")}${button("Choose Python…", "quant-choose")}${e?.chosen ? button("Find automatically", "quant-forget") : ""}</div><p>Risk analytics (<kbd>RSK</kbd> on each stock page) come from Goldman Sachs' open-source gs-quant library, run by your own Python. Only its offline timeseries functions are used; nothing is sent to Goldman Sachs and no Marquee account is needed. Set <code>APERTURE_PYTHON</code> to point at a specific interpreter. ${gsQuantLink()}</p>${where}${install}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>GS Quant ${status}</h2>${button("Check again", "quant-check")}${button("Choose Python…", "quant-choose")}${e?.chosen ? button("Find automatically", "quant-forget") : ""}</div><p>Risk analytics (<kbd>RSK</kbd> on each stock page) come from Goldman Sachs' open-source gs-quant library, which ships with Aperture in its own Python. Choose another Python here to use a different gs-quant version. Only its offline timeseries functions are used; nothing is sent to Goldman Sachs and no Marquee account is needed. Set <code>APERTURE_PYTHON</code> to point at a specific interpreter. ${gsQuantLink()}</p>${where}${install}</section>`;
 }
 // ---- Data loading -------------------------------------------------------
 // Every provider call goes through one queue so requests never pile up and

@@ -1,8 +1,10 @@
 //! Risk analytics from Goldman Sachs' open-source gs-quant library.
 //!
-//! gs-quant is Python, so Aperture does not bundle it. It looks for a Python
-//! that has it installed (or one the user picks), then runs the bundled
-//! `quant.py` with the stock's daily closes on stdin. Only the offline
+//! gs-quant is Python. Release builds ship a standalone Python with gs-quant
+//! installed (scripts/bundle-python.cjs, app resource `python/<target>/`).
+//! A Python the user picks, or APERTURE_PYTHON, takes precedence; without a
+//! bundle (a dev build) the usual install locations are searched. The
+//! compiled-in `quant.py` gets the stock's daily closes on stdin. Only the offline
 //! `gs_quant.timeseries` functions are used: nothing is sent to Goldman Sachs.
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -24,6 +26,8 @@ pub struct Env {
     pub gs_quant: Option<String>,
     /// Picked by the user rather than found.
     pub chosen: bool,
+    /// The Python that ships inside the app.
+    pub bundled: bool,
 }
 
 impl Env {
@@ -34,11 +38,31 @@ impl Env {
                 "version": e.version,
                 "gsQuant": e.gs_quant,
                 "chosen": e.chosen,
+                "bundled": e.bundled,
                 "install": format!("{} -m pip install gs-quant", e.python.display()),
             }),
-            None => json!({ "python": null, "gsQuant": null, "chosen": false, "install": INSTALL }),
+            None => json!({ "python": null, "gsQuant": null, "chosen": false, "bundled": false, "install": INSTALL }),
         }
     }
+}
+
+/// The bundle's folder name for the platform this binary was built for. A
+/// universal Mac app carries both Mac folders and uses the one that matches.
+pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    "aarch64-apple-darwin"
+} else if cfg!(target_os = "macos") {
+    "x86_64-apple-darwin"
+} else if cfg!(windows) {
+    "x86_64-pc-windows-msvc"
+} else {
+    "x86_64-unknown-linux-gnu"
+};
+
+/// The Python inside the app's resources, if this build has one.
+pub fn bundled(resource_dir: &Path) -> Option<PathBuf> {
+    let dir = resource_dir.join("python").join(TARGET);
+    let exe = if cfg!(windows) { dir.join("python.exe") } else { dir.join("bin").join("python3") };
+    exe.is_file().then_some(exe)
 }
 
 /// Places a Python 3 is commonly installed. GUI apps on macOS do not get the
@@ -83,7 +107,8 @@ pub fn candidates(path_var: Option<&str>, home: Option<&Path>) -> Vec<PathBuf> {
 fn command(python: &Path) -> tokio::process::Command {
     let mut c = tokio::process::Command::new(python);
     // -I: ignore PYTHON* variables, user site tweaks and the working directory.
-    c.arg("-I").env("PYTHONIOENCODING", "utf-8").kill_on_drop(true);
+    // -B: never write bytecode (the bundled Python is precompiled and read-only).
+    c.arg("-I").arg("-B").env("PYTHONIOENCODING", "utf-8").kill_on_drop(true);
     #[cfg(windows)]
     c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     c
@@ -121,20 +146,24 @@ pub async fn run(python: &Path, code: &str, input: &[u8], limit: Duration) -> Re
 
 /// Asks one Python for its version and whether gs-quant is installed.
 pub async fn probe(python: &Path, chosen: bool) -> Result<Env, String> {
+    probe_as(python, chosen, false).await
+}
+pub async fn probe_as(python: &Path, chosen: bool, bundled: bool) -> Result<Env, String> {
     let out = run(python, PROBE, b"", Duration::from_secs(15)).await?;
     let v: Value = serde_json::from_str(out.trim()).map_err(|_| "Not a Python 3 interpreter.".to_string())?;
     let version = v["python"].as_str().unwrap_or("").to_string();
     if !version.starts_with('3') {
         return Err("Python 3 is required.".into());
     }
-    Ok(Env { python: python.to_path_buf(), version, gs_quant: v["gsQuant"].as_str().map(String::from), chosen })
+    Ok(Env { python: python.to_path_buf(), version, gs_quant: v["gsQuant"].as_str().map(String::from), chosen, bundled })
 }
 
 /// First Python with gs-quant installed; otherwise the first working Python.
-pub async fn detect(list: &[PathBuf]) -> Option<Env> {
+/// `bundled` marks the app's own Python in the result.
+pub async fn detect(list: &[PathBuf], bundled: Option<&Path>) -> Option<Env> {
     let mut fallback = None;
     for p in list {
-        if let Ok(env) = probe(p, false).await {
+        if let Ok(env) = probe_as(p, false, bundled == Some(p.as_path())).await {
             if env.gs_quant.is_some() {
                 return Some(env);
             }
@@ -266,6 +295,17 @@ mod tests {
         assert_eq!(response(r#"{"error":"Could not load gs-quant"}"#).unwrap_err(), "Could not load gs-quant");
         assert!(response("Traceback ...").is_err());
         assert!(response("{}").is_err());
+    }
+
+    #[test]
+    fn finds_the_bundled_python_for_this_platform() {
+        let dir = std::env::temp_dir().join(format!("aperture-bundle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(bundled(&dir), None);
+        let exe = if cfg!(windows) { dir.join("python").join(TARGET).join("python.exe") } else { dir.join("python").join(TARGET).join("bin/python3") };
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(bundled(&dir), Some(exe));
     }
 
     #[test]
