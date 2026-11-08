@@ -113,6 +113,21 @@ The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldma
 - **Offline only**: only `gs_quant.timeseries` functions that work on local data are used. Nothing is sent to Goldman Sachs and no Marquee account is needed. gs-quant's Marquee features (GS datasets, derivatives pricing, Sortino and drawdown-length reports) need institutional GS credentials and are not used.
 - **How it runs**: the desktop app runs a fixed script (`src-tauri/src/quant.py`) with `python -I -B`, passes the prices on stdin and validates the result. The page can't choose which program runs: it's the built-in Python, `APERTURE_PYTHON`, or one you pick in a file dialog.
 
+## Staying current
+
+None of the free data sources push updates, so the app checks each on its own clock while it's open, for every stock on the watchlist:
+
+| What | How often | What happens when something is new |
+|---|---|---|
+| Daily prices | every 30 minutes (Twelve Data saved for 1 hour) | Risk analytics rerun for stocks whose prices changed |
+| Real-time trades | streamed (Finnhub) | update today's bar; Risk analytics rerun every 15 minutes during US market hours (9:30–16:00 New York, Mon–Fri) |
+| SEC filings list | every 30 minutes | a new 10-K, 10-Q, 20-F, 40-F or 6-K refetches the financial statements, valuation inputs and SEC revenue history right away, skipping the usual cache; a new 8-K refreshes news and earnings; a notice names the filing |
+| Finnhub news, metrics, earnings | every 30 minutes | saved, so the stock page opens current |
+| FRED economic and commodity series | every 12 hours | the fed funds rate also feeds the Sharpe ratio and simulations |
+| SEC 13F holdings | when a new quarter is published | downloaded in the background (see Holders) |
+
+A forced refetch still reuses anything fetched in the last 10 minutes and stays inside each provider's daily limit (Alpha Vantage's 25 calls a day is only spent on statements when a new report is filed). Risk analytics results are saved, so the view opens instantly with the last result and shows when it was updated; a rerun replaces it in the background.
+
 ## Market map (Screener)
 
 **Screener** opens on a heatmap of every S&P 500 company, grouped by sector. Tile area is market cap and colour is the change over the chosen horizon (1 day, 1 week, 1 month, 3 months, year to date, 1 year). Click any tile, or a row in Top gainers / Top losers, to open that company's stock page. **Your workspace** switches to the screener for the stocks in your workspace.

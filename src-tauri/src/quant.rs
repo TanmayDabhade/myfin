@@ -220,6 +220,24 @@ pub fn request(input: &Value) -> Result<String, String> {
     .to_string())
 }
 
+/// Several requests for one Python run; each is checked like `request`.
+/// Returns the batch stdin and, per input, either its index in the batch or
+/// the reason it was left out.
+pub fn batch_request(inputs: &[Value]) -> (String, Vec<Result<usize, String>>) {
+    let mut batch = Vec::new();
+    let mut slots = Vec::new();
+    for input in inputs.iter().take(60) {
+        match request(input).and_then(|r| serde_json::from_str::<Value>(&r).map_err(|e| e.to_string())) {
+            Ok(r) => {
+                slots.push(Ok(batch.len()));
+                batch.push(r);
+            }
+            Err(e) => slots.push(Err(e)),
+        }
+    }
+    (json!({ "batch": batch }).to_string(), slots)
+}
+
 /// Reads the script's output; its `error` field becomes an Err.
 pub fn response(out: &str) -> Result<Value, String> {
     let v: Value = serde_json::from_str(out.trim()).map_err(|_| "gs-quant returned something unreadable.".to_string())?;
@@ -290,6 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn batches_valid_requests_and_reports_bad_ones() {
+        let (stdin, slots) = batch_request(&[
+            json!({ "symbol": "AAPL", "closes": rows(40) }),
+            json!({ "symbol": "TINY", "closes": rows(5) }),
+            json!({ "symbol": "MSFT", "closes": rows(40) }),
+        ]);
+        let v: Value = serde_json::from_str(&stdin).unwrap();
+        assert_eq!(v["batch"].as_array().unwrap().len(), 2);
+        assert_eq!(slots[0], Ok(0));
+        assert!(slots[1].as_ref().unwrap_err().contains("at least"));
+        assert_eq!(slots[2], Ok(1));
+        assert_eq!(v["batch"][1]["symbol"], "MSFT");
+    }
+
+    #[test]
     fn reads_script_output() {
         assert!(response(r#"{"metrics":{"vol1m":12.5}}"#).is_ok());
         assert_eq!(response(r#"{"error":"Could not load gs-quant"}"#).unwrap_err(), "Could not load gs-quant");
@@ -351,6 +384,14 @@ mod tests {
         assert_eq!(v["sim"]["bands"]["p50"].as_array().unwrap().len(), 252);
         assert!(v["market"]["rows"].as_array().unwrap().len() == 6);
         assert!(v["daily"]["counts"].as_array().unwrap().len() == 50);
+        // A batch runs several stocks in one Python start.
+        let one = json!({ "symbol": "TEST", "closes": closes, "riskFree": 0.04 });
+        let (stdin, slots) = batch_request(&[one.clone(), json!({ "symbol": "BAD", "closes": [] }), one]);
+        let out = rt.block_on(run(&python, SCRIPT, stdin.as_bytes(), Duration::from_secs(240))).unwrap();
+        let results: Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(results["results"].as_array().unwrap().len(), 2);
+        assert!(slots[1].is_err());
+        assert!(response(&results["results"][1].to_string()).unwrap()["sim"].is_object());
     }
 
     // Consecutive calendar dates from 2024-01-01, without a date library.

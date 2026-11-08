@@ -30,13 +30,14 @@ export async function saveKeys(keys) {
 export async function clearKey(provider) {
   return invoke("clear_key", { provider });
 }
-export async function fetchData(provider, kind, symbol) {
+// force: new data is known to exist, so skip the usual cache lifetime.
+export async function fetchData(provider, kind, symbol, force = false) {
   if (!native) throw Error("Live data connects in the desktop app.");
-  return invoke("fetch_data", { provider, kind, symbol });
+  return invoke("fetch_data", { provider, kind, symbol, force });
 }
-export async function fetchSEC(kind, cik = "", accession = "", doc = "") {
+export async function fetchSEC(kind, cik = "", accession = "", doc = "", force = false) {
   if (!native) throw Error("Live data connects in the desktop app.");
-  return invoke("fetch_sec", { kind, cik, accession, doc });
+  return invoke("fetch_sec", { kind, cik, accession, doc, force });
 }
 export const aisStart = (area, lat, lon) => invoke("ais_start", { area, lat, lon });
 export const aisStop = () => (native ? invoke("ais_stop") : Promise.resolve());
@@ -70,3 +71,5 @@ export const quantStatus = (refresh = false) => call("quant_status", { refresh }
 export const quantChoose = () => call("quant_choose");
 export const quantForget = () => call("quant_forget");
 export const quantAnalyze = (input) => call("quant_analyze", { input });
+export const quantAnalyzeBatch = (inputs) => call("quant_analyze_batch", { inputs });
+export const quantCached = (symbols) => call("quant_cached", { symbols });

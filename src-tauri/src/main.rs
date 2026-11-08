@@ -192,6 +192,7 @@ async fn fetch_data(
     provider: String,
     kind: String,
     symbol: String,
+    force: Option<bool>,
 ) -> Result<Value, String> {
     providers::validate(&provider, &kind, &symbol)?;
     // Slow free plans (Alpha Vantage waits 13 s between calls) must not hold
@@ -207,7 +208,7 @@ async fn fetch_data(
             .map_err(|e| e.to_string())?
     };
     if let Some((body, stamp)) = &cached {
-        if now() - stamp < rules.ttl {
+        if fresh(*stamp, rules.ttl, force.unwrap_or(false)) {
             return Ok(json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"provider":provider}));
         }
     }
@@ -277,6 +278,13 @@ async fn fetch_data(
 }
 /// SEC EDGAR data. Keyless; documents and the company directory need the
 /// user's contact email, which is sent only to sec.gov.
+/// Whether a cached response can be served. `force` (new data is known to
+/// exist) skips the normal lifetime but still reuses anything under 10
+/// minutes old, so a burst of refreshes never hammers a provider.
+fn fresh(stamp: i64, ttl: i64, force: bool) -> bool {
+    let age = now() - stamp;
+    age < if force { ttl.min(600) } else { ttl }
+}
 #[tauri::command]
 async fn fetch_sec(
     b: tauri::State<'_, Backend>,
@@ -284,6 +292,7 @@ async fn fetch_sec(
     cik: String,
     accession: String,
     doc: String,
+    force: Option<bool>,
 ) -> Result<Value, String> {
     let (url, needs_contact, ttl) = sec::resource(&kind, &cik, &accession, &doc)?;
     let cache_key = format!("sec:{url}");
@@ -294,7 +303,7 @@ async fn fetch_sec(
             .map_err(|e| e.to_string())?
     };
     if let Some((body, stamp)) = &cached {
-        if now() - stamp < ttl {
+        if fresh(*stamp, ttl, force.unwrap_or(false)) {
             return Ok(json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"provider":"sec"}));
         }
     }
@@ -1142,7 +1151,69 @@ async fn quant_analyze(b: tauri::State<'_, Backend>, input: Value) -> Result<Val
     // The first run on a computer can be slow while the OS checks the
     // library's native files; later runs take a few seconds.
     let out = quant::run(&env.python, quant::SCRIPT, request.as_bytes(), std::time::Duration::from_secs(240)).await?;
-    quant::response(&out)
+    let data = quant::response(&out)?;
+    save_quant(&b, &input, &data);
+    Ok(data)
+}
+/// Analyzes several stocks in one Python run (the watchlist sweep). Returns
+/// one entry per input: { data } or { error }.
+#[tauri::command]
+async fn quant_analyze_batch(b: tauri::State<'_, Backend>, inputs: Vec<Value>) -> Result<Vec<Value>, String> {
+    let env = quant_env(&b, false).await.ok_or("No Python 3 found.")?;
+    if env.gs_quant.is_none() {
+        return Err(format!("gs-quant is not installed for {}.", env.python.display()));
+    }
+    let (stdin, slots) = quant::batch_request(&inputs);
+    let results = if slots.iter().any(|s| s.is_ok()) {
+        let _one_at_a_time = b.quant_gate.lock().await;
+        let out = quant::run(&env.python, quant::SCRIPT, stdin.as_bytes(), std::time::Duration::from_secs(600)).await?;
+        let v: Value = serde_json::from_str(out.trim()).map_err(|_| "gs-quant returned something unreadable.".to_string())?;
+        v["results"].as_array().cloned().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok(slots
+        .into_iter()
+        .zip(&inputs)
+        .map(|(slot, input)| match slot {
+            Err(e) => json!({ "error": e }),
+            Ok(i) => match results.get(i).map(|r| quant::response(&r.to_string())) {
+                Some(Ok(data)) => {
+                    save_quant(&b, input, &data);
+                    json!({ "data": data })
+                }
+                Some(Err(e)) => json!({ "error": e }),
+                None => json!({ "error": "No result" }),
+            },
+        })
+        .collect())
+}
+/// Keeps the latest result per stock so the view opens instantly next launch.
+fn save_quant(b: &Backend, input: &Value, data: &Value) {
+    let Some(symbol) = input["symbol"].as_str().filter(|s| s.len() <= 30) else { return };
+    let body = json!({ "key": input["key"].as_str().unwrap_or("").chars().take(200).collect::<String>(), "at": now(), "data": data }).to_string();
+    if let Ok(db) = b.db.lock() {
+        let _ = db.execute(
+            "INSERT INTO cache(id,body,stamp) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body,stamp=excluded.stamp",
+            params![format!("quant:{symbol}"), body, now()],
+        );
+    }
+}
+/// Saved results for these stocks: { SYMBOL: { key, at, data } }.
+#[tauri::command]
+fn quant_cached(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<Value, String> {
+    let db = b.db.lock().map_err(|_| "Database unavailable")?;
+    let mut out = serde_json::Map::new();
+    for s in symbols.iter().take(200).filter(|s| s.len() <= 30) {
+        let body: Option<String> = db
+            .query_row("SELECT body FROM cache WHERE id=?1", [format!("quant:{s}")], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(v) = body.and_then(|b| serde_json::from_str::<Value>(&b).ok()) {
+            out.insert(s.clone(), v);
+        }
+    }
+    Ok(Value::Object(out))
 }
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
@@ -1155,5 +1226,5 @@ fn main() {
                     _ => {}
                 }
             }
-            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d))});Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d))});Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

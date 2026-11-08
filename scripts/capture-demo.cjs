@@ -109,6 +109,8 @@ function demoBackend(constituents) {
   const handlers = {
     quant_status: (a) => window.__quantStandin.status(a),
     quant_analyze: (a) => window.__quantStandin.analyze(a),
+    quant_analyze_batch: ({ inputs }) => inputs.map((input) => ({ data: window.__quantStandin.analyze({ input }) })),
+    quant_cached: () => ({}),
     quant_choose: () => null,
     quant_forget: (a) => window.__quantStandin.status(a),
     load_state: () => store("native-state"),

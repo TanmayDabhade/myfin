@@ -97,7 +97,8 @@ import {
 import { sample } from "./sample.js";
 import { BENCHMARK, quantRequest, quantKey, fredRate, RISK_ROWS, formatRisk, bandPosition } from "./quant.js";
 import { fanChart, outcomeHistogram, scenarioChart, dailyHistogram, lineChart, hover, money as rcMoney, pct as signedPct, plain as plainPct } from "./riskcharts.js";
-import { quantStatus, quantChoose, quantForget, quantAnalyze } from "./bridge.js";
+import { quantStatus, quantChoose, quantForget, quantAnalyze, quantAnalyzeBatch, quantCached } from "./bridge.js";
+import { usMarketOpen, newFilings, refreshPlan, quantDue } from "./fresh.js";
 import { applyTrade, nyDate } from "./live.js";
 import {
   risk,
@@ -1255,10 +1256,10 @@ function followGraph() {
 }
 // Finnhub REST datasets for the loaded stock: news, metrics, profile, earnings.
 const fh = (kind, s = symbol) => (state.mode === "market" ? state.datasets[`${s}:FH_${kind}`]?.data : null);
-async function loadFinnhub(kind, s) {
+async function loadFinnhub(kind, s, force = false) {
   const key = `${s}:FH_${kind}`;
   try {
-    const d = await fetchData("finnhub", kind, s);
+    const d = await fetchData("finnhub", kind, s, force);
     state.datasets[key] = d;
     delete loadErrors[key];
     if (d.warning) lastError.finnhub = d.warning;
@@ -1648,7 +1649,7 @@ function valuation() {
     .map(([id, label]) => `<label>${label}<input id="${id}" type="number" step="any" value="${inputValue(id, m.inputs[id])}">${m.sources[id] ? `<small>${esc(m.sources[id])}</small>` : ""}</label>`)
     .join("")}</div>${button("Calculate and save", "dcf", "primary")}${m.origin === "saved" && state.mode === "market" ? button("Use filing values", "dcf-reset") : ""}${button("Export model", "dcf-export")}<small>Negative enterprise or equity values are shown, not clipped. ${m.fetchedAt ? `SEC XBRL company facts, read ${new Date(m.fetchedAt * 1000).toLocaleDateString()}.` : ""}</small></section><section class="panel"><div class="panel-head"><h2>Valuation range</h2></div><div id="dcf-results"></div></section></div><section class="panel"><div class="panel-head"><h2>Sensitivity · value per share</h2><small>Discount rate × terminal growth</small></div><div id="sensitivity"></div></section>`;
 }
-async function loadValuation(s) {
+async function loadValuation(s, force = false) {
   try {
     const cik = await resolveCIK(s);
     const facts = {};
@@ -1656,12 +1657,12 @@ async function loadValuation(s) {
       // Debt reported as one total doesn't need its parts.
       if (facts.LongTermDebt && /^LongTermDebt(Non)?[Cc]urrent$/.test(tag)) continue;
       try {
-        facts[tag] = (await fetchSEC("concept", cik, "", tag)).data;
+        facts[tag] = (await fetchSEC("concept", cik, "", tag, force)).data;
       } catch {
         // Not every company reports every concept.
       }
     }
-    const shares = await fetchSEC("shares", cik).catch(() => null);
+    const shares = await fetchSEC("shares", cik, "", "", force).catch(() => null);
     facts.sharesOut = shares ? sharesSeries(shares.data).at(-1) || null : null;
     if (!state.secData?.[s]) await loadSEC(s).catch(() => {});
     facts.revenue = state.secData?.[s]?.revenue || [];
@@ -1889,14 +1890,14 @@ async function resolveCIK(s) {
   (state.secCIK ||= {})[s] = padCIK(hit.cik_str);
   return state.secCIK[s];
 }
-async function loadSEC(s) {
+async function loadSEC(s, force = false) {
   try {
     const cik = await resolveCIK(s);
     const sub = await fetchSEC("submissions", cik);
     let revenue = [];
     for (const tag of REVENUE_TAGS) {
       try {
-        revenue = revenueHistory((await fetchSEC("revenue", cik, "", tag)).data);
+        revenue = revenueHistory((await fetchSEC("revenue", cik, "", tag, force)).data);
       } catch {
         revenue = [];
       }
@@ -2542,12 +2543,23 @@ function download(name, content, type = "text/plain") {
 // Results live for the session and are recomputed when prices change.
 let quantEnv = null, // quant_status: { python, version, gsQuant, chosen, bundled, install } or { error }
   quantChecking = null;
-const quantRuns = {}; // symbol -> { key, running } | { key, data, fed } | { key, error }
+// symbol -> { key, lastDate, at, data, fed, running, error }. Data stays
+// visible while a newer run is in progress or after one fails.
+const quantRuns = {};
+let quantSweeping = null,
+  quantSweptAt = 0;
 function checkQuant(again = false) {
   if (!native) return Promise.resolve(null);
   if (quantChecking) return quantChecking;
   quantChecking = quantStatus(again)
-    .then((s) => (quantEnv = s))
+    .then(async (s) => {
+      quantEnv = s;
+      // Show saved results right away, then bring the watchlist up to date.
+      if (s?.gsQuant) {
+        await loadQuantCache();
+        quantSweep();
+      }
+    })
     .catch((e) => (quantEnv = { error: message(e) }))
     .finally(() => {
       quantChecking = null;
@@ -2555,22 +2567,79 @@ function checkQuant(again = false) {
     });
   return quantChecking;
 }
-function runQuant(force = false) {
-  const a = stockAsset();
-  if (!native || !quantEnv?.gsQuant || !a?.bars?.length) return;
+// What gs-quant gets for one stock: its closes (today's bar follows live
+// trades), SPY and the cash rate. `key` identifies those inputs.
+function quantReq(s) {
+  const a = activeMap()[s];
+  if (!a?.bars?.length) return null;
   const bench = assets().find((x) => x.symbol === BENCHMARK) || null;
   const fed = state.mode === "market" ? fredRate(state.macro.FEDFUNDS) : null;
   const req = quantRequest(a.symbol, a.bars, bench, fed?.rate || 0);
-  const key = quantKey(req),
-    s = a.symbol,
+  if (req.closes.length < 30) return null;
+  req.key = quantKey(req);
+  return { req, fed };
+}
+const quantDone = (s, req, fed, data) => (quantRuns[s] = { key: req.key, lastDate: req.closes.at(-1)[0], at: Date.now() / 1000, data, fed, live: usMarketOpen() });
+async function loadQuantCache() {
+  const want = [...new Set([symbol, ...state.watchlist])].filter((s) => s && !quantRuns[s]?.data);
+  if (!want.length) return;
+  try {
+    const saved = await quantCached(want);
+    for (const [s, v] of Object.entries(saved || {}))
+      if (v?.data && !quantRuns[s]?.data) quantRuns[s] = { key: v.key, lastDate: v.data.asOf, at: v.at, data: v.data, saved: true };
+  } catch {
+    // Nothing saved yet.
+  }
+}
+// The open stock: computed on demand, at most every 5 minutes while live
+// prices move, immediately on a new trading day or when forced.
+function runQuant(force = false) {
+  const s = stockAsset()?.symbol;
+  if (!native || !quantEnv?.gsQuant || !s) return;
+  const x = quantReq(s),
     prev = quantRuns[s];
-  if (prev?.running || (!force && prev?.key === key)) return;
-  quantRuns[s] = { key, running: true };
-  quantAnalyze(req)
-    .then((data) => (quantRuns[s] = { key, data, fed }))
-    .catch((e) => (quantRuns[s] = { key, error: message(e) }))
+  if (!x || prev?.running || (!force && !quantDue(prev, x.req, Date.now() / 1000, 300))) return;
+  quantRuns[s] = { ...prev, running: true, error: null };
+  quantAnalyze(x.req)
+    .then((data) => quantDone(s, x.req, x.fed, data))
+    .catch((e) => (quantRuns[s] = { ...prev, running: false, error: message(e) }))
     .finally(refresh);
 }
+// The whole watchlist (and the open stock) in one Python run per 10 stocks.
+function quantSweep() {
+  if (!native || !quantEnv?.gsQuant || quantSweeping) return quantSweeping;
+  const minAge = usMarketOpen() ? 900 : 3600;
+  const todo = [...new Set([symbol, ...state.watchlist])]
+    .map((s) => [s, quantReq(s)])
+    .filter(([s, x]) => x && !quantRuns[s]?.running && quantDue(quantRuns[s], x.req, Date.now() / 1000, minAge));
+  quantSweptAt = Date.now();
+  if (!todo.length) return null;
+  for (const [s] of todo) quantRuns[s] = { ...quantRuns[s], running: true, error: null };
+  refresh();
+  quantSweeping = (async () => {
+    for (let i = 0; i < todo.length; i += 10) {
+      const chunk = todo.slice(i, i + 10);
+      try {
+        const results = await quantAnalyzeBatch(chunk.map(([, x]) => x.req));
+        chunk.forEach(([s, x], j) => {
+          const r = results[j];
+          if (r?.data) quantDone(s, x.req, x.fed, r.data);
+          else quantRuns[s] = { ...quantRuns[s], running: false, error: r?.error || "No result" };
+        });
+      } catch (e) {
+        for (const [s] of chunk) quantRuns[s] = { ...quantRuns[s], running: false, error: message(e) };
+      }
+      refresh();
+    }
+  })().finally(() => (quantSweeping = null));
+  return quantSweeping;
+}
+// Every minute: rerun the watchlist every 15 minutes while the market is
+// open (live prices), hourly otherwise (only if something changed).
+setInterval(() => {
+  if (!native || !quantEnv?.gsQuant) return;
+  if (Date.now() - quantSweptAt >= (usMarketOpen() ? 15 : 60) * 60 * 1000) quantSweep();
+}, 60 * 1000);
 const gsQuantLink = () => link("https://github.com/goldmansachs/gs-quant", "gs-quant on GitHub");
 // What's missing before analytics can run, or "" when ready.
 function quantBlocker(full) {
@@ -2585,6 +2654,7 @@ function quantBlocker(full) {
 }
 function quantResult(full) {
   const r = quantRuns[symbol];
+  if (r?.data) return "";
   if (!stockAsset()) return noStock();
   if (!r || r.running) return empty(`Calculating with GS Quant…${full ? "<br><small>The first run on a computer can take longer while the system checks the library's files.</small>" : ""}`);
   if (r.error) return `<div class="empty">${esc(r.error)}${full ? `<div class="quant-actions">${button("Try again", "quant-run")}${button("Choose Python…", "quant-choose")}</div>` : ""}</div>`;
@@ -2618,8 +2688,13 @@ const meter = (label, value, min, max, marks, note) => {
 };
 function riskView() {
   const ready = native && quantEnv?.gsQuant;
-  const head = `<div class="panel-head"><h2>Risk analytics · GS Quant</h2>${ready ? button("Recalculate", "quant-run") : ""}</div>`;
-  const about = `<p class="muted">Calculated on this computer from the daily closes in this workspace, with Goldman Sachs' open-source gs-quant library for the risk measures and numpy for the simulations. Nothing is sent to Goldman Sachs. ${gsQuantLink()}</p>`;
+  const run = quantRuns[symbol];
+  const stamp = run?.data
+    ? `<span class="pill ${run.running ? "live" : ""}">${run.running ? "Updating…" : `Updated ${new Date(run.at * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}${run.live ? " · live prices" : ""}`}</span>`
+    : "";
+  const head = `<div class="panel-head"><h2>Risk analytics · GS Quant ${stamp}</h2>${ready ? button("Recalculate", "quant-run") : ""}</div>`;
+  const failed = run?.data && run.error ? `<p class="down">Last update failed: ${esc(run.error)}. Showing the previous result.</p>` : "";
+  const about = `${failed}<p class="muted">Calculated on this computer from the daily closes in this workspace, with Goldman Sachs' open-source gs-quant library for the risk measures and numpy for the simulations. Watchlist stocks are recalculated in the background: every 15 minutes with live prices while the US market is open, and whenever new daily prices arrive. Nothing is sent to Goldman Sachs. ${gsQuantLink()}</p>`;
   const wait = quantBlocker(true) || quantResult(true);
   if (wait) return `<section class="panel">${head}${about}${wait}</section>`;
   const r = quantRuns[symbol],
@@ -2751,10 +2826,10 @@ async function loadPricesFrom(p, s) {
     return d;
   }
 }
-async function loadDataset(kind, s) {
+async function loadDataset(kind, s, force = false) {
   const key = `${s}:${kind}`;
   try {
-    const d = await fetchData("alpha", kind, s);
+    const d = await fetchData("alpha", kind, s, force);
     state.datasets[key] = d;
     if (kind === "OVERVIEW") {
       if (!d.data.Symbol)
@@ -2886,8 +2961,46 @@ async function syncWatchlist() {
     syncLabel = failed.length ? `Couldn't update ${failed.join(", ")} · see Settings` : "";
     await persist();
     refresh();
+    quantSweep();
+    watchFresh();
   })().finally(() => (syncing = null));
   return syncing;
+}
+// ---- New data on the watchlist ------------------------------------------------
+// None of the free sources push updates, so each is checked on its own clock:
+// SEC filing lists every 30 minutes (a new 10-K/10-Q refetches statements,
+// valuation inputs and revenue, skipping the usual cache), Finnhub news,
+// metrics and earnings every 30 minutes, FRED series every 12 hours.
+let watching = null;
+function watchFresh() {
+  if (!native || !live() || watching) return watching;
+  const updates = [];
+  watching = (async () => {
+    for (const s of [...new Set(state.watchlist)].filter(isUSKey)) {
+      if (cikFor(s) || hasKey("sec")) {
+        const before = state.secData?.[s]?.filings;
+        if (stale(state.secData?.[s], 1800)) await enqueue("sec:" + s, () => loadSEC(s)).catch(() => {});
+        const plan = refreshPlan(s, newFilings(before, state.secData?.[s]?.filings));
+        if (plan.statements) {
+          if (hasKey("alpha")) for (const kind of ["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"]) await enqueue(`${s}:${kind}:new`, () => loadDataset(kind, s, true)).catch(() => {});
+          await enqueue(`val:${s}:new`, () => loadValuation(s, true)).catch(() => {});
+          await enqueue(`sec:${s}:new`, () => loadSEC(s, true)).catch(() => {});
+        }
+        if (plan.news && hasKey("finnhub")) for (const kind of ["company-news", "earnings", "metric"]) await loadFinnhub(kind, s, true).catch(() => {});
+        if (plan.summary) updates.push(plan.summary);
+      }
+      if (hasKey("finnhub"))
+        for (const kind of ["company-news", "metric", "earnings"]) if (stale(state.datasets[`${s}:FH_${kind}`], 1800)) await loadFinnhub(kind, s).catch(() => {});
+    }
+    if (hasKey("fred"))
+      for (const id of [...Object.keys(macroSeries), ...Object.keys(commoditySeries)]) if (stale(state.macro[id], 43200)) await enqueue("fred:" + id, () => loadMacro(id)).catch(() => {});
+    await persist();
+    if (updates.length) notify(updates.join(" · "));
+    refresh();
+    // A new cash rate or statement can change the analytics too.
+    quantSweep();
+  })().finally(() => (watching = null));
+  return watching;
 }
 // Loads daily prices and listing details for a ticker not yet in the
 // workspace, without adding it to the watchlist.
@@ -3679,5 +3792,8 @@ document.addEventListener("keydown", (e) => {
 render();
 syncWatchlist();
 autoReference().then(() => refresh());
+// Find GS Quant at launch so the watchlist's analytics are ready before
+// anyone opens them.
+checkQuant();
 // Daily data: re-check every 30 minutes. Cached data costs no requests.
 setInterval(() => syncWatchlist(), 30 * 60 * 1000);

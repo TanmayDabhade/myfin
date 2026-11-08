@@ -58,7 +58,8 @@ pub fn user_agent(contact: &str) -> String {
 pub fn resource(kind: &str, cik_raw: &str, accession: &str, doc: &str) -> Result<(String, bool, i64), String> {
     match kind {
         "tickers" => Ok(("https://www.sec.gov/files/company_tickers.json".into(), true, 7 * 86_400)),
-        "submissions" => Ok((format!("https://data.sec.gov/submissions/CIK{}.json", cik(cik_raw)?), false, 21_600)),
+        // Checked every 30 minutes so new filings show up the same hour.
+        "submissions" => Ok((format!("https://data.sec.gov/submissions/CIK{}.json", cik(cik_raw)?), false, 1_800)),
         "revenue" => {
             if !REVENUE_TAGS.contains(&doc) {
                 return Err("Unsupported XBRL concept".into());
