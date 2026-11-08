@@ -8,6 +8,7 @@ mod f13;
 mod universe;
 mod market;
 mod legacy;
+mod quant;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -27,6 +28,11 @@ struct Backend {
     env_keys: Credentials,
     saved_keys: Mutex<Credentials>,
     key_path: std::path::PathBuf,
+    /// Python with gs-quant: (detection has run, what it found).
+    quant: tokio::sync::Mutex<(bool, Option<quant::Env>)>,
+    quant_gate: tokio::sync::Mutex<()>,
+    /// The Python with gs-quant that ships inside the app, when present.
+    bundled_python: Option<std::path::PathBuf>,
     ais: std::sync::Arc<Mutex<AisRuntime>>,
     quotes: std::sync::Arc<Mutex<QuoteRuntime>>,
     http: reqwest::Client,
@@ -1079,6 +1085,65 @@ async fn run_quotes(shared: std::sync::Arc<Mutex<QuoteRuntime>>, session: u64, k
         attempt += 1;
     }
 }
+// ---- GS Quant ---------------------------------------------------------------
+// Risk analytics from gs-quant, run in the user's own Python (see quant.rs).
+async fn quant_env(b: &Backend, refresh: bool) -> Option<quant::Env> {
+    let mut q = b.quant.lock().await;
+    if q.0 && !refresh {
+        return q.1.clone();
+    }
+    let choice = b.key_path.with_file_name("quant.json");
+    let mut env = None;
+    if let Some(p) = quant::load_choice(&choice) {
+        env = quant::probe(&p, true).await.ok();
+    }
+    if env.is_none() {
+        // An explicit APERTURE_PYTHON wins, then the app's own Python, then
+        // whatever is installed on this computer.
+        let mut list: Vec<std::path::PathBuf> = std::env::var_os("APERTURE_PYTHON").map(Into::into).into_iter().collect();
+        list.extend(b.bundled_python.clone());
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from);
+        list.extend(quant::candidates(std::env::var("PATH").ok().as_deref(), home.as_deref()));
+        env = quant::detect(&list, b.bundled_python.as_deref()).await;
+    }
+    *q = (true, env.clone());
+    env
+}
+#[tauri::command]
+async fn quant_status(b: tauri::State<'_, Backend>, refresh: bool) -> Result<Value, String> {
+    Ok(quant::Env::status(quant_env(&b, refresh).await.as_ref()))
+}
+/// The user picks a Python in a file dialog; the page cannot name one itself.
+#[tauri::command]
+async fn quant_choose(app: tauri::AppHandle, b: tauri::State<'_, Backend>) -> Result<Value, String> {
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_title("Choose a Python 3 interpreter").blocking_pick_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(picked) = picked else { return Ok(Value::Null) };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let env = quant::probe(&path, true).await?;
+    quant::save_choice(&b.key_path.with_file_name("quant.json"), Some(&path)).map_err(|e| e.to_string())?;
+    *b.quant.lock().await = (true, Some(env.clone()));
+    Ok(quant::Env::status(Some(&env)))
+}
+#[tauri::command]
+async fn quant_forget(b: tauri::State<'_, Backend>) -> Result<Value, String> {
+    quant::save_choice(&b.key_path.with_file_name("quant.json"), None).map_err(|e| e.to_string())?;
+    Ok(quant::Env::status(quant_env(&b, true).await.as_ref()))
+}
+#[tauri::command]
+async fn quant_analyze(b: tauri::State<'_, Backend>, input: Value) -> Result<Value, String> {
+    let request = quant::request(&input)?;
+    let env = quant_env(&b, false).await.ok_or("No Python 3 found. Install Python 3, then run: python3 -m pip install gs-quant")?;
+    if env.gs_quant.is_none() {
+        return Err(format!("gs-quant is not installed for {}. Run: {} -m pip install gs-quant", env.python.display(), env.python.display()));
+    }
+    let _one_at_a_time = b.quant_gate.lock().await;
+    // The first run on a computer can be slow while the OS checks the
+    // library's native files; later runs take a few seconds.
+    let out = quant::run(&env.python, quant::SCRIPT, request.as_bytes(), std::time::Duration::from_secs(240)).await?;
+    quant::response(&out)
+}
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;
@@ -1090,5 +1155,5 @@ fn main() {
                     _ => {}
                 }
             }
-            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default()});Ok(())}).invoke_handler(tauri::generate_handler![load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
+            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d))});Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get]).run(tauri::generate_context!()).expect("Could not launch Market Lens");
 }

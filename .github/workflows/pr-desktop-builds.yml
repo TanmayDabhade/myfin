@@ -58,6 +58,14 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           npm run test:e2e
+      - name: Bundle Python and GS Quant
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            node scripts/bundle-python.cjs aarch64-apple-darwin x86_64-apple-darwin
+          else
+            node scripts/bundle-python.cjs
+          fi
       - run: npm run tauri build -- ${{ matrix.args }}
       - name: Launch built app (Linux)
         if: runner.os == 'Linux'

@@ -7,3 +7,6 @@ src-tauri/gen/
 playwright-report/
 test-results/
 .superpowers/
+# Bundled Python, built by scripts/bundle-python.cjs
+src-tauri/resources/python/*
+!src-tauri/resources/python/.gitkeep
