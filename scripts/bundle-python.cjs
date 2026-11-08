@@ -25,8 +25,8 @@ const VERSION = "3.13.16";
 const PY = "3.13";
 // SHA-256 from the release's published asset digests.
 const BUILDS = {
-  "aarch64-apple-darwin": { sha256: "16a5332fb0dcb77f163fc8f8cbccd95be1644cc53e68e5d2a79f50afd6680a0e", platform: "macosx_11_0_arm64" },
-  "x86_64-apple-darwin": { sha256: "f507ae04eb7747cd97cb484e8c5d83936cbfc52d9b08a1f35c00b47c707b1ae1", platform: "macosx_11_0_x86_64" },
+  "aarch64-apple-darwin": { sha256: "16a5332fb0dcb77f163fc8f8cbccd95be1644cc53e68e5d2a79f50afd6680a0e", platform: "macosx_12_0_arm64" },
+  "x86_64-apple-darwin": { sha256: "f507ae04eb7747cd97cb484e8c5d83936cbfc52d9b08a1f35c00b47c707b1ae1", platform: "macosx_12_0_x86_64" },
   "x86_64-pc-windows-msvc": { sha256: "7aba3985d4cee1c7cacb963ca6aa08a5d3e695d7f9609d9fabc56f22ddcf5a06", platform: "win_amd64" },
   "x86_64-unknown-linux-gnu": { sha256: "d0080766b6b74aeb81e1949ef0d9a20e6c17f7b160fb295a69b936ccb17660be", platform: "manylinux_2_28_x86_64" },
 };

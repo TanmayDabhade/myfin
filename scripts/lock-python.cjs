@@ -10,11 +10,24 @@ const path = require("path");
 
 const SPEC = path.join(__dirname, "..", "src-tauri", "python");
 const PY = "313";
+// Must match the --platform tags in bundle-python.cjs: pip accepts a wheel for
+// that OS version or older (macOS) / that glibc or older (Linux).
+const MAC = { arm64: 12, x86_64: 12 };
+const GLIBC = 28;
+const mac = (arch) => (p) => {
+  const m = p.match(/^macosx_(\d+)_(\d+)_(\w+)$/);
+  return !!m && +m[1] <= MAC[arch] && (m[3] === arch || m[3] === "universal2" || (arch === "x86_64" && m[3] === "intel"));
+};
+const linux = (p) => {
+  if (["manylinux1_x86_64", "manylinux2010_x86_64", "manylinux2014_x86_64"].includes(p)) return true;
+  const m = p.match(/^manylinux_2_(\d+)_x86_64$/);
+  return !!m && +m[1] <= GLIBC;
+};
 const PLATFORMS = {
-  "aarch64-apple-darwin": (p) => /macosx_\d+_\d+_(arm64|universal2)/.test(p),
-  "x86_64-apple-darwin": (p) => /macosx_\d+_\d+_(x86_64|universal2|intel)/.test(p),
+  "aarch64-apple-darwin": mac("arm64"),
+  "x86_64-apple-darwin": mac("x86_64"),
   "x86_64-pc-windows-msvc": (p) => p === "win_amd64",
-  "x86_64-unknown-linux-gnu": (p) => /^(manylinux\d*_[\d_]*x86_64|manylinux_2_(\d+)_x86_64)$/.test(p) && !/musllinux/.test(p),
+  "x86_64-unknown-linux-gnu": linux,
 };
 const norm = (n) => n.toLowerCase().replace(/[-_.]+/g, "-");
 
