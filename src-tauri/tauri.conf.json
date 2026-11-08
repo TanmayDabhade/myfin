@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Market Lens",
+  "productName": "Aperture",
   "version": "0.3.0",
-  "identifier": "com.marketlens.desktop",
+  "identifier": "com.aperture.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Market Lens",
+        "title": "Aperture",
         "width": 1440,
         "height": 940,
         "minWidth": 1000,

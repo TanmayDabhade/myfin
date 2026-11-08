@@ -26,7 +26,7 @@ test("a fresh sample workspace keeps the first-run screen", () => {
 });
 
 test("workspaces from a newer version are refused rather than damaged", () => {
-  assert.throws(() => migrate({ ...sample(), schema: SCHEMA + 1 }), /newer Market Lens/);
+  assert.throws(() => migrate({ ...sample(), schema: SCHEMA + 1 }), /newer version of Aperture/);
 });
 
 test("backups containing Twelve Data prices restore", () => {

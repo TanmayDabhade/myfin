@@ -10,7 +10,7 @@ After this workflow is merged and the first eligible PR has published successful
 
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
-brew install --cask tanmaydabhade/myfin/market-lens-preview
+brew install --cask tanmaydabhade/myfin/aperture-preview
 ```
 
 The same repository is the tap; the explicit URL is necessary because it is not named `homebrew-myfin`.
@@ -19,7 +19,7 @@ To update the installed application:
 
 ```sh
 brew update
-brew upgrade --cask tanmaydabhade/myfin/market-lens-preview
+brew upgrade --cask tanmaydabhade/myfin/aperture-preview
 ```
 
 To install if missing, or upgrade if already installed:
@@ -27,18 +27,22 @@ To install if missing, or upgrade if already installed:
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
 brew update
-if brew list --cask tanmaydabhade/myfin/market-lens-preview >/dev/null 2>&1; then
-  brew upgrade --cask tanmaydabhade/myfin/market-lens-preview
+if brew list --cask tanmaydabhade/myfin/aperture-preview >/dev/null 2>&1; then
+  brew upgrade --cask tanmaydabhade/myfin/aperture-preview
 else
-  brew install --cask tanmaydabhade/myfin/market-lens-preview
+  brew install --cask tanmaydabhade/myfin/aperture-preview
 fi
 ```
 
-`brew update` refreshes the cask definition; `brew upgrade` downloads the checksum-verified archive and replaces `/Applications/Market Lens.app`. Workspace data is not deleted. Quit the app before upgrading. An existing manually installed copy may need to be removed from Applications before the first Homebrew install; retain its application-data folder. These builds are not Developer ID signed/notarized, so Gatekeeper may block launch. This setup does not disable quarantine or OS security controls.
+`brew update` refreshes the cask definition; `brew upgrade` downloads the checksum-verified archive and replaces `/Applications/Aperture.app`. Workspace data is not deleted. Quit the app before upgrading. An existing manually installed copy may need to be removed from Applications before the first Homebrew install; retain its application-data folder. These builds are not Developer ID signed/notarized, so Gatekeeper may block launch. This setup does not disable quarantine or OS security controls.
+
+## Coming from Market Lens
+
+The app was called Market Lens until 0.3. `cask_renames.json` maps the old `market-lens-preview` cask to `aperture-preview`, so `brew update && brew upgrade --cask aperture-preview` moves an existing install over and replaces `Market Lens.app` with `Aperture.app`. On its first launch Aperture moves the workspace, saved keys and SEC downloads from the old `com.marketlens.desktop` data folder into `com.aperture.desktop`; nothing has to be re-entered.
 
 ## Preview channel
 
-After publishing a non-draft PR from this repository, the trusted publisher writes only `Casks/market-lens-preview.rb` on the default branch, with the immutable release URL and actual archive checksum. This generated distribution metadata commit does not merge the feature PR. The cask version is `0.0.<build-run-number>` so newer successful builds are recognized even though the app itself still reports 0.1.0. Older runs cannot downgrade the tap. Fork PRs and draft PRs get releases but never automatically replace the Homebrew channel. If multiple PRs are open, the channel tracks the newest eligible successful build, not a combined build of all PRs.
+After publishing a non-draft PR from this repository, the trusted publisher writes only `Casks/aperture-preview.rb` on the default branch, with the immutable release URL and actual archive checksum. This generated distribution metadata commit does not merge the feature PR. The cask version is `0.0.<build-run-number>` so newer successful builds are recognized even though the app itself still reports 0.1.0. Older runs cannot downgrade the tap. Fork PRs and draft PRs get releases but never automatically replace the Homebrew channel. If multiple PRs are open, the channel tracks the newest eligible successful build, not a combined build of all PRs.
 
 ## Activation and permissions
 

@@ -48,9 +48,9 @@ pub fn valid_contact(email: &str) -> bool {
 
 pub fn user_agent(contact: &str) -> String {
     if contact.is_empty() {
-        "MarketLens/0.3 (desktop research app)".into()
+        "Aperture/0.3 (desktop research app)".into()
     } else {
-        format!("MarketLens/0.3 (desktop research app) {contact}")
+        format!("Aperture/0.3 (desktop research app) {contact}")
     }
 }
 

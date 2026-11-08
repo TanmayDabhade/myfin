@@ -66,13 +66,13 @@ jobs:
         run: |
           sudo apt-get install -y xvfb
           set +e
-          timeout 20 xvfb-run -a src-tauri/target/release/market-lens
+          timeout 20 xvfb-run -a src-tauri/target/release/aperture
           code=$?
           if [ "$code" -ne 124 ]; then
-            echo "Market Lens exited after launch with code $code (expected to still be running)"
+            echo "Aperture exited after launch with code $code (expected to still be running)"
             exit 1
           fi
-          echo "Market Lens started and stayed running for 20 seconds"
+          echo "Aperture started and stayed running for 20 seconds"
       - name: Collect installers
         shell: bash
         env:
@@ -89,11 +89,11 @@ jobs:
               files = list(Path('src-tauri/target').glob('**/release/bundle/**/*' + ext))
               if len(files) != 1:
                   raise SystemExit(f'Expected one {ext} installer, got {len(files)}')
-              shutil.copy2(files[0], out / ('Market-Lens-' + platform + ext))
+              shutil.copy2(files[0], out / ('Aperture-' + platform + ext))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: Market-Lens-${{ matrix.platform }}
+          name: Aperture-${{ matrix.platform }}
           path: installers/*
           if-no-files-found: error
           retention-days: 14

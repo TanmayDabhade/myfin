@@ -1,9 +1,9 @@
-# Run Market Lens on your desktop
+# Run Aperture on your desktop
 
 This download is the source project, not an installer.
 
 1. Install Node.js 22+ and Rust stable. On a Mac, install Xcode command-line tools with `xcode-select --install`.
-2. Open Terminal inside the extracted `market-lens` directory.
+2. Open Terminal inside the extracted project directory.
 3. Run:
 
 ```sh
