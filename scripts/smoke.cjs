@@ -15,6 +15,8 @@ function fakeBackend() {
   const handlers = {
     quant_status: (a) => window.__quantStandin.status(a),
     quant_analyze: (a) => window.__quantStandin.analyze(a),
+    quant_analyze_batch: ({ inputs }) => inputs.map((input) => ({ data: window.__quantStandin.analyze({ input }) })),
+    quant_cached: () => ({}),
     quant_choose: () => null,
     quant_forget: (a) => window.__quantStandin.status(a),
     load_state: () => store("native-state"),
@@ -304,6 +306,7 @@ async function liveFlow(browser, errors) {
   await page.waitForSelector("[data-tile='RSK'] >> text=Chance higher in a year", { timeout: 10000 });
   await page.click('.fn-strip [data-value="RSK"]');
   await page.waitForSelector("[data-rc='fan'] svg polygon");
+  if (!(await page.locator(".panel-head h2 .pill").first().innerText()).startsWith("Updated")) throw Error("Background analytics stamp missing");
   for (const id of ["outcomes", "scenarios", "daily", "vol", "drawdown", "beta"]) if (!(await page.locator(`[data-rc='${id}'] svg`).count())) throw Error("Risk chart missing: " + id);
   // Hovering the fan shows simulated percentiles; the horizon switch redraws.
   const fan = await page.locator("[data-rc='fan']").boundingBox();
