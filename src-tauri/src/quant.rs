@@ -346,6 +346,11 @@ mod tests {
         assert!(v["metrics"]["vol1y"].as_f64().unwrap() > 0.0);
         assert!((v["metrics"]["beta3m"].as_f64().unwrap() - 1.0).abs() < 1e-6, "beta to itself is 1");
         assert_eq!(v["series"]["vol"].as_array().unwrap().len(), 252);
+        let year = &v["sim"]["horizons"]["252"];
+        assert!(year["p5"].as_f64().unwrap() < year["p50"].as_f64().unwrap() && year["p50"].as_f64().unwrap() < year["p95"].as_f64().unwrap());
+        assert_eq!(v["sim"]["bands"]["p50"].as_array().unwrap().len(), 252);
+        assert!(v["market"]["rows"].as_array().unwrap().len() == 6);
+        assert!(v["daily"]["counts"].as_array().unwrap().len() == 50);
     }
 
     // Consecutive calendar dates from 2024-01-01, without a date library.

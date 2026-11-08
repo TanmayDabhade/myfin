@@ -44,7 +44,7 @@
     },
     {
       "image": "demo/06-risk.jpg",
-      "caption": "Risk analytics: volatility, Sharpe, drawdown and beta, calculated by Goldman Sachs' open-source GS Quant.",
+      "caption": "Risk analytics: 10,000 simulated futures from the stock's own history, plus volatility, drawdown and beta from Goldman Sachs' GS Quant.",
       "click": {
         "x": 301,
         "y": 138

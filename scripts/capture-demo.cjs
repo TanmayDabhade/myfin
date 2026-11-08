@@ -312,8 +312,8 @@ async function constituents() {
     await page.waitForSelector("td.holder:has-text('Dana Whitfield')");
     await shot("ownership", "Ownership changes: fund moves, 5%+ owners and insider trades in one dated feed.", '.fn-strip [data-value="DCF"]');
     await shot("valuation", "Valuation: a DCF pre-filled from the company's own SEC filings, each input sourced.", '.fn-strip [data-value="RSK"]');
-    await page.waitForSelector("td:has-text('Volatility · 1 month')");
-    await shot("risk", "Risk analytics: volatility, Sharpe, drawdown and beta, calculated by Goldman Sachs' open-source GS Quant.", '.fn-strip [data-value="TAS"]');
+    await page.waitForSelector("[data-rc='fan'] svg polygon");
+    await shot("risk", "Risk analytics: 10,000 simulated futures from the stock's own history, plus volatility, drawdown and beta from Goldman Sachs' GS Quant.", '.fn-strip [data-value="TAS"]');
     await page.waitForSelector("#tape-slot table.tape");
     await shot("tape", "Time and sales: every trade print with VWAP and a buy/sell estimate, or the last session's when the market is closed.", '.fn-strip [data-value="SPLC"]');
     await page.waitForSelector(".g-node.center");
