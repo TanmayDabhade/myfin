@@ -10,8 +10,11 @@ After this workflow is merged and the first eligible PR has published successful
 
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
+brew trust tanmaydabhade/myfin
 brew install --cask tanmaydabhade/myfin/aperture-preview
 ```
+
+Current Homebrew refuses casks from third-party taps until you trust the tap, so run `brew trust tanmaydabhade/myfin` once after tapping.
 
 The same repository is the tap; the explicit URL is necessary because it is not named `homebrew-myfin`.
 
@@ -26,6 +29,7 @@ To install if missing, or upgrade if already installed:
 
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
+brew trust tanmaydabhade/myfin
 brew update
 if brew list --cask tanmaydabhade/myfin/aperture-preview >/dev/null 2>&1; then
   brew upgrade --cask tanmaydabhade/myfin/aperture-preview
