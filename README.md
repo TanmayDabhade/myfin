@@ -10,8 +10,11 @@ Tracks the newest PR build, ahead of releases:
 
 ```sh
 brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git
+brew trust tanmaydabhade/myfin
 brew install --cask tanmaydabhade/myfin/aperture-preview
 ```
+
+Current Homebrew refuses casks from third-party taps until you trust the tap, so run `brew trust tanmaydabhade/myfin` once after tapping.
 
 To replace the installed app with the newer build:
 
