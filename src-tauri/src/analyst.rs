@@ -115,7 +115,9 @@ pub fn decode_entities(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // Look for the ';' within a few characters, on character boundaries
+        // (byte slicing could split a multi-byte character).
+        let Some(semi) = rest.char_indices().take(12).find(|(_, c)| *c == ';').map(|(i, _)| i) else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -267,11 +269,37 @@ pub fn private_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
             let o = v.octets();
-            v.is_loopback() || v.is_private() || v.is_link_local() || v.is_unspecified() || v.is_broadcast() || v.is_multicast() || v.is_documentation() || o[0] == 0 || (o[0] == 100 && (o[1] & 0xc0) == 64) || o[0] >= 240
+            v.is_loopback()
+                || v.is_private()
+                || v.is_link_local()
+                || v.is_unspecified()
+                || v.is_broadcast()
+                || v.is_multicast()
+                || v.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xc0) == 64) // carrier-grade NAT
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
+                || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking
+                || o[0] >= 240
         }
         IpAddr::V6(v) => {
             let s = v.segments();
-            v.is_loopback() || v.is_unspecified() || v.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || v.to_ipv4_mapped().is_some_and(|m| private_ip(&IpAddr::V4(m)))
+            let embedded = |hi: u16, lo: u16| private_ip(&IpAddr::V4(std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)));
+            v.is_loopback()
+                || v.is_unspecified()
+                || v.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link-local
+                || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated)
+                || v.to_ipv4_mapped().is_some_and(|m| private_ip(&IpAddr::V4(m)))
+                // IPv4-compatible ::a.b.c.d (deprecated)
+                || (s[..6].iter().all(|&x| x == 0) && embedded(s[6], s[7]))
+                // NAT64 64:ff9b::/96 and 64:ff9b:1::/48 carry an IPv4 address
+                || (s[0] == 0x64 && s[1] == 0xff9b && embedded(s[6], s[7]))
+                // 6to4 2002:a.b.c.d::/48
+                || (s[0] == 0x2002 && embedded(s[1], s[2]))
+                // Teredo 2001:0::/32 hides the client address; never needed here
+                || (s[0] == 0x2001 && s[1] == 0)
         }
     }
 }
@@ -406,6 +434,9 @@ mod tests {
         assert_eq!(title, "Big & News");
         assert_eq!(text, "First para. Second — para.");
         assert!(readable_text(&format!("<body>{}</body>", "word ".repeat(500)), 50).1.ends_with('…'));
+        // Multi-byte characters right after '&' must not split mid-character.
+        assert_eq!(decode_entities("&ééééééééééé; &amp; ü&"), "&ééééééééééé; & ü&");
+        assert_eq!(decode_entities("R&D — 東京&"), "R&D — 東京&");
     }
 
     #[test]
@@ -416,6 +447,12 @@ mod tests {
         }
         assert!(private_ip(&"100.64.0.1".parse().unwrap()) && !private_ip(&"8.8.8.8".parse().unwrap()));
         assert!(private_ip(&"::ffff:192.168.0.1".parse().unwrap()) && private_ip(&"fd00::1".parse().unwrap()));
+        for ip in ["64:ff9b::7f00:1", "64:ff9b::a00:5", "2002:c0a8:101::1", "::127.0.0.1", "2001:0:4136:e378::1", "198.18.0.1", "192.0.0.8", "fec0::1"] {
+            assert!(private_ip(&ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["2606:4700::1111", "2002:808:808::1", "64:ff9b::808:808", "1.1.1.1"] {
+            assert!(!private_ip(&ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]
