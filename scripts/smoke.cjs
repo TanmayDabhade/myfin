@@ -35,6 +35,16 @@ function fakeBackend() {
       const wrap = (data) => ({ data, fetchedAt: Date.now() / 1000, cached: false, provider });
       if (provider === "twelve" && kind === "TIME_SERIES_1MIN")
         return wrap({ status: "ok", values: [{ datetime: "2026-11-06 15:59:00", open: "150", high: "151", low: "149", close: "150.5", volume: "1000" }] });
+      // Intraday chart bars: one session from 09:30 at the requested step.
+      if (provider === "twelve" && kind.startsWith("INTRADAY_")) {
+        const step = { INTRADAY_1MIN: 1, INTRADAY_5MIN: 5, INTRADAY_15MIN: 15, INTRADAY_1H: 60, INTRADAY_4H: 240 }[kind];
+        const values = [];
+        for (let m = 0; m < 390; m += step) {
+          const t = 9 * 60 + 30 + m, c = 150 + Math.sin(m / 30) * 2;
+          values.push({ datetime: `2026-11-06 ${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}:00`, open: String(c - 0.2), high: String(c + 0.5), low: String(c - 0.5), close: String(c), volume: "5000" });
+        }
+        return wrap({ status: "ok", values: values.reverse() });
+      }
       if (provider === "twelve") return wrap({ status: "ok", values: bars(80) });
       if (provider === "finnhub") {
         if (kind === "company-news") return wrap([{ headline: "Fixture headline", url: "https://example.com/n", source: "Fixture", datetime: 1794070000, summary: "Test" }]);
@@ -255,6 +265,8 @@ async function liveFlow(browser, errors) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.addInitScript(quantStandin);
   await context.addInitScript(fakeBackend);
+  // Linux CI reports a POSIX language name, which Intl rejects as a locale.
+  await context.addInitScript(() => Object.defineProperty(navigator, "language", { get: () => "C.UTF-8" }));
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("http://127.0.0.1:1420");
@@ -293,8 +305,26 @@ async function liveFlow(browser, errors) {
   await page.waitForSelector(".stat:has-text('P/E') >> text=Price ÷ earnings per share");
   await page.waitForSelector("text=Q4 2026");
   await page.keyboard.press("Escape");
-  // The trade tape fills from the stream with tick-rule sides.
-  await page.waitForSelector("[data-tile='TAS'] table.tape td:has-text('Buy')", { timeout: 10000 });
+  // The trade tape fills from the stream with tick-rule sides, and order
+  // flow shows buying and selling at each price.
+  await page.waitForSelector("[data-tile='TAS'] .trades .tr-row.tr-buy", { timeout: 10000 });
+  await page.waitForSelector("[data-tile='TAS'] .ladder .lad-row.poc");
+  await page.waitForSelector("[data-tile='TAS'] .pressure-bar .pb-buy");
+  // The chart draws candles on a canvas; intraday timeframes load Twelve Data bars.
+  await page.waitForSelector("[data-tile='GP'] .lw-host canvas");
+  await page.click('[data-tile="GP"] [data-action="chart-interval"][data-value="5m"]');
+  await page.waitForFunction(() => /\d\d:\d\d/.test(document.querySelector("[data-tile='GP'] .chart-readout")?.textContent || ""), null, { timeout: 15000 });
+  await page.selectOption("#chart-freq", "5s");
+  await page.click('[data-tile="GP"] [data-action="chart-interval"][data-value="1D"]');
+  await page.waitForFunction(() => !/\d\d:\d\d/.test(document.querySelector("[data-tile='GP'] .chart-readout")?.textContent || "x:"));
+  // The full time-and-sales view adds the cumulative delta chart.
+  await page.click('.fn-strip [data-value="TAS"]');
+  await page.waitForSelector("#delta-chart canvas");
+  await page.click('[data-action="flow-window"][data-value="1"]');
+  await page.waitForSelector('[data-action="flow-window"][data-value="1"].active');
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Time and sales");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".stock-grid");
   // Valuation inputs come from the company's filings.
   await page.waitForSelector("[data-tile='DCF'] >> text=Inputs from the company's SEC filings", { timeout: 10000 });
   await page.click('.fn-strip [data-value="DCF"]');
@@ -369,7 +399,7 @@ async function liveFlow(browser, errors) {
   // From another page a ticker opens its panel grid.
   await page.waitForSelector(".stock-grid");
   await page.waitForSelector("[data-tile='TAS'] >> text=IEX exchange only, via Alpaca", { timeout: 10000 });
-  if (!(await page.locator("[data-tile='TAS'] table.tape").innerText()).includes("150.20")) throw Error("Past trades missing");
+  if (!(await page.locator("[data-tile='TAS'] .trades").innerText()).includes("150.20")) throw Error("Past trades missing");
   await page.evaluate(() => (window.__noLivePrints = false));
   await page.reload();
   await page.waitForSelector("h1");

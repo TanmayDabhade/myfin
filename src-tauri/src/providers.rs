@@ -175,6 +175,29 @@ pub fn status(env: &Credentials, saved: &Credentials) -> Value {
     out
 }
 
+/// Chart bars at intraday timeframes, each about a month or more of history.
+pub const INTRADAY_KINDS: [&str; 5] = ["INTRADAY_1MIN", "INTRADAY_5MIN", "INTRADAY_15MIN", "INTRADAY_1H", "INTRADAY_4H"];
+
+/// Twelve Data interval and number of bars for a dataset.
+fn twelve_series(kind: &str) -> (&'static str, &'static str) {
+    match kind {
+        "TIME_SERIES_1MIN" => ("1min", "390"),
+        "INTRADAY_1MIN" => ("1min", "1950"),
+        "INTRADAY_5MIN" => ("5min", "1560"),
+        "INTRADAY_15MIN" => ("15min", "1300"),
+        "INTRADAY_1H" => ("1h", "1400"),
+        "INTRADAY_4H" => ("4h", "1000"),
+        _ => ("1day", "1300"),
+    }
+}
+
+/// Seconds a cached response is reused. The app asks for fresh intraday
+/// bars itself (force) while the market is open, so their cache only has to
+/// stop repeat downloads when it is closed.
+pub fn ttl(provider: &str, kind: &str) -> i64 {
+    if INTRADAY_KINDS.contains(&kind) { 43_200 } else { budget(provider).ttl }
+}
+
 pub fn validate(provider: &str, kind: &str, symbol: &str) -> Result<(), String> {
     if symbol.is_empty()
         || symbol.len() > 100
@@ -188,7 +211,7 @@ pub fn validate(provider: &str, kind: &str, symbol: &str) -> Result<(), String> 
     }
     let ok = match provider {
         "alpha" => ALPHA_KINDS.contains(&kind),
-        "twelve" => kind == "TIME_SERIES" || kind == "TIME_SERIES_1MIN",
+        "twelve" => kind == "TIME_SERIES" || kind == "TIME_SERIES_1MIN" || INTRADAY_KINDS.contains(&kind),
         "fred" => kind == "observations",
         "finnhub" => FINNHUB_KINDS.contains(&kind),
         "alpaca" => kind == "trades",
@@ -243,7 +266,7 @@ pub fn request(provider: &str, kind: &str, symbol: &str, key: &str, now: i64) ->
         ),
         // Listings outside the US are keyed SYMBOL:MIC (VOD:XLON).
         "twelve" => {
-            let (interval, size) = if kind == "TIME_SERIES_1MIN" { ("1min", "390") } else { ("1day", "1300") };
+            let (interval, size) = twelve_series(kind);
             match symbol.split_once(':') {
                 Some((s, mic)) => plain(
                     "https://api.twelvedata.com/time_series",
@@ -397,6 +420,11 @@ mod tests {
         assert!(t.query.contains(&("feed".into(), "iex".into())) && t.query.contains(&("end".into(), "2026-11-07T18:14:05Z".into())));
         assert!(t.headers.contains(&("APCA-API-SECRET-KEY".into(), "SECRET456".into())));
         assert!(!t.query.iter().any(|(_, v)| v.contains("SECRET")), "secret must not be in the URL");
+        let i = request("twelve", "INTRADAY_15MIN", "AAPL", "k", now);
+        assert!(i.query.contains(&("interval".into(), "15min".into())) && i.query.contains(&("outputsize".into(), "1300".into())));
+        assert!(validate("twelve", "INTRADAY_4H", "AAPL").is_ok() && validate("twelve", "INTRADAY_2H", "AAPL").is_err());
+        assert_eq!(ttl("twelve", "INTRADAY_1MIN"), 43_200);
+        assert_eq!(ttl("twelve", "TIME_SERIES"), budget("twelve").ttl);
         let m = request("twelve", "TIME_SERIES_1MIN", "AAPL", "k", now);
         assert!(m.query.contains(&("interval".into(), "1min".into())));
     }

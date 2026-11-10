@@ -100,6 +100,9 @@ import { fanChart, outcomeHistogram, scenarioChart, dailyHistogram, lineChart, h
 import { quantStatus, quantChoose, quantForget, quantAnalyze, quantAnalyzeBatch, quantCached } from "./bridge.js";
 import { usMarketOpen, newFilings, refreshPlan, quantDue } from "./fresh.js";
 import { applyTrade, nyDate } from "./live.js";
+import { INTERVALS, FREQUENCIES, intervalOf, frequencyOf, isIntraday, fromTwelve, dailyBars, weeklyBars, applyPrints, barsDue, bucketStart, parseWall, nyWall } from "./candles.js";
+import { groupPrints, volumeAtPrice, levelOf, cumulativeDelta, largeSize, flowSummary, since as printsSince } from "./orderflow.js";
+import { priceChart, deltaChart } from "./pricechart.js";
 import {
   risk,
   equityCurve,
@@ -152,8 +155,6 @@ let state = migrate(await load()),
   page = "Overview",
   keyInfo = await keyStatus().catch(() => null),
   symbol = "AAPL",
-  range = 90,
-  candles = true,
   compare = "",
   busy = false,
   screen = { pe: 100, growth: -100, sector: "" },
@@ -499,11 +500,12 @@ function render() {
   };
   const demo = page !== "Setup" && state.mode === "sample";
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> APERTURE</div><div class="side-search"><input id="search" placeholder="Ticker or AAPL HDS" aria-label="Search any listing or type a function like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${sideNav()}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content">${page === "Stock" ? "" : `<div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>`}${views[page]()}</section><footer>Aperture 0.3 · USD equity workspace · Daily prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> APERTURE</div><div class="side-search"><input id="search" placeholder="Ticker or AAPL HDS" aria-label="Search any listing or type a function like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${sideNav()}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content">${page === "Stock" ? "" : `<div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>`}${views[page]()}</section><footer>Aperture 0.3 · USD equity workspace · Daily and intraday prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
   bind();
   bindVessel();
   drawCharts();
   drawRiskCharts();
+  drawDelta();
   // One corrective pass at most (a scrollbar appearing could otherwise loop).
   const g = document.querySelector(".relationship-graph");
   const mm = document.querySelector(".mm-wrap");
@@ -578,7 +580,6 @@ function syncPriceStream() {
   }
   if (!quoteTimer) quoteTimer = setInterval(pollQuotes, 1000);
 }
-let chartPaintedAt = 0;
 async function pollQuotes() {
   try {
     quoteSnap = await quotesSnapshot();
@@ -619,14 +620,9 @@ function paintLive(symbols) {
       if (span) span.textContent = pct(change(a));
     });
   }
-  // Redraw affected charts at most every 2 seconds, and never under the cursor.
-  if (Date.now() - chartPaintedAt > 2000) {
-    const hit = new Set(symbols);
-    if ([...document.querySelectorAll("[data-chart]")].some((el) => (hit.has(el.dataset.chart) || hit.has(compare)) && !el.matches(":hover"))) {
-      chartPaintedAt = Date.now();
-      drawCharts(hit);
-    }
-  }
+  // Daily and weekly candles follow the latest trade price; intraday ones
+  // are fed trade by trade from the tape (feedBars).
+  if (!isIntraday(chartPrefs().interval)) flushCharts(symbols);
 }
 function syncText() {
   if (syncLabel) return syncLabel;
@@ -697,138 +693,197 @@ function liveEmpty() {
         "…",
   );
 }
+// ---- Price chart ------------------------------------------------------------
+// TradingView-style candles at any timeframe. Daily and weekly bars come from
+// the stored daily history; intraday bars from Twelve Data, with the newest
+// bar kept moving by live trades from the Finnhub stream.
+const chartPrefs = () => (state.chart ||= { interval: "1D", freq: "live", candles: true });
+const barStore = {}; // "SYM:5m" -> { bars, fetchedAt, syncedAt, appliedThrough, loading, error, warning }
+const charts = new Map(); // chart element -> { inst, key, intraday, candles }
+const viewRanges = {}; // "SYM:5m" -> { range, len } so zoom survives a redraw
+let chartFlushAt = 0;
+const intradayBlocker = () => (!live() ? (native ? "Intraday bars load with Live data." : "Intraday bars load in the desktop app.") : !hasKey("twelve") ? "Intraday bars need a Twelve Data key." : "");
 function chartTools() {
+  const p = chartPrefs(),
+    intraday = isIntraday(p.interval),
+    blocked = intradayBlocker();
+  const ivs = INTERVALS.map((iv) => {
+    const off = iv.sec < 86400 && blocked;
+    return `<button data-action="chart-interval" data-value="${iv.id}" class="${p.interval === iv.id ? "active" : ""}" ${off ? `disabled title="${esc(blocked)}"` : `title="${esc(iv.name)} candles"`}>${iv.label}</button>`;
+  }).join("");
   return `<div class="chart-tools"><select id="asset-select" aria-label="Chart symbol">${assets()
-    .map(
-      (a) =>
-        `<option ${a.symbol === symbol ? "selected" : ""}>${a.symbol}</option>`,
-    )
-    .join(
-      "",
-    )}</select>${[30, 90, 252, 9999].map((n) => button(n === 9999 ? "ALL" : n + "D", "range", range === n ? "active" : "", `data-value="${n}"`)).join("")}${button(candles ? "Candles" : "Line", "chart-type")}${button("Export SVG", "chart-export")}<select id="compare" aria-label="Compare asset"><option value="">Compare…</option>${assets()
+    .map((a) => `<option ${a.symbol === symbol ? "selected" : ""}>${a.symbol}</option>`)
+    .join("")}</select><div class="seg" role="group" aria-label="Timeframe">${ivs}</div>${button(p.candles ? "Candles" : "Line", "chart-type")}${button("Fit", "chart-fit", "", 'title="Show all loaded bars"')}<select id="chart-freq" aria-label="Chart update frequency" title="How often the chart redraws with new trades">${FREQUENCIES.map((f) => `<option value="${f.id}" ${p.freq === f.id ? "selected" : ""}>${f.label}</option>`).join("")}</select><select id="compare" aria-label="Compare asset" ${intraday ? 'disabled title="Comparison works on daily and weekly charts"' : ""}><option value="">Compare…</option>${assets()
     .filter((a) => a.symbol !== symbol)
-    .map(
-      (a) =>
-        `<option ${a.symbol === compare ? "selected" : ""}>${a.symbol}</option>`,
-    )
-    .join("")}</select><small>MA20 / MA50</small></div>`;
+    .map((a) => `<option ${a.symbol === compare ? "selected" : ""}>${a.symbol}</option>`)
+    .join("")}</select>${button("Export PNG", "chart-export")}<small>MA20 / MA50</small></div>`;
 }
 function chart(a, id = "price-chart") {
-  return `<div class="chart" id="${id}" data-chart="${esc(a.symbol)}"></div><div class="chart-legend">${compare ? "Comparison normalized to first common date · " : ""}Hover to inspect · mouse wheel to zoom · trade markers show executions</div>`;
+  const tall = page === "Stock" && stockView === "GP";
+  return `<div class="chart" id="${id}" data-chart="${esc(a.symbol)}"><div class="chart-readout"></div><div class="lw-host ${tall ? "tall" : ""}"></div><div class="chart-status" hidden></div></div><div class="chart-legend">${compare && !isIntraday(chartPrefs().interval) ? "Comparison normalized to first common date · " : ""}Scroll to zoom · drag to pan · times in New York · <span class="chart-feed"></span></div>`;
 }
-function drawCharts(only) {
+// Bars for the chart at the chosen timeframe, or null while they load.
+function chartBars(a, iv) {
+  if (iv === "1D") return dailyBars(a.bars);
+  if (iv === "1W") return weeklyBars(dailyBars(a.bars));
+  return barStore[`${a.symbol}:${iv}`]?.bars?.length ? barStore[`${a.symbol}:${iv}`].bars : null;
+}
+async function loadBars(s, iv, force = false) {
+  const st = (barStore[`${s}:${iv}`] ||= { bars: [] });
+  if (st.loading || intradayBlocker()) return;
+  st.loading = true;
+  st.error = "";
+  paintChartStatus();
+  try {
+    const d = await fetchData("twelve", intervalOf(iv).kind, s, force);
+    const bars = fromTwelve(d.data);
+    if (!bars.length) throw Error(`Twelve Data returned no ${intervalOf(iv).name} bars for ${s}.`);
+    // Trades already received after the download keep the newest bar current.
+    const synced = d.cached ? d.fetchedAt * 1000 : Date.now();
+    const tape = tapes[s] || [];
+    applyPrints(bars, tape.filter((p) => p.time > synced), iv);
+    Object.assign(st, { bars, fetchedAt: d.fetchedAt, syncedAt: synced, appliedThrough: tape.at(-1)?.time ?? 0, warning: d.warning || "" });
+  } catch (e) {
+    st.error = message(e);
+    st.failedAt = Date.now();
+    lastError.twelve = st.error;
+  } finally {
+    st.loading = false;
+    drawCharts();
+  }
+}
+// Downloads intraday bars for visible charts when they are missing or old.
+function ensureBars() {
+  const iv = chartPrefs().interval;
+  if (!isIntraday(iv) || intradayBlocker()) return;
+  for (const el of document.querySelectorAll("[data-chart]")) {
+    const s = el.dataset.chart,
+      st = barStore[`${s}:${iv}`];
+    // After a failure, wait a minute before asking again.
+    if (st?.loading || (st?.error && Date.now() - st.failedAt < 60000)) continue;
+    const open = usMarketOpen();
+    if (barsDue(st, { open, wasOpen: st?.fetchedAt ? usMarketOpen(st.fetchedAt * 1000) : false, streaming: !!tapes[s]?.length && !streamBlocker() }))
+      loadBars(s, iv, !!st?.fetchedAt);
+  }
+}
+// New trade prints for a symbol: extend its loaded intraday bars.
+function feedBars(s, prints) {
+  for (const iv of INTERVALS) {
+    const st = barStore[`${s}:${iv.id}`];
+    if (!st?.bars?.length || st.loading) continue;
+    const fresh = prints.filter((p) => p.time > Math.max(st.syncedAt || 0, st.appliedThrough || 0));
+    if (fresh.length) applyPrints(st.bars, fresh, iv.id);
+    st.appliedThrough = Math.max(st.appliedThrough || 0, prints.at(-1)?.time ?? 0);
+  }
+}
+function paintChartStatus() {
+  const iv = chartPrefs().interval;
   document.querySelectorAll("[data-chart]").forEach((el) => {
-    if (only && ((!only.has(el.dataset.chart) && !only.has(compare)) || el.matches(":hover"))) return;
-    const a = activeMap()[el.dataset.chart];
-    let bars = a.bars.slice(-range);
-    if (!bars.length) return;
-    // Draw at the element's real pixel width so text never scales with the screen.
-    const W = Math.max(480, Math.round(el.clientWidth || 1000)),
-      H = 330,
-      left = 18,
-      right = 80,
-      top = 25,
-      bottom = 40,
-      iw = W - left - right,
-      ih = H - top - bottom;
-    const peer = activeMap()[compare];
-    let peerMap = new Map(peer?.bars.map((b) => [b.date, b.close]) || []);
-    const first = bars.find((b) => peerMap.has(b.date));
-    const scalePeer = (v) =>
-      first ? (v / peerMap.get(first.date)) * first.close : v;
-    let values = bars.flatMap((b) => [b.low, b.high]);
-    if (compare && first)
-      values.push(
-        ...bars
-          .filter((b) => peerMap.has(b.date))
-          .map((b) => scalePeer(peerMap.get(b.date))),
-      );
-    let low = Math.min(...values) * 0.99,
-      high = Math.max(...values) * 1.01;
-    const y = (v) => top + ((high - v) / (high - low)) * ih,
-      x = (i) => left + ((i + 0.5) / bars.length) * iw;
-    let out = "";
-    for (let i = 0; i < 5; i++) {
-      const v = low + ((high - low) * i) / 4;
-      out += `<line x1="${left}" y1="${y(v)}" x2="${W - right}" y2="${y(v)}" class="gridline"/><text x="${W - right + 12}" y="${y(v) + 4}">${fmt(v)}</text>`;
+    const s = el.dataset.chart,
+      st = barStore[`${s}:${iv}`],
+      box = el.querySelector(".chart-status"),
+      feed = el.parentElement?.querySelector(".chart-feed");
+    if (!box) return;
+    const has = !!chartBars(activeMap()[s] || { bars: [] }, iv)?.length;
+    let text = "";
+    if (isIntraday(iv) && !has) text = intradayBlocker() || (st?.error ? st.error : `Loading ${intervalOf(iv).name} bars for ${s}…`);
+    box.textContent = text;
+    box.hidden = !text;
+    if (feed) {
+      const streaming = isUSKey(s) && live() && hasKey("finnhub") && !streamBlocker();
+      const src = isIntraday(iv) ? `Twelve Data ${intervalOf(iv).name} bars` : `${intervalOf(iv).name} bars`;
+      const f = frequencyOf(chartPrefs().freq);
+      feed.textContent = `${src}${st?.warning ? " (saved copy: " + st.warning + ")" : ""}${streaming ? ` · live trades from Finnhub · ${f.id === "off" ? "updates paused" : f.ms ? f.label.toLowerCase() : "updates as trades arrive"}` : ""}`;
     }
-    const volMax = Math.max(...bars.map((b) => b.volume), 1);
-    out += bars
-      .map(
-        (b, i) =>
-          `<rect x="${x(i) - (iw / bars.length) * 0.32}" y="${H - bottom - (b.volume / volMax) * 45}" width="${(iw / bars.length) * 0.64}" height="${(b.volume / volMax) * 45}" fill="${b.close >= b.open ? "#4cc38a" : "#f0716a"}" opacity=".12"/>`,
-      )
-      .join("");
-    if (candles)
-      out += bars
-        .map((b, i) => {
-          const color = b.close >= b.open ? "#4cc38a" : "#f0716a";
-          return `<line x1="${x(i)}" x2="${x(i)}" y1="${y(b.high)}" y2="${y(b.low)}" stroke="${color}"/><rect x="${x(i) - Math.max(1, (iw / bars.length) * 0.3)}" y="${y(Math.max(b.close, b.open))}" width="${Math.max(1, (iw / bars.length) * 0.6)}" height="${Math.max(1, Math.abs(y(b.open) - y(b.close)))}" fill="${color}"/>`;
-        })
-        .join("");
-    else
-      out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="#f5f5f5" stroke-width="2" points="${bars.map((b, i) => `${x(i)},${y(b.close)}`).join(" ")}"/>`;
-    for (const [n, c] of [
-      [20, "#a3a3a3"],
-      [50, "#5c5c5c"],
-    ]) {
-      const ma = sma(a.bars, n).slice(-bars.length);
-      out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="${c}" stroke-width="1.5" points="${ma
-        .map((v, i) => (v === null ? "" : `${x(i)},${y(v)}`))
-        .filter(Boolean)
-        .join(" ")}"/>`;
-    }
-    if (compare && first)
-      out += `<polyline clip-path="url(#plot-area)" fill="none" stroke="#ffffff" stroke-dasharray="5 4" stroke-width="1.5" points="${bars
-        .map((b, i) =>
-          peerMap.has(b.date)
-            ? `${x(i)},${y(scalePeer(peerMap.get(b.date)))}`
-            : "",
-        )
-        .filter(Boolean)
-        .join(" ")}"/>`;
-    for (const t of account().trades.filter((t) => t.symbol === a.symbol)) {
-      const i = bars.findIndex((b) => b.date === t.date.slice(0, 10));
-      if (i >= 0)
-        out += `<circle cx="${x(i)}" cy="${y(t.price)}" r="6" fill="${t.side === "buy" ? "#fff" : "#f0716a"}"><title>${esc(t.side)} ${t.qty} @ ${t.price}</title></circle>`;
-    }
-    for (const i of [0, Math.floor(bars.length / 2), bars.length - 1])
-      out += `<text x="${x(i)}" y="${H - 10}" text-anchor="middle">${bars[i].date}</text>`;
-    el.innerHTML = `<div class="chart-readout">${esc(a.symbol)} · ${bars.at(-1).date} · ${money(bars.at(-1).close)}</div><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${a.symbol} daily price chart"><defs><clipPath id="plot-area"><rect x="${left}" y="${top}" width="${iw}" height="${ih}"/></clipPath></defs>${out}<line id="crosshair" y1="${top}" y2="${H - bottom}" stroke="#8d8d8d" stroke-dasharray="4" visibility="hidden"/></svg>`;
-    el.onpointermove = (e) => {
-      const rect = el.querySelector("svg").getBoundingClientRect();
-      const i = Math.max(
-        0,
-        Math.min(
-          bars.length - 1,
-          Math.floor(
-            ((((e.clientX - rect.left) / rect.width) * W - left) / iw) *
-              bars.length,
-          ),
-        ),
-      );
-      const b = bars[i];
-      el.querySelector(".chart-readout").textContent =
-        `${a.symbol} · ${b.date}   O ${fmt(b.open)}   H ${fmt(b.high)}   L ${fmt(b.low)}   C ${fmt(b.close)}   VOL ${compact(b.volume)}`;
-      const cross = el.querySelector("#crosshair");
-      cross.setAttribute("x1", x(i));
-      cross.setAttribute("x2", x(i));
-      cross.setAttribute("visibility", "visible");
-    };
-    el.onwheel = (e) => {
-      e.preventDefault();
-      range = Math.max(
-        20,
-        Math.min(
-          a.bars.length,
-          Math.round(
-            Math.min(range, a.bars.length) * (e.deltaY > 0 ? 1.2 : 0.8),
-          ),
-        ),
-      );
-      drawCharts();
-    };
   });
+}
+// Draws every chart on the page. With `only` (symbols whose prices moved),
+// existing charts just extend their newest bars.
+function drawCharts(only) {
+  const p = chartPrefs(),
+    iv = p.interval,
+    intraday = isIntraday(iv);
+  for (const [el, c] of charts)
+    if (!el.isConnected) {
+      c.inst.destroy();
+      charts.delete(el);
+    }
+  if (intraday) ensureBars();
+  document.querySelectorAll("[data-chart]").forEach((el) => {
+    const s = el.dataset.chart,
+      a = activeMap()[s];
+    if (!a || (only && !only.has(s) && !only.has(compare))) return;
+    const bars = chartBars(a, iv),
+      key = `${s}:${iv}`;
+    let c = charts.get(el);
+    if (c && (c.key !== key || c.candles !== p.candles)) {
+      c.inst.destroy();
+      charts.delete(el);
+      c = null;
+    }
+    if (!bars?.length) return;
+    const host = el.querySelector(".lw-host"),
+      readout = el.querySelector(".chart-readout");
+    if (!c) {
+      host.innerHTML = "";
+      const inst = priceChart(host, {
+        intraday,
+        candles: p.candles,
+        symbol: s,
+        readout: (text, ch) => {
+          readout.textContent = text;
+          readout.className = "chart-readout " + (ch > 0 ? "up" : ch < 0 ? "down" : "");
+        },
+      });
+      // The library's attribution link opens in the browser, not the app.
+      host.addEventListener("click", (e) => {
+        const link_ = e.target.closest?.("a[href]");
+        if (link_ && native) {
+          e.preventDefault();
+          window.__TAURI__.core.invoke("plugin:opener|open_url", { url: link_.href }).catch(() => {});
+        }
+      });
+      c = { inst, key, candles: p.candles };
+      charts.set(el, c);
+      inst.setData(bars, overlays(a, bars, iv));
+      const saved = viewRanges[key];
+      if (saved?.range) {
+        // Keep following the newest bar if the view was at the right edge.
+        const shift = saved.range.to >= saved.len - 1 ? bars.length - saved.len : 0;
+        inst.setRange({ from: saved.range.from + shift, to: saved.range.to + shift });
+      } else inst.showLast(intraday ? 180 : 150);
+      inst.onRange((range) => range && (viewRanges[key] = { range, len: inst.size() }));
+    } else if (only) c.inst.update(bars);
+    else c.inst.setData(bars, overlays(a, bars, iv));
+  });
+  paintChartStatus();
+}
+// Comparison line (daily and weekly only) and paper-trade markers.
+function overlays(a, bars, iv) {
+  const out = { peerLine: [], markers: [] };
+  if (isIntraday(iv)) return out;
+  const peer = activeMap()[compare];
+  if (compare && peer) {
+    const pb = iv === "1W" ? weeklyBars(dailyBars(peer.bars)) : dailyBars(peer.bars);
+    const pm = new Map(pb.map((b) => [b.time, b.close]));
+    const first = bars.find((b) => pm.has(b.time));
+    if (first) out.peerLine = bars.filter((b) => pm.has(b.time)).map((b) => ({ time: b.time, value: (pm.get(b.time) / pm.get(first.time)) * first.close }));
+  }
+  const times = new Set(bars.map((b) => b.time));
+  out.markers = account()
+    .trades.filter((t) => t.symbol === a.symbol)
+    .map((t) => ({ t, time: bucketStart(parseWall(t.date.slice(0, 10)), iv) }))
+    .filter((x) => times.has(x.time))
+    .sort((x, y) => x.time - y.time)
+    .map(({ t, time }) => ({ time, position: t.side === "buy" ? "belowBar" : "aboveBar", color: t.side === "buy" ? "#ffffff" : "#f0716a", shape: t.side === "buy" ? "arrowUp" : "arrowDown", text: `${t.side} ${t.qty} @ ${fmt(t.price)}` }));
+  return out;
+}
+// Redraws charts with new prices at the chosen update frequency.
+function flushCharts(symbols, force = false) {
+  const f = frequencyOf(chartPrefs().freq);
+  if (!force && (f.ms === Infinity || Date.now() - chartFlushAt < f.ms)) return;
+  chartFlushAt = Date.now();
+  drawCharts(new Set(symbols));
 }
 // ---- Reference data status (13F holdings, listing directory) ---------------
 let refStatus = null, // holdings_status
@@ -1440,15 +1495,65 @@ function streamBlocker() {
   return "";
 }
 const tapeBlocker = streamBlocker;
-function tapeTable(rows, full, big = Infinity) {
-  return `<div class="table-wrap"><table class="tape"><thead><tr><th>Time (NY)</th><th>Price</th><th>Size</th><th>Side</th>${full ? "<th>Conditions</th>" : ""}</tr></thead><tbody>${rows
-    .map((r) => `<tr class="${r.size >= big ? "big" : ""}"><td>${esc(tapeClock(r.time))}</td><td class="${r.tick > 0 ? "up" : r.tick < 0 ? "down" : ""}">${r.tick > 0 ? "▲" : r.tick < 0 ? "▼" : "·"} ${fmt(r.price)}</td><td>${int(r.size)}</td><td class="${r.side === "buy" ? "up" : r.side === "sell" ? "down" : ""}">${r.side ? (r.side === "buy" ? "Buy" : "Sell") : "—"}</td>${full ? `<td><small>${esc((r.conditions || []).join(" "))}</small></td>` : ""}</tr>`)
-    .join("")}</tbody></table></div>`;
+// Order flow: trades grouped by order (newest first), volume at each price
+// split into buying and selling, and the buy-minus-sell balance.
+let flowWindow = 0; // minutes of the newest prints to analyze; 0 = all
+const FLOW_WINDOWS = [
+  [0, "All"],
+  [30, "30m"],
+  [5, "5m"],
+  [1, "1m"],
+];
+const shortClock = (ms) => tapeClock(ms).slice(0, 8);
+const signedCompact = (x) => (x > 0 ? "+" : x < 0 ? "−" : "") + compact(Math.abs(x));
+function pressureBar(f) {
+  if (f.buyShare == null) return "";
+  const b = Math.round(f.buyShare * 1000) / 10;
+  return `<div class="pressure" title="Estimated buyer- vs seller-initiated volume"><div class="pressure-bar"><i class="pb-buy" style="width:${b}%"></i><i class="pb-sell" style="width:${100 - b}%"></i></div><div class="pressure-labels"><span class="up">Buy ${b.toFixed(1)}% · ${compact(f.buy)}</span><span>Δ <b class="${toneOf(f.delta)}">${signedCompact(f.delta)}</b></span><span class="down">${compact(f.sell)} · ${(100 - b).toFixed(1)}% Sell</span></div></div>`;
+}
+function ladder(rows, f, levels, nearLast) {
+  const v = volumeAtPrice(rows, levels);
+  if (!v.rows.length) return "";
+  let list = v.rows;
+  const lastLevel = levelOf(f.last?.price, v.step),
+    vwapLevel = levelOf(f.vwap, v.step);
+  if (nearLast && list.length > nearLast) {
+    const i = Math.max(0, list.findIndex((l) => l.price <= lastLevel));
+    const from = Math.max(0, Math.min(list.length - nearLast, i - Math.floor(nearLast / 2)));
+    list = list.slice(from, from + nearLast);
+  }
+  const side = Math.max(1, ...v.rows.map((l) => Math.max(l.buy, l.sell)));
+  const w = (x) => ((x / side) * 100).toFixed(1);
+  const dec = v.step < 0.1 ? 2 : v.step < 1 ? 2 : v.step < 10 ? 1 : 0;
+  return `<div class="ladder" role="table" aria-label="Volume at price"><div class="lad-row lad-head" role="row"><span>Sell vol</span><span>Price</span><span>Buy vol</span><span>Delta</span></div>${list
+    .map(
+      (l) =>
+        `<div class="lad-row${l.price === lastLevel ? " last" : ""}${l.price === v.poc ? " poc" : ""}" role="row" title="${esc(`${fmt(l.price)}–${fmt(l.price + v.step)} · ${int(l.count)} prints · ${int(l.total)} shares${l.other ? ` (${int(l.other)} unclassified)` : ""}`)}"><span class="lad-sell"><i style="width:${w(l.sell)}%"></i><b>${l.sell ? compact(l.sell) : ""}</b></span><span class="lad-px">${l.price.toFixed(dec)}${l.price === v.poc ? "<em>POC</em>" : l.price === vwapLevel ? "<em>VWAP</em>" : ""}</span><span class="lad-buy"><i style="width:${w(l.buy)}%"></i><b>${l.buy ? compact(l.buy) : ""}</b></span><span class="lad-d ${toneOf(l.delta)}">${l.delta ? signedCompact(l.delta) : "·"}</span></div>`,
+    )
+    .join("")}</div><small class="lad-note">$${v.step} per row · POC is the busiest price${nearLast && v.rows.length > list.length ? ` · ${list.length} of ${v.rows.length} levels around the last trade` : ""}</small>`;
+}
+function tradeList(rows, n, full, big) {
+  const groups = groupPrints(rows).slice(-n).reverse();
+  const top = Math.max(1, ...groups.map((g) => g.size));
+  return `<div class="trades${full ? " full" : ""}" role="table" aria-label="Trades"><div class="tr-row tr-head" role="row"><span>Price</span><span>Size</span><span>Time (NY)</span>${full ? "<span>Cond.</span>" : ""}</div>${groups
+    .map(
+      (g) =>
+        `<div class="tr-row${g.side ? " tr-" + g.side : ""}${g.size >= big ? " big" : ""}" role="row"><span class="tr-px">${g.tick > 0 ? "▲" : g.tick < 0 ? "▼" : ""}${fmt(g.price)}</span><span class="tr-sz"><i style="width:${(Math.sqrt(g.size / top) * 100).toFixed(1)}%"></i>${int(g.size)}${g.count > 1 ? `<small>×${g.count}</small>` : ""}</span><span class="tr-t">${full ? esc(tapeClock(g.time)) : esc(shortClock(g.time))}</span>${full ? `<span class="tr-c">${esc((g.conditions || []).join(" "))}</span>` : ""}</div>`,
+    )
+    .join("")}</div>`;
+}
+function flowWindowRows(s) {
+  return flowWindow && s.last ? printsSince(s.rows, s.last.time - flowWindow * 60000) : s.rows;
 }
 function printsBody(s, n, full, label) {
-  const sum = `<p class="tape-label">${label}</p><div class="mini-stats"><span>VWAP <b>${fmt(s.vwap)}</b></span><span>Volume <b>${compact(s.volume)}</b></span><span>Buy · sell <b><span class="up">${pct(s.buyShare)}</span> · <span class="down">${s.buyShare == null ? "—" : pct(1 - s.buyShare)}</span></b></span></div>`;
-  const stats = `<p class="tape-label">${label}</p><div class="stats">${stat("Prints", int(s.count), `${esc(tapeClock(s.first.time))} – ${esc(tapeClock(s.last.time))} New York`)}${stat("Volume", compact(s.volume), `VWAP ${fmt(s.vwap)} · range ${fmt(s.low)} – ${fmt(s.high)}`)}${stat("Buy · sell volume", `${compact(s.buyVolume)} · ${compact(s.sellVolume)}`, `estimated, ${pct(s.buyShare)} buyer-initiated`)}${stat("Largest print", int(s.largest?.size), s.largest ? `at ${fmt(s.largest.price)}, ${esc(tapeClock(s.largest.time))}` : "")}</div>`;
-  return (full ? stats : sum) + tapeTable(s.rows.slice(-n).reverse(), full, full && s.largest ? s.largest.size : Infinity);
+  const rows = flowWindowRows(s),
+    f = flowSummary(rows),
+    big = largeSize(rows);
+  const windows = `<div class="seg" role="group" aria-label="Order flow window">${FLOW_WINDOWS.map(([m, l]) => `<button data-action="flow-window" data-value="${m}" class="${flowWindow === m ? "active" : ""}">${l}</button>`).join("")}</div>`;
+  if (!full)
+    return `<p class="tape-label">${label}</p>${pressureBar(f)}<div class="mini-stats"><span>VWAP <b>${fmt(f.vwap)}</b></span><span>Volume <b>${compact(f.volume)}</b></span><span>Prints <b>${int(f.count)}</b></span></div><div class="flow-grid compact"><div>${ladder(rows, f, 24, 9)}</div><div>${tradeList(rows, 8, false, big)}</div></div>`;
+  const stats = `<div class="stats">${stat("Prints", int(f.count), f.first ? `${esc(tapeClock(f.first.time))} – ${esc(tapeClock(f.last.time))} New York` : "")}${stat("Volume", compact(f.volume), `VWAP ${fmt(f.vwap)} · range ${fmt(f.low)} – ${fmt(f.high)}`)}${stat("Delta (buy − sell)", `<span class="${toneOf(f.delta)}">${signedCompact(f.delta)}</span>`, `estimated, ${pct(f.buyShare)} buyer-initiated`)}${stat("Largest print", int(f.largest?.size), f.largest ? `at ${fmt(f.largest.price)}, ${esc(tapeClock(f.largest.time))}` : "")}</div>`;
+  return `<div class="flow-top"><p class="tape-label">${label}</p>${windows}</div>${pressureBar(f)}${stats}<div class="flow-grid"><div><h3 class="flow-h">Volume at price <small>buying vs selling at each price</small></h3>${ladder(rows, f, 32, 0)}</div><div><h3 class="flow-h">Trades <small>prints of one order grouped · newest first</small></h3>${tradeList(rows, n, true, big)}</div></div>`;
 }
 function minutesBody(m, n, full) {
   const label = `Last session ${esc(m.date)} · 1-minute bars from Twelve Data (no individual trades without an Alpaca key)`;
@@ -1462,6 +1567,13 @@ function minutesBody(m, n, full) {
       return `<tr><td>${esc(r.time.slice(11, 16))}</td><td>${fmt(r.open)}</td><td>${fmt(r.high)}</td><td>${fmt(r.low)}</td><td class="${prev == null ? "" : tone(r.close - prev)}">${fmt(r.close)}</td><td>${int(r.volume)}</td></tr>`;
     })
     .join("")}</tbody></table></div>`;
+}
+// The prints being shown: live ones, or the last session's from Alpaca.
+function shownPrints() {
+  const live_ = tapes[symbol] || [];
+  if (live_.length) return live_;
+  const past = pastTape[symbol];
+  return past?.kind === "prints" ? past.prints || [] : [];
 }
 function tapeBody(n, full = false) {
   const live_ = tapes[symbol] || [];
@@ -1479,7 +1591,21 @@ function tapeBody(n, full = false) {
   return empty(esc(loading ? "Loading the last session's trades…" : past?.error || tapeError || "Waiting for trades…"));
 }
 function tapeView() {
-  return `<section class="panel"><div class="panel-head"><h2>Time and sales <small>trade prints, newest first</small></h2></div><div id="tape-slot">${tapeBody(stockView === "TAS" ? 2000 : 12, true)}</div><small>Live prints come from the Finnhub stream (up to 500 kept). When the market is closed, or before live prints arrive, the most recent session shows instead: individual trades on the IEX exchange from Alpaca's free plan (a small share of all volume; the free plan can't read the latest 15 minutes), or 1-minute bars from Twelve Data if there's no Alpaca key. Buy and sell are estimated with the tick rule (a print above the previous price counts as buyer-initiated); free feeds have no bid/ask quotes, so there's no order book (market depth).${hasAlpaca() ? "" : " Add a free Alpaca key in Settings for past trade prints."}</small></section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Time and sales <small>order flow from trade prints</small></h2></div><div id="tape-slot">${tapeBody(400, true)}</div><h3 class="flow-h">Cumulative delta <small>running buy − sell volume</small></h3><div id="delta-chart" class="delta-host"></div><small>Live prints come from the Finnhub stream (the newest 20,000 this session). When the market is closed, or before live prints arrive, the most recent session shows instead: individual trades on the IEX exchange from Alpaca's free plan (a small share of all volume; the free plan can't read the latest 15 minutes), or 1-minute bars from Twelve Data if there's no Alpaca key. Buy and sell are estimated with the tick rule: a print above the previous price counts as buyer-initiated, below as seller-initiated. Free feeds have no bid/ask quotes, so this is not an order book (resting orders), only what traded.${hasAlpaca() ? "" : " Add a free Alpaca key in Settings for past trade prints."}</small></section>`;
+}
+let deltaInst = null;
+function drawDelta() {
+  const host = $("#delta-chart");
+  if (deltaInst && (!host || deltaInst.host !== host)) {
+    deltaInst.destroy();
+    deltaInst = null;
+  }
+  if (!host) return;
+  const prints = shownPrints();
+  host.hidden = !prints.length;
+  if (!prints.length) return;
+  if (!deltaInst) deltaInst = Object.assign(deltaChart(host), { host });
+  deltaInst.setData(cumulativeDelta(flowWindowRows(tapeStats(prints)), nyWall));
 }
 async function loadPastTape(s) {
   const p = (pastTape[s] ||= {});
@@ -1501,15 +1627,18 @@ async function loadPastTape(s) {
     p.loading = false;
   }
 }
+// One poll of the stream's prints feeds the tape, the order flow and the
+// live intraday candles of the open stock.
 function syncTape() {
-  const want = page === "Stock" && (!stockView || stockView === "TAS") && !streamBlocker();
-  if (!want) {
+  const shows = (page === "Stock" && (!stockView || stockView === "TAS" || stockView === "GP")) || page === "Overview";
+  if (!shows || streamBlocker()) {
     clearInterval(tapeTimer);
     tapeTimer = null;
     return;
   }
-  if (!tapeTimer) tapeTimer = setInterval(pollTape, 1000);
+  if (!tapeTimer) tapeTimer = setInterval(pollTape, 500);
 }
+let tapePaintedAt = 0;
 async function pollTape() {
   const s = symbol,
     buf = (tapes[s] ||= []);
@@ -1518,9 +1647,16 @@ async function pollTape() {
     tapeError = r.streaming ? "" : "Connecting this stock to the real-time stream…";
     if (!r.prints?.length) return;
     buf.push(...r.prints);
-    if (buf.length > 500) buf.splice(0, buf.length - 500);
+    if (buf.length > 20000) buf.splice(0, buf.length - 20000);
+    feedBars(s, r.prints);
+    if (isIntraday(chartPrefs().interval)) flushCharts([s]);
     const el = $("#tape-slot");
-    if (el && s === symbol && !el.matches(":hover")) el.innerHTML = stockView === "TAS" ? tapeBody(2000, true) : tapeBody(12);
+    // Repaint the tape at most once a second, and not while it's being read.
+    if (el && s === symbol && !el.matches(":hover") && Date.now() - tapePaintedAt > 900) {
+      tapePaintedAt = Date.now();
+      el.innerHTML = stockView === "TAS" ? tapeBody(400, true) : tapeBody(12);
+      drawDelta();
+    }
   } catch (e) {
     tapeError = message(e);
   }
@@ -3158,6 +3294,13 @@ function bind() {
       compare = e.target.value;
       drawCharts();
     };
+  if ($("#chart-freq"))
+    $("#chart-freq").onchange = async (e) => {
+      chartPrefs().freq = frequencyOf(e.target.value).id;
+      await persist();
+      flushCharts([symbol], true);
+      paintChartStatus();
+    };
   if ($("#statement"))
     $("#statement").onchange = (e) => {
       statement = e.target.value;
@@ -3337,13 +3480,26 @@ async function action(act, value) {
     case "research":
       openStock(value || symbol, null);
       break;
-    case "range":
-      range = +value;
+    case "chart-interval":
+      chartPrefs().interval = intervalOf(value).id;
+      if (isIntraday(value)) compare = "";
+      await persist();
       render();
       break;
     case "chart-type":
-      candles = !candles;
+      chartPrefs().candles = !chartPrefs().candles;
+      await persist();
       render();
+      break;
+    case "flow-window": {
+      flowWindow = +value || 0;
+      const el = $("#tape-slot");
+      if (el) el.innerHTML = stockView === "TAS" ? tapeBody(400, true) : tapeBody(12);
+      drawDelta();
+      break;
+    }
+    case "chart-fit":
+      for (const [el, c] of charts) if (el.isConnected) c.inst.fit();
       break;
     case "watch-add":
       await addTicker($("#watch-input")?.value || symbol, false);
@@ -3658,17 +3814,19 @@ async function action(act, value) {
       );
       break;
     case "chart-export": {
-      const svg = document.querySelector(".chart svg")?.cloneNode(true);
-      if (!svg) throw Error("No chart to export");
-      svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-      const style = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "style",
-      );
-      style.textContent =
-        "text{fill:#929292;font:10px monospace}.gridline{stroke:#383838}svg{background:#1d1d1d}";
-      svg.prepend(style);
-      download(symbol + "-chart.svg", svg.outerHTML, "image/svg+xml");
+      const c = [...charts].find(([el]) => el.isConnected)?.[1];
+      if (!c) throw Error("No chart to export");
+      const url = c.inst.png(),
+        name = `${symbol}-${chartPrefs().interval}-chart.png`;
+      if (native) {
+        const saved = await window.__TAURI__.core.invoke("export_file", { filename: name, contents: url.split(",")[1], encoding: "base64" });
+        if (saved) notify("File saved.");
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        a.click();
+      }
       break;
     }
     case "prices-export":

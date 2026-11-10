@@ -49,7 +49,7 @@ Windows requires Microsoft C++ Build Tools and WebView2. Linux requires WebKitGT
 ## First session
 
 1. Launch the app. The first screen asks for your free API keys:
-   - **Twelve Data**: daily prices with about 5 years of history (800 requests/day). [Get a key](https://twelvedata.com/register)
+   - **Twelve Data**: daily prices with about 5 years of history, and intraday chart bars (800 requests/day). [Get a key](https://twelvedata.com/register)
    - **Finnhub**: real-time US trades, company news, key metrics, company profile and the earnings calendar (60 requests/minute). [Get a key](https://finnhub.io/register)
    - **Alpha Vantage**: financial statements and the company description (25 requests/day; its news endpoint is premium, so news comes from Finnhub). [Get a key](https://www.alphavantage.co/support/#api-key)
    - **Alpaca** (optional, key ID and secret): the last session's trade prints for time and sales when the market is closed. [Sign up](https://app.alpaca.markets/signup)
@@ -77,7 +77,7 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 | Panel | Code | Full view |
 |---|---|---|
 | Description | `DES` | Profile, key statistics, risk metrics, research journal, earnings (reported and upcoming, EPS and revenue vs estimates) |
-| Chart | `GP` | Candles or line, ranges, MA20/MA50, comparison overlay, SVG export |
+| Chart | `GP` | TradingView-style candles or line at 1m, 5m, 15m, 1H, 4H, daily and weekly; the newest candle moves with live trades, redrawn in real time or every 1s/5s/15s/1m (or paused); volume, MA20/MA50, comparison overlay (daily and weekly), PNG export |
 | Financials | `FA` | Annual/quarterly statements (Alpha Vantage) and SEC revenue history |
 | News | `CN` | Company news from the last 7 days with summaries (Finnhub) |
 | Holders | `HDS` | Everything under [Holders (HDS)](#holders-hds) |
@@ -85,14 +85,15 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 | Suppliers & customers | `SPLC` (or `RELS`) | The relationship explorer, centred on the stock |
 | Valuation | `DCF` | Five-year DCF pre-filled from the company's SEC filings (cash flow − capital spending, debt − cash, shares outstanding, recent revenue growth), each input labelled with its source; your edits are saved per stock |
 | Risk analytics | `RSK` | Monte Carlo price ranges, market scenarios, daily-move distribution, rolling volatility, drawdown and beta, and momentum gauges, using Goldman Sachs' GS Quant, which ships with the app. See [Risk analytics (GS Quant)](#risk-analytics-gs-quant) |
-| Time & sales | `TAS` (or `QR`) | Trade prints (time, price, size, conditions) with VWAP, volume, largest print and a buy/sell estimate: live from the Finnhub stream, or the last session's when the market is closed |
+| Time & sales | `TAS` (or `QR`) | Order flow from trade prints: buying vs selling volume at each price (with the busiest price and VWAP marked), the trade list grouped by order, buy/sell pressure and cumulative delta, for the whole session or the last 30, 5 or 1 minutes. Live from the Finnhub stream, or the last session's when the market is closed |
 | Filings | `CF` | Recent 10-K, 10-Q, 8-K and similar filings |
 
 - Click a panel's title, a tab under the stock header, or type `AAPL HDS`, `TSLA DCF`, `HDS` (current stock) and so on. **Esc** returns to the grid.
 - Typing another ticker on the stock page keeps the view you're on. The sidebar lists the loaded stock and the last few you opened.
 - Opening a stock that isn't in the workspace loads its prices without adding it to your watchlist; **Add to watchlist** in the header keeps it there.
 - Key statistics (P/E, profit margin, revenue growth, market cap, 52-week range) are calculated from the live price, the latest statements (trailing four quarters when available) and SEC shares outstanding, then fall back to Finnhub's and Alpha Vantage's figures. Each figure names its source; a loss-making company's P/E shows NM.
-- Time and sales: live prints come from the Finnhub stream. When the market is closed, or before live prints arrive, the most recent session shows instead: the newest 10,000 trades on the IEX exchange from Alpaca's free plan (IEX is a small share of all volume, and the latest 15 minutes aren't available), or, without an Alpaca key, that session's 1-minute bars from Twelve Data. Buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because free feeds have no bid/ask. There is no order book (market depth) on free data.
+- Time and sales: live prints come from the Finnhub stream. When the market is closed, or before live prints arrive, the most recent session shows instead: the newest 10,000 trades on the IEX exchange from Alpaca's free plan (IEX is a small share of all volume, and the latest 15 minutes aren't available), or, without an Alpaca key, that session's 1-minute bars from Twelve Data. Buy/sell is estimated by the tick rule (a print above the previous price counts as buyer-initiated), because free feeds have no bid/ask. There is no order book (market depth) on free data, so the order flow shows what traded, not resting orders.
+- Charts: daily and weekly candles come from the stored daily history; intraday ones download from Twelve Data when you pick that timeframe (again every 10 minutes while the market is open, or every 2 minutes without a Finnhub key), and live trades keep the newest candle current in between. Intraday candles cover regular hours (9:30–16:00 New York). Charts use TradingView's open-source [Lightweight Charts](https://github.com/tradingview/lightweight-charts).
 - Ownership changes are disclosures as of their filing dates: 13F appears up to 45 days after quarter end, Forms 4 within two business days of the trade.
 
 ## Risk analytics (GS Quant)
@@ -167,7 +168,7 @@ The **Universe** page and the sidebar search cover every stock and ETF in Twelve
 | Stock page | One loaded stock, a panel grid and ten full views: description, chart, financials, news, holders, ownership changes, suppliers & customers, valuation, time & sales, filings; terminal codes (`AAPL HDS`), recent stocks, Esc back to the grid |
 | Holders (on the stock page) | `TICKER HDS`: 13F institutions with changes and conviction, manager portfolios, 13D/G 5%+ owners, Forms 3/4/5 insiders, options, ownership history, CSV export |
 | Overview | Asset lookup, saved watchlist, daily changes, local-universe movers, performance heatmap |
-| Description, chart, financials, news (on the stock page) | Candlestick/line chart, volume, hover inspection, wheel zoom, time ranges, MA20/MA50, normalized comparison overlay, chart SVG export, source/date labels, company profile, ratios, annual/quarterly statements, linked news, earnings calendar, dividend metadata, EDGAR link, saved thesis |
+| Description, chart, financials, news (on the stock page) | Candlestick/line chart at intraday, daily and weekly timeframes with live candles, volume, crosshair readout, zoom and pan, MA20/MA50, normalized comparison overlay, chart PNG export, source/date labels, company profile, ratios, annual/quarterly statements, linked news, earnings calendar, dividend metadata, EDGAR link, saved thesis |
 | Trade | Buy/sell beside chart, fractional shares, fees, manual slippage, rationale, execution markers, chronological ledger, cash/position checks, separate demo/market accounts, CSV journal |
 | Portfolio | Holdings, average cost, cash, realized/unrealized P&L, allocation, historical paper-equity curve, volatility, drawdown, per-asset Sharpe, correlation matrix, uniform price-shock scenario, benchmark context, position export |
 | Screener | S&P 500 market map (treemap by sector, tiles sized by market cap, coloured by 1-day to 1-year change, top gainers/losers; click a company to open its stock page) and the workspace screener: P/E, growth and sector filters, saved screens, result export |
@@ -238,7 +239,9 @@ This is a substantial first implementation of the requested release and analysis
 
 ## Project map
 
-- `src/main.js`: UI/workflows and chart rendering
+- `src/main.js`: UI/workflows
+- `src/pricechart.js`, `src/candles.js`: price charts (Lightweight Charts), timeframes and live candles
+- `src/orderflow.js`: volume at price, grouped trades and delta from trade prints
 - `src/engine.js`: pure analytics, validation, imports and preview accounting
 - `src/sample.js`: deterministic synthetic demonstration data
 - `src/bridge.js`: native/browser storage and provider boundary
