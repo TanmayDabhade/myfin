@@ -79,10 +79,18 @@ async fn export_file(
     app: tauri::AppHandle,
     filename: String,
     contents: String,
+    encoding: Option<String>,
 ) -> Result<bool, String> {
     if filename.contains('/') || filename.contains('\\') || contents.len() > 25_000_000 {
         return Err("Invalid export".into());
     }
+    // Images arrive base64-encoded (a chart picture); text is written as is.
+    let bytes: Vec<u8> = if encoding.as_deref() == Some("base64") {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(contents.trim()).map_err(|_| "Invalid export".to_string())?
+    } else {
+        contents.into_bytes()
+    };
     tauri::async_runtime::spawn_blocking(move || {
         let path = app
             .dialog()
@@ -91,7 +99,7 @@ async fn export_file(
             .blocking_save_file();
         if let Some(path) = path {
             let path = path.into_path().map_err(|e| e.to_string())?;
-            std::fs::write(path, contents).map_err(|e| e.to_string())?;
+            std::fs::write(path, bytes).map_err(|e| e.to_string())?;
             Ok(true)
         } else {
             Ok(false)
@@ -208,7 +216,7 @@ async fn fetch_data(
             .map_err(|e| e.to_string())?
     };
     if let Some((body, stamp)) = &cached {
-        if fresh(*stamp, rules.ttl, force.unwrap_or(false)) {
+        if fresh(*stamp, providers::ttl(&provider, &kind), force.unwrap_or(false)) {
             return Ok(json!({"data":serde_json::from_str::<Value>(body).map_err(|e|e.to_string())?,"fetchedAt":stamp,"cached":true,"provider":provider}));
         }
     }

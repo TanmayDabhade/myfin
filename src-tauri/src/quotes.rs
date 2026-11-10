@@ -8,8 +8,9 @@ use std::collections::{HashMap, VecDeque};
 pub const STREAM_URL: &str = "wss://ws.finnhub.io";
 /// Finnhub's free plan streams at most 50 symbols per connection.
 pub const MAX_SYMBOLS: usize = 50;
-/// Trade prints kept per symbol for the time-and-sales tape.
-pub const MAX_TAPE: usize = 500;
+/// Trade prints kept per symbol for the time-and-sales tape, order flow and
+/// live candles.
+pub const MAX_TAPE: usize = 5_000;
 
 pub fn valid_symbol(s: &str) -> bool {
     !s.is_empty() && s.len() <= 20 && s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || ".:-_^".contains(c))
