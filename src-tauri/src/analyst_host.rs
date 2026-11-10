@@ -392,7 +392,10 @@ pub async fn read(url: &str) -> Result<Value, String> {
         if addrs.iter().any(|a| analyst::private_ip(&a.ip())) {
             return Err("Local addresses can't be read".into());
         }
+        // No proxy: a proxy would look the name up again itself and skip
+        // the address check above.
         let client = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .resolve(&host, addr)
             .timeout(Duration::from_secs(20))
