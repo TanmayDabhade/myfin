@@ -165,9 +165,20 @@ async fn fetch(host: &Host, client: &reqwest::Client, d: &Download, dest: &Path,
     tokio::fs::rename(&part, dest).await.map_err(|e| e.to_string())
 }
 
+/// The client for the engine and model downloads.
+pub fn download_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::custom(|a| if analyst::follow_download(a.url(), a.previous().len()) { a.follow() } else { a.error("Unexpected download redirect") }))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 /// Downloads and unpacks whatever is missing.
-pub async fn install(host: Arc<Host>, client: reqwest::Client, data: PathBuf) {
+pub async fn install(host: Arc<Host>, data: PathBuf) {
     let result: Result<(), String> = async {
+        let client = download_client()?;
         let rt = runtime().ok_or("Aperture Analyst isn't available for this computer yet.")?;
         tokio::fs::create_dir_all(dir(&data)).await.map_err(|e| e.to_string())?;
         if server_exe(&data).is_none() {
@@ -435,4 +446,27 @@ pub async fn read(url: &str) -> Result<Value, String> {
         return Ok(json!({ "url": current.as_str(), "title": title, "text": text }));
     }
     Err("Too many redirects".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real download path against GitHub: redirect, exact size and
+    /// checksum. Downloads only; nothing is run.
+    #[test]
+    #[ignore = "Downloads the llama.cpp engine (12–25 MB); requires network"]
+    fn live_runtime_download() {
+        let rt = runtime().expect("supported platform");
+        let dir = std::env::temp_dir().join(format!("aperture-analyst-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("runtime.archive");
+        let host = Host::default();
+        let r = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let out = r.block_on(async { fetch(&host, &download_client().unwrap(), &rt, &dest, "test").await });
+        let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        let _ = std::fs::remove_dir_all(&dir);
+        out.unwrap();
+        assert_eq!(len, rt.size);
+    }
 }

@@ -19,16 +19,17 @@ pub struct Download {
 }
 
 /// The llama.cpp server for this computer, by `std::env::consts` OS and arch.
+/// Sizes are exact: downloads are checked against them.
 /// CPU builds on Windows and Linux work on every machine; macOS on Apple
 /// Silicon uses the GPU (Metal).
 pub fn runtime_for(os: &str, arch: &str) -> Option<Download> {
     let (asset, sha256, size): (&str, &str, u64) = match (os, arch) {
-        ("macos", "aarch64") => ("macos-arm64.tar.gz", "6015918064ddf52a4c60bd8c0c01fe030e07ff317d744f1e93cd3e54b10ba08e", 16_000_000),
-        ("macos", "x86_64") => ("macos-x64.tar.gz", "4969321f8d27980686c1ce947f00fd07355693197f1f1732e3673f1b4791f7e4", 12_000_000),
-        ("windows", "x86_64") => ("win-cpu-x64.zip", "f70b7fe800e683f58fed3199fcf9c961932307f30916498a7758dce5f1d76ce9", 24_000_000),
-        ("windows", "aarch64") => ("win-cpu-arm64.zip", "a28993a67dcb7daa5d677ff9cc142722e0218e839e073a4ff569f4e87263f433", 12_000_000),
-        ("linux", "x86_64") => ("ubuntu-x64.tar.gz", "13a2802a7b7b6c39deda5c3c7f59a8377be9fff289a578ccf801baba278765bf", 22_000_000),
-        ("linux", "aarch64") => ("ubuntu-arm64.tar.gz", "fb56c30b1af259eef64a30e1aee7ef57329fd84bf8efd326abbb653adbd42a98", 18_000_000),
+        ("macos", "aarch64") => ("macos-arm64.tar.gz", "6015918064ddf52a4c60bd8c0c01fe030e07ff317d744f1e93cd3e54b10ba08e", 16_303_048),
+        ("macos", "x86_64") => ("macos-x64.tar.gz", "4969321f8d27980686c1ce947f00fd07355693197f1f1732e3673f1b4791f7e4", 12_038_936),
+        ("windows", "x86_64") => ("win-cpu-x64.zip", "f70b7fe800e683f58fed3199fcf9c961932307f30916498a7758dce5f1d76ce9", 24_227_896),
+        ("windows", "aarch64") => ("win-cpu-arm64.zip", "a28993a67dcb7daa5d677ff9cc142722e0218e839e073a4ff569f4e87263f433", 12_847_697),
+        ("linux", "x86_64") => ("ubuntu-x64.tar.gz", "13a2802a7b7b6c39deda5c3c7f59a8377be9fff289a578ccf801baba278765bf", 22_464_263),
+        ("linux", "aarch64") => ("ubuntu-arm64.tar.gz", "fb56c30b1af259eef64a30e1aee7ef57329fd84bf8efd326abbb653adbd42a98", 18_215_695),
         _ => return None,
     };
     Some(Download {
@@ -65,6 +66,12 @@ pub fn server_args(model: &str, port: u16, key: &str, gpu: bool) -> Vec<String> 
     .collect();
     a.extend(["-ngl".into(), if gpu { "all".into() } else { "0".into() }]);
     a
+}
+
+/// Downloads follow redirects (GitHub and Hugging Face both send files from
+/// a separate file server), but only to https and at most five hops.
+pub fn follow_download(to: &reqwest::Url, hops: usize) -> bool {
+    to.scheme() == "https" && hops < 5
 }
 
 // ---- News search ------------------------------------------------------------
@@ -408,6 +415,8 @@ mod tests {
         let mac = runtime_for("macos", "aarch64").unwrap();
         assert_eq!(mac.url, "https://github.com/ggml-org/llama.cpp/releases/download/b11927/llama-b11927-bin-macos-arm64.tar.gz");
         assert_eq!(mac.sha256.len(), 64);
+        assert_eq!(mac.size, 16_303_048);
+        assert_eq!(runtime_for("macos", "x86_64").unwrap().size, 12_038_936);
         assert!(runtime_for("windows", "x86_64").unwrap().url.ends_with("win-cpu-x64.zip"));
         assert!(runtime_for("freebsd", "x86_64").is_none());
         let m = model();
@@ -417,6 +426,14 @@ mod tests {
         let s = a.join(" ");
         assert!(s.contains("--host 127.0.0.1") && s.contains("--port 4242") && s.contains("--api-key k") && s.contains("--jinja") && s.contains("--reasoning off") && s.contains("-ngl all"));
         assert!(server_args("/m.gguf", 1, "k", false).join(" ").ends_with("-ngl 0"));
+    }
+
+    #[test]
+    fn downloads_follow_https_redirects_only() {
+        let u = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert!(follow_download(&u("https://release-assets.githubusercontent.com/x"), 0));
+        assert!(!follow_download(&u("http://example.com/x"), 0));
+        assert!(!follow_download(&u("https://example.com/x"), 5));
     }
 
     #[test]
