@@ -18,6 +18,7 @@ export const COMMANDS = {
   DCF: "Stock",
   TAS: "Stock",
   QR: "Stock",
+  ASK: "Stock",
   CF: "Stock",
   EQS: "Universe",
   SECF: "Universe",

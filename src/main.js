@@ -37,7 +37,7 @@ import {
   filingURL,
 } from "./filings.js";
 import { REVENUE_TAGS, VALUE_TAGS } from "./sec-tags.js";
-import { VIEWS, VIEW_CODES, viewLabel, pushRecent, tapeStats, ownershipFeed, valuationInputs, keyStats, pastPrints, minuteSession } from "./stock.js";
+import { VIEWS, VIEW_CODES, viewLabel, pushRecent, tapeStats, ownershipFeed, valuationInputs, keyStats, pastPrints, minuteSession, metricLabel, statementRows, STATEMENTS } from "./stock.js";
 import {
   parseCommand,
   sharesSeries,
@@ -103,6 +103,8 @@ import { applyTrade, nyDate } from "./live.js";
 import { INTERVALS, FREQUENCIES, intervalOf, frequencyOf, isIntraday, fromTwelve, dailyBars, weeklyBars, applyPrints, barsDue, bucketStart, parseWall, nyWall } from "./candles.js";
 import { groupPrints, volumeAtPrice, levelOf, cumulativeDelta, largeSize, flowSummary, since as printsSince } from "./orderflow.js";
 import { priceChart, deltaChart } from "./pricechart.js";
+import { systemPrompt, TOOLS as ANALYST_TOOLS, QUICK_QUESTIONS, buildBriefing, checkToolCall, normalUrl, newsNotInAperture, newsResult, pageResult, cleanAnswer, citedIds, answerHtml } from "./analyst.js";
+import { analystStatus, analystInstall, analystRemove, analystChat, analystCancel, analystNews, analystRead, onAnalystDelta } from "./bridge.js";
 import {
   risk,
   equityCurve,
@@ -1356,12 +1358,13 @@ function stockPage() {
 function stockGrid() {
   const tile = (code, body, cls = "") =>
     `<section class="panel tile ${cls}" data-tile="${code}"><div class="panel-head"><h2><button class="tile-title" data-action="stock-view" data-value="${code}">${viewLabel(code)}</button><kbd>${code}</kbd></h2><button class="icon" data-action="stock-view" data-value="${code}" title="Open ${viewLabel(code)}" aria-label="Open ${viewLabel(code)}">⤢</button></div>${body}</section>`;
-  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("RSK", riskTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
+  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("ASK", analystTile())}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("RSK", riskTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
 }
 function stockBody() {
   const views = {
     DES: descriptionView,
     GP: () => `<section class="panel">${chartBody()}</section>`,
+    ASK: analystView,
     FA: financialsView,
     CN: () => `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Company news</h2></div>${newsList(30, true)}</section>${calendarPanel()}</div>`,
     HDS: holdersPage,
@@ -1464,16 +1467,15 @@ function financialsTile() {
 }
 function statementsPanel() {
   const data = state.mode === "market" ? state.datasets[`${symbol}:${statement}`]?.data?.[period] : null;
-  return `<section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement" aria-label="Statement">${["INCOME_STATEMENT", "BALANCE_SHEET", "CASH_FLOW"].map((s) => `<option ${s === statement ? "selected" : ""}>${s}</option>`).join("")}</select><select id="period" aria-label="Period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select></div>${
+  return `<section class="panel"><div class="panel-head"><h2>Financial statements</h2><select id="statement" aria-label="Statement">${STATEMENTS.map(([k, label]) => `<option value="${k}" ${k === statement ? "selected" : ""}>${label}</option>`).join("")}</select><select id="period" aria-label="Period"><option value="annualReports" ${period === "annualReports" ? "selected" : ""}>Annual</option><option value="quarterlyReports" ${period === "quarterlyReports" ? "selected" : ""}>Quarterly</option></select></div>${
     data?.length
       ? table(
           ["Metric", ...data.slice(0, 4).map((r) => esc(r.fiscalDateEnding))],
-          Object.keys(data[0])
-            .filter((k) => !["fiscalDateEnding", "reportedCurrency"].includes(k))
-            .map((k) => `<tr><td>${esc(k)}</td>${data.slice(0, 4).map((r) => `<td>${number(r[k]) == null ? "—" : compact(+r[k])}</td>`).join("")}</tr>`),
+          statementRows(Object.keys(data[0]), statement)
+            .map((k) => `<tr><td title="${esc(k)}">${esc(metricLabel(k))}</td>${data.slice(0, 4).map((r) => `<td>${number(r[k]) == null ? "—" : compact(+r[k])}</td>`).join("")}</tr>`),
         )
       : empty(esc(waiting(statement, "financial statements")))
-  }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. Raw provider figures; “None” is missing, not zero.</small></section>`;
+  }<small>Reported currency: ${esc(data?.[0]?.reportedCurrency || "—")}. As reported, via Alpha Vantage; “—” means not reported. Hover a row for its source field name.</small></section>`;
 }
 function financialsView() {
   return `${statTiles(stockStats())}${statementsPanel()}<section class="panel"><div class="panel-head"><h2>Annual revenue <small>SEC XBRL</small></h2></div>${financialsTile()}</section>`;
@@ -1660,6 +1662,233 @@ async function pollTape() {
   } catch (e) {
     tapeError = message(e);
   }
+}
+// ---- Aperture Analyst ---------------------------------------------------------
+// Gemma 4 E4B on this computer (llama.cpp, started by the desktop app). It
+// gets a briefing built from Aperture's own data for the open stock and may
+// search the web for news and read pages; analyst.js holds its rules.
+let analyst = null, // analyst_status: { supported, installed, job, model, downloadBytes, … }
+  analystPoll = null;
+const analystConvs = {}; // symbol -> { turns: [], busy }
+const analystTurns = new Map(); // reply id -> turn, for streamed text
+const analystConv = (s = symbol) => (analystConvs[s] ||= { turns: [], busy: false });
+const gb = (b) => (b / 1e9).toFixed(1) + " GB";
+function loadAnalystStatus() {
+  if (!native) return;
+  analystStatus()
+    .then((st) => {
+      const changed = !!analyst?.installed !== !!st.installed;
+      analyst = st;
+      // Installing or removing changes the whole view (the question box).
+      if (changed && page === "Stock" && stockView === "ASK") refresh();
+      else paintAnalyst();
+      if (st.job?.running && !analystPoll) analystPoll = setInterval(loadAnalystStatus, 1000);
+      if (!st.job?.running && analystPoll) {
+        clearInterval(analystPoll);
+        analystPoll = null;
+      }
+    })
+    .catch((e) => {
+      analyst = { error: message(e) };
+      paintAnalyst();
+    });
+}
+if (native)
+  onAnalystDelta?.((d) => {
+    const t = analystTurns.get(d?.id);
+    if (!t) return;
+    if (d.stage) t.stage = d.stage;
+    if (d.text) t.draft += d.text;
+    const el = document.getElementById("an-draft-" + d.id);
+    if (el) el.textContent = t.draft || analystStageText(t);
+    else paintAnalyst();
+  });
+function analystStageText(t) {
+  return t.stage === "loading" ? "Starting Aperture Analyst… the first answer after launch can take a minute while the model loads." : "Thinking…";
+}
+// Setup: what it is, the one-time download and its progress.
+function analystSetup(compact) {
+  if (!native) return empty("Aperture Analyst runs on your computer in the desktop app.");
+  if (!analyst) return empty("Checking Aperture Analyst…");
+  if (analyst.error) return empty(esc(analyst.error));
+  if (!analyst.supported) return empty("Aperture Analyst isn't available for this computer yet.");
+  const j = analyst.job || {};
+  const progress = j.running
+    ? `<div class="an-progress"><div class="an-bar"><i style="width:${j.total ? ((j.done / j.total) * 100).toFixed(1) : 0}%"></i></div><small>${esc(j.stage || "Downloading…")} ${j.total ? `${gb(j.done)} of ${gb(j.total)}` : ""}</small></div>`
+    : `${j.error ? `<p class="an-error">${esc(j.error)}</p>` : ""}${button(j.error ? "Resume download" : `Download Aperture Analyst · ${gb(analyst.downloadBytes)}`, "an-install", "primary")}`;
+  if (compact) return `<p class="muted">Ask questions about ${esc(symbol)} and get answers that cite Aperture's data and web news, written on your computer.</p>${progress}`;
+  return `<div class="an-setup"><h3>Set up Aperture Analyst</h3><p>Aperture Analyst answers questions about the open stock using Aperture's own data (prices, order flow, news, SEC filings, holders, risk) and searches the web for news Aperture missed. Every claim links to its source.</p><ul><li><b>Runs on this computer.</b> Your questions and Aperture's data stay here; only its web searches and the pages it reads go online.</li><li><b>One download, ${gb(analyst.downloadBytes)}:</b> ${esc(analyst.model?.name || "the model")} (${esc(analyst.model?.license || "")}, by Google DeepMind) and the ${esc(analyst.runtime?.name || "llama.cpp")} engine (MIT). Both are checked against published checksums.</li><li><b>Needs about 6 GB of free memory</b> while answering. ${analyst.gpu ? "Uses this Mac's GPU." : "Runs on the processor, so answers take longer on this computer."}</li></ul>${progress}</div>`;
+}
+function analystTurnHtml(t) {
+  const steps = t.steps.length ? `<ol class="an-steps">${t.steps.map((x) => `<li class="${x.error ? "warn" : ""}">${esc(x.text)}</li>`).join("")}</ol>` : "";
+  let body;
+  if (t.answer) {
+    const cited = citedIds(t.answer).filter((id) => t.sources[id]);
+    const list = cited.length
+      ? `<div class="an-sources"><span>Sources</span>${cited
+          .map((id) => {
+            const src = t.sources[id];
+            const label = `<b>${id}</b> ${esc(src.label.length > 90 ? src.label.slice(0, 89) + "…" : src.label)}${src.source ? ` <small>${esc(src.source)}</small>` : ""}`;
+            return src.url && /^https?:\/\//.test(src.url) ? `<a href="${esc(src.url)}" target="_blank" rel="noreferrer">${label}</a>` : src.view ? `<button class="linkish" data-action="stock-view" data-value="${esc(src.view)}">${label}</button>` : `<span>${label}</span>`;
+          })
+          .join("")}</div>`
+      : "";
+    body = `<div class="an-answer">${answerHtml(t.answer, t.sources, esc)}</div>${list}`;
+  } else if (t.error) body = `<p class="an-error">${esc(t.error)}</p>`;
+  else if (t.done) body = `<p class="muted">${t.cancelled ? "Stopped." : "No answer."}</p>`;
+  else body = `<div class="an-answer an-draft" id="an-draft-${esc(t.id)}">${esc(t.draft || analystStageText(t))}</div>`;
+  return `<div class="an-turn"><div class="an-q">${esc(t.q)}</div>${steps}${body}</div>`;
+}
+function analystBody(full) {
+  if (!native || !analyst?.installed) return analystSetup(!full);
+  const conv = analystConv();
+  const turns = full ? conv.turns : conv.turns.slice(-1);
+  const quick = `<div class="an-quick">${QUICK_QUESTIONS.map(([label], i) => `<button data-action="an-quick" data-value="${i}" ${conv.busy ? "disabled" : ""}>${esc(label)}</button>`).join("")}</div>`;
+  if (!turns.length) return `${quick}<p class="muted an-hint">Ask anything about ${esc(symbol)}: why it's moving, what a filing says, the main risks. Answers cite Aperture's panels and web sources.</p>`;
+  return `${quick}<div class="an-log">${turns.map(analystTurnHtml).join("")}</div>${full ? `<p class="an-note">Written on this computer by Aperture Analyst from the cited sources. It can make mistakes: check the sources. Research, not investment advice.</p>` : ""}`;
+}
+function analystTile() {
+  return `<div data-analyst-slot="tile">${analystBody(false)}</div>`;
+}
+function analystView() {
+  const conv = analystConv();
+  const ask = native && analyst?.installed ? `<form class="an-ask" onsubmit="return false"><textarea id="an-input" rows="2" maxlength="1000" placeholder="Ask about ${esc(symbol)}… (Enter to send, Shift+Enter for a new line)" ${conv.busy ? "disabled" : ""}></textarea>${conv.busy ? button("Stop", "an-stop") : button("Ask", "an-ask", "primary")}</form>` : "";
+  return `<section class="panel analyst-panel"><div class="panel-head"><h2>Aperture Analyst <small>research assistant · runs on this computer</small></h2>${conv.turns.length && !conv.busy ? button("New conversation", "an-clear") : ""}</div><div data-analyst-slot="full">${analystBody(true)}</div>${ask}</section>`;
+}
+function paintAnalyst() {
+  document.querySelectorAll("[data-analyst-slot]").forEach((el) => (el.innerHTML = analystBody(el.dataset.analystSlot === "full")));
+  const box = $("#analyst-settings");
+  if (box) box.innerHTML = analystSettingsBody();
+  const ask = $(".an-ask");
+  if (ask) {
+    const busy = analystConv().busy;
+    const input = $("#an-input");
+    if (input) input.disabled = busy;
+    const btn = ask.querySelector("button");
+    if (btn && (btn.dataset.action === "an-stop") !== busy) btn.outerHTML = busy ? button("Stop", "an-stop") : button("Ask", "an-ask", "primary");
+  }
+}
+// Everything Aperture knows about the open stock, for the briefing.
+function analystFacts() {
+  const a = stockAsset();
+  const fhNews = state.mode === "market" ? state.datasets[`${symbol}:FH_company-news`]?.data : null;
+  const news = Array.isArray(fhNews) ? [...fhNews].sort((x, y) => (y.datetime || 0) - (x.datetime || 0)).map((x) => ({ title: x.headline, url: x.url, source: x.source, time: x.datetime ? x.datetime * 1000 : null, summary: x.summary })) : [];
+  const prints = tapes[symbol] || [];
+  let flow = null;
+  if (prints.length) {
+    const rows = tapeStats(prints).rows,
+      big = largeSize(rows);
+    flow = { ...flowSummary(rows), big: rows.filter((r) => r.size >= big).slice(-5) };
+  }
+  let ownership = [];
+  try {
+    ownership = native && isUSKey(symbol) ? ownershipItems(false).items : [];
+  } catch {}
+  return {
+    symbol,
+    name: stockName(),
+    sector: a?.sector,
+    bars: a?.bars || [],
+    live: a?.live,
+    flow,
+    news,
+    filings: state.mode === "market" ? state.secData?.[symbol]?.filings || [] : [],
+    ownership,
+    stats: a ? stockStats() : {},
+    risk: quantRuns[symbol]?.data?.metrics || null,
+    earnings: fh("earnings")?.earningsCalendar || [],
+    today: nyDate(Date.now()),
+  };
+}
+// `label` is what the conversation shows (a quick question's short name);
+// the model gets the full `question`.
+async function askAnalyst(question, label = question) {
+  const s = symbol,
+    conv = analystConv(s),
+    q = String(question || "").trim();
+  if (!q || conv.busy) return;
+  const facts = analystFacts();
+  const brief = buildBriefing(facts);
+  const t = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, q: String(label || q).trim(), prompt: q, steps: [], sources: { ...brief.sources }, draft: "", stage: "", answer: "", error: "", done: false };
+  const history = conv.turns
+    .filter((x) => x.answer)
+    .slice(-3)
+    .flatMap((x) => [
+      { role: "user", content: x.prompt || x.q },
+      { role: "assistant", content: x.answer },
+    ]);
+  conv.turns.push(t);
+  conv.busy = true;
+  paintAnalyst();
+  const messages = [{ role: "system", content: `${systemPrompt({ marketOpen: usMarketOpen() })}\n\n${brief.text}` }, ...history, { role: "user", content: q }];
+  const allowed = new Set(Object.values(brief.sources).map((x) => x.url && normalUrl(x.url)).filter(Boolean));
+  const used = { calls: 0, pages: 0 };
+  let w = 1;
+  try {
+    for (let round = 0; round < 6 && !t.cancelled; round++) {
+      // After the tool budget is spent, the model has to answer.
+      const offer = used.calls < 3 && round < 4;
+      t.draft = "";
+      analystTurns.set(t.id, t);
+      const r = await analystChat(t.id, messages, offer ? ANALYST_TOOLS : []);
+      if (t.cancelled || r.finish === "cancelled") break;
+      if (offer && r.tool_calls?.length) {
+        const calls = r.tool_calls.slice(0, 2).map((c, i) => ({ ...c, id: c.id || `call_${round}_${i}` }));
+        messages.push({ role: "assistant", content: r.content || "", tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments || "{}" } })) });
+        for (const c of calls) {
+          const out = await runAnalystTool(c, { allowed, used, known: facts.news, next: () => w++ });
+          Object.assign(t.sources, out.sources || {});
+          t.steps.push(out.step);
+          messages.push({ role: "tool", tool_call_id: c.id, name: c.name, content: out.text });
+          paintAnalyst();
+        }
+        continue;
+      }
+      t.answer = cleanAnswer(r.content);
+      if (!t.answer) t.error = "Aperture Analyst didn't produce an answer. Try asking again.";
+      break;
+    }
+  } catch (e) {
+    t.error = message(e);
+  } finally {
+    t.done = true;
+    analystTurns.delete(t.id);
+    conv.busy = false;
+    paintAnalyst();
+    loadAnalystStatus();
+  }
+}
+async function runAnalystTool(call, ctx) {
+  const chk = checkToolCall(call, ctx.allowed, ctx.used);
+  if (!chk.ok) return { text: `Error: ${chk.error}`, step: { text: `Skipped a request: ${chk.error}`, error: true } };
+  ctx.used.calls++;
+  try {
+    if (chk.name === "search_news") {
+      const items = await analystNews(chk.args.query);
+      const fresh = newsNotInAperture(items, ctx.known);
+      const start = ctx.next();
+      for (let i = 1; i < fresh.length; i++) ctx.next();
+      const r = newsResult(fresh, start, items.length - fresh.length);
+      fresh.forEach((x) => ctx.allowed.add(normalUrl(x.url)));
+      return { ...r, step: { text: `Searched the web for “${chk.args.query}” · ${fresh.length} new of ${items.length} results` } };
+    }
+    ctx.used.pages++;
+    const page = await analystRead(chk.args.url);
+    const r = pageResult(page, `W${ctx.next()}`);
+    return { ...r, step: { text: `Read ${new URL(page.url).host.replace(/^www\./, "")}${page.title ? `: ${page.title.slice(0, 80)}` : ""}` } };
+  } catch (e) {
+    const why = message(e);
+    return { text: `Error: ${why}`, step: { text: `${chk.name === "search_news" ? "Web search" : "Reading a page"} failed: ${why}`, error: true } };
+  }
+}
+function analystSettingsBody() {
+  if (!analyst) return empty("Checking…");
+  if (!analyst.installed) return analystSetup(false);
+  return `<p>Installed: ${esc(analyst.model?.name)} (${esc(analyst.model?.license)}, ${gb(analyst.model?.bytes || 0)}) with ${esc(analyst.runtime?.name)} (MIT). ${analyst.running ? "Running now; it stops after 15 minutes without a question to free memory." : "Starts when you ask a question."}</p>${button("Remove Aperture Analyst", "an-remove")}<small>Removing frees about ${gb(analyst.model?.bytes || 0)}. Questions stay on this computer; web searches go to Bing News and pages are read from their publishers.</small>`;
+}
+function analystPanel() {
+  if (!native) return "";
+  return `<section class="panel"><div class="panel-head"><h2>Aperture Analyst <small>AI research assistant on this computer</small></h2></div><div id="analyst-settings">${analystSettingsBody()}</div></section>`;
 }
 // ---- Holders and ownership changes ----
 function holdersTile() {
@@ -2105,7 +2334,7 @@ async function scanFilings(id) {
   const n = graph().nodes.find((x) => x.id === id);
   if (!n) throw Error("Company not found");
   scanningId = id;
-  refresh();
+  scanPaint(id);
   try {
     const cik = n.cik ? padCIK(n.cik) : await resolveCIK(n.ticker);
     const sub = (await fetchSEC("submissions", cik)).data;
@@ -2147,7 +2376,7 @@ async function scanFilings(id) {
     throw e;
   } finally {
     scanningId = null;
-    refresh();
+    scanPaint(id);
   }
 }
 // SEC's company list (about 10,000 filers), loaded once per session.
@@ -2163,6 +2392,10 @@ async function secDirectory() {
 // Scan a company in the background when it is opened: its own annual
 // reports, then other companies' reports that name it. Runs at most once a
 // week per company; leaving a company pauses the second part.
+// Redraws for scan progress only when that company's graph is on screen.
+const scanPaint = (id) => {
+  if (inGraph() && graphCenter === id) refresh();
+};
 const scanRuns = new Set();
 function autoScan(id) {
   if (!live() || !hasKey("sec") || scanRuns.has(id)) return;
@@ -2179,13 +2412,15 @@ function autoScan(id) {
     .catch((e) => (scanErrors[id] = "Couldn't check other companies' reports: " + message(e)))
     .finally(() => {
       scanRuns.delete(id);
-      refresh();
+      scanPaint(id);
     });
 }
 // Other companies' annual reports from the last 18 months that name this
 // company as a supplier or customer. Suppliers rarely name customers in the
 // customer's own 10-K, but customers over 10% of revenue must be disclosed.
-async function scanMentions(id) {
+// `background` scans (the watchlist sweep) keep going while another company
+// is on screen; a scan started from the graph pauses when you move away.
+async function scanMentions(id, background = false) {
   const n = graph().nodes.find((x) => x.id === id);
   const cik = n.cik ? padCIK(n.cik) : await resolveCIK(n.ticker);
   n.cik ||= cik;
@@ -2205,12 +2440,12 @@ async function scanMentions(id) {
   const dir = await secDirectory();
   const today = new Date().toISOString().slice(0, 10);
   scanProgress[id] = { done: 0, total: todo.length };
-  refresh();
+  scanPaint(id);
   let found = 0,
     added = 0;
   try {
     for (const f of todo) {
-      if (graphCenter !== id || !live()) return; // paused; resumes when reopened
+      if ((!background && graphCenter !== id) || !live()) return; // paused; resumes when reopened
       try {
         const c = padCIK(f.cik),
           listed = dir.byCik.get(c);
@@ -2229,7 +2464,7 @@ async function scanMentions(id) {
         // One unreadable filing shouldn't stop the rest.
       }
       scanProgress[id].done++;
-      refresh();
+      scanPaint(id);
     }
     const scans = (state.filingScans ||= {});
     scans[id] = { ...scans[id], mentions: { at: today, checked: todo.length, found, added } };
@@ -2238,6 +2473,53 @@ async function scanMentions(id) {
     delete scanProgress[id];
   }
 }
+// Background: the watchlist's suppliers and customers are read ahead of time
+// (filings and other companies' reports naming them), one company at a
+// time, so the graph is ready when a stock is opened. Results last 7 days.
+let relationsSweeping = null,
+  relationsSweptAt = 0;
+const scanFresh = (x) => x?.at && Date.now() - Date.parse(x.at) < 7 * 864e5;
+function relationsSweep() {
+  if (!live() || !hasKey("sec") || relationsSweeping) return relationsSweeping;
+  relationsSweptAt = Date.now();
+  const map = activeMap();
+  const todo = state.watchlist
+    .filter((s) => isUSKey(s) && map[s])
+    .map((s) => {
+      const n = ensureCompany(graph(), s, map[s].name);
+      if (!n.cik && cikFor(s)) n.cik = cikFor(s);
+      return n.id;
+    })
+    .filter((id) => {
+      const done = state.filingScans?.[id];
+      return !scanRuns.has(id) && !scanErrors[id] && !(scanFresh(done) && scanFresh(done.mentions));
+    });
+  if (!todo.length) return null;
+  relationsSweeping = (async () => {
+    for (const id of todo) {
+      if (!live()) break;
+      if (scanRuns.has(id)) continue;
+      scanRuns.add(id);
+      try {
+        if (!scanFresh(state.filingScans?.[id])) await scanFilings(id).catch(() => {});
+        await scanMentions(id, true);
+      } catch (e) {
+        scanErrors[id] = "Couldn't check other companies' reports: " + message(e);
+      } finally {
+        scanRuns.delete(id);
+        scanPaint(id);
+      }
+    }
+    await persist();
+  })().finally(() => (relationsSweeping = null));
+  return relationsSweeping;
+}
+// Shortly after launch, then every 6 hours: anything older than 7 days is
+// read again; a newly watched stock is picked up on the next check.
+setInterval(() => {
+  if (Date.now() - relationsSweptAt >= 6 * 3600 * 1000 || (relationsSweptAt && state.watchlist.some((s) => !state.filingScans?.[graph().nodes.find((n) => n.ticker === s)?.id]))) relationsSweep();
+}, 60 * 1000);
+setTimeout(() => relationsSweep(), 20 * 1000);
 // Company search: entities already in the graph first, then every company
 // in SEC's list (live mode).
 function bindCompanySearch(recenter) {
@@ -2650,7 +2932,7 @@ function setup() {
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${quantPanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${quantPanel()}${analystPanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in aperture.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -3010,6 +3292,7 @@ function autoLoad() {
     else runQuant();
   }
   if (native && page === "Settings" && !quantEnv) checkQuant();
+  if (native && !analyst && ((page === "Stock" && ["GRID", "ASK"].includes(v)) || page === "Settings")) loadAnalystStatus();
   if (!live()) return;
   const once = (key, job) => {
     if (attempted.has(key)) return;
@@ -3249,22 +3532,6 @@ function bind() {
         render();
       }),
   );
-  document.querySelectorAll("[data-action]").forEach(
-    (el) =>
-      (el.onclick = async () => {
-        if (busy) return;
-        busy = true;
-        el.disabled = true;
-        try {
-          await action(el.dataset.action, el.dataset.value);
-        } catch (e) {
-          notify(String(e.message || e), true);
-        } finally {
-          busy = false;
-          el.disabled = false;
-        }
-      }),
-  );
   $("#mode").onchange = async (e) => {
     state.mode = e.target.value;
     compare = "";
@@ -3293,6 +3560,13 @@ function bind() {
     $("#compare").onchange = (e) => {
       compare = e.target.value;
       drawCharts();
+    };
+  if ($("#an-input"))
+    $("#an-input").onkeydown = (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        $('[data-action="an-ask"]')?.click();
+      }
     };
   if ($("#chart-freq"))
     $("#chart-freq").onchange = async (e) => {
@@ -3489,6 +3763,40 @@ async function action(act, value) {
     case "chart-type":
       chartPrefs().candles = !chartPrefs().candles;
       await persist();
+      render();
+      break;
+    case "an-install":
+      await analystInstall();
+      loadAnalystStatus();
+      break;
+    case "an-remove":
+      if (!confirm("Remove Aperture Analyst and free about 5 GB? You can download it again later.")) break;
+      await analystRemove();
+      analyst = null;
+      loadAnalystStatus();
+      break;
+    case "an-ask": {
+      const input = $("#an-input");
+      const q = input?.value || "";
+      if (input) input.value = "";
+      askAnalyst(q);
+      break;
+    }
+    case "an-quick": {
+      const item = QUICK_QUESTIONS[+value];
+      if (!item) break;
+      if (stockView !== "ASK") openStock(symbol, "ASK");
+      askAnalyst(item[1](symbol), item[0]);
+      break;
+    }
+    case "an-stop": {
+      const t = analystConv().turns.at(-1);
+      if (t) t.cancelled = true;
+      await analystCancel();
+      break;
+    }
+    case "an-clear":
+      analystConv().turns = [];
       render();
       break;
     case "flow-window": {
@@ -3941,6 +4249,24 @@ state.alerts = state.alerts.map(
       a.mode === "sample" ? state.assets : state.marketAssets || {},
     )[0],
 );
+// Every [data-action] button, including ones painted after a render (the
+// tape, the analyst, citations), is handled here.
+document.addEventListener("click", async (e) => {
+  const el = e.target.closest?.("[data-action]");
+  if (!el || el.disabled || !el.closest("#app")) return;
+  if (el.tagName === "A") e.preventDefault();
+  if (busy) return;
+  busy = true;
+  el.disabled = true;
+  try {
+    await action(el.dataset.action, el.dataset.value);
+  } catch (err) {
+    notify(String(err.message || err), true);
+  } finally {
+    busy = false;
+    el.disabled = false;
+  }
+});
 // Esc on a stock view goes back to the stock's panel grid.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || page !== "Stock" || !stockView) return;
