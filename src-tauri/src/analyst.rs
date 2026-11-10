@@ -294,8 +294,13 @@ pub fn private_ip(ip: &IpAddr) -> bool {
                 || v.to_ipv4_mapped().is_some_and(|m| private_ip(&IpAddr::V4(m)))
                 // IPv4-compatible ::a.b.c.d (deprecated)
                 || (s[..6].iter().all(|&x| x == 0) && embedded(s[6], s[7]))
-                // NAT64 64:ff9b::/96 and 64:ff9b:1::/48 carry an IPv4 address
-                || (s[0] == 0x64 && s[1] == 0xff9b && embedded(s[6], s[7]))
+                // IPv4-translated ::ffff:0:a.b.c.d
+                || (s[..4].iter().all(|&x| x == 0) && s[4] == 0xffff && s[5] == 0 && embedded(s[6], s[7]))
+                // Well-known NAT64 64:ff9b::/96 carries the IPv4 address in its last 32 bits
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) && embedded(s[6], s[7]))
+                // Local-use NAT64 64:ff9b:1::/48 places it differently (RFC 6052)
+                // and only reaches local translators: refuse the whole range
+                || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
                 // 6to4 2002:a.b.c.d::/48
                 || (s[0] == 0x2002 && embedded(s[1], s[2]))
                 // Teredo 2001:0::/32 hides the client address; never needed here
@@ -447,7 +452,7 @@ mod tests {
         }
         assert!(private_ip(&"100.64.0.1".parse().unwrap()) && !private_ip(&"8.8.8.8".parse().unwrap()));
         assert!(private_ip(&"::ffff:192.168.0.1".parse().unwrap()) && private_ip(&"fd00::1".parse().unwrap()));
-        for ip in ["64:ff9b::7f00:1", "64:ff9b::a00:5", "2002:c0a8:101::1", "::127.0.0.1", "2001:0:4136:e378::1", "198.18.0.1", "192.0.0.8", "fec0::1"] {
+        for ip in ["64:ff9b::7f00:1", "64:ff9b::a00:5", "64:ff9b:1:0808:08:0800::", "64:ff9b:1::808:808", "::ffff:0:7f00:1", "2002:c0a8:101::1", "::127.0.0.1", "2001:0:4136:e378::1", "198.18.0.1", "192.0.0.8", "fec0::1"] {
             assert!(private_ip(&ip.parse().unwrap()), "{ip}");
         }
         for ip in ["2606:4700::1111", "2002:808:808::1", "64:ff9b::808:808", "1.1.1.1"] {
