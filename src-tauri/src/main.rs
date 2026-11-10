@@ -90,7 +90,7 @@ fn analyst_install(b: tauri::State<Backend>) -> Result<(), String> {
         p.running = true;
         p.stage = "Starting the download…".into();
     }
-    tauri::async_runtime::spawn(analyst_host::install(b.analyst.clone(), b.bulk.clone(), b.data_dir.clone()));
+    tauri::async_runtime::spawn(analyst_host::install(b.analyst.clone(), b.data_dir.clone()));
     Ok(())
 }
 #[tauri::command]
