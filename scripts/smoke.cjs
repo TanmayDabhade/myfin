@@ -93,6 +93,39 @@ function fakeBackend() {
         .filter((p) => p.time > (since || 0) && !window.__noLivePrints);
       return { symbol, streaming: (window.__quoteSymbols || []).includes(symbol), prints };
     },
+    // Aperture Analyst: a scripted stand-in for the local model. First turn
+    // asks for a news search; after the tool result it answers with citations.
+    analyst_status: () => ({
+      supported: true,
+      installed: !!window.__anInstalled,
+      model: { name: "Gemma 4 E4B", file: "gemma.gguf", bytes: 4977171584, license: "Apache 2.0" },
+      runtime: { name: "llama.cpp b11927", license: "MIT" },
+      downloadBytes: window.__anInstalled ? 0 : 4993171584,
+      gpu: true,
+      running: false,
+      job: { running: false, stage: "", done: 0, total: 0, error: "" },
+    }),
+    analyst_install: () => {
+      window.__anInstalled = true;
+    },
+    analyst_remove: () => {
+      window.__anInstalled = false;
+    },
+    analyst_cancel: () => {},
+    analyst_news: () => [
+      { title: "Fixture Corp faces EU fine over app store", url: "https://news.example.org/eu", source: "Example News", published: "Tue, 10 Nov 2026 13:00:00 GMT", snippet: "Regulators fined the company." },
+      { title: "Fixture headline", url: "https://example.com/n", source: "Fixture", published: "", snippet: "" },
+    ],
+    analyst_read: ({ url }) => ({ url, title: "EU fine", text: "Regulators fined the company. ".repeat(20) }),
+    analyst_chat: ({ id, messages, tools }) => {
+      window.__anMessages = messages;
+      const say = (text) => (window.__anListeners || []).forEach((fn) => fn({ payload: { id, text } }));
+      if (tools.length && !messages.some((m) => m.role === "tool"))
+        return { content: "", tool_calls: [{ id: "c1", name: "search_news", arguments: JSON.stringify({ query: "Fixture EU fine" }) }], finish: "tool_calls" };
+      const text = "**Lower after an EU fine** [W1].\n- Selling outweighed buying [O]\n- Price and volume [P]";
+      say(text);
+      return { content: text, tool_calls: [], finish: "stop" };
+    },
     // S&P 500 market map: built on request, then served as a snapshot.
     market_status: () => ({ built: window.__marketBuilt || null, job: { running: false, stage: "", done: 0, total: 0, error: "", finished: 0 } }),
     market_refresh: () => {
@@ -247,6 +280,12 @@ function fakeBackend() {
     },
   };
   window.__TAURI__ = {
+    event: {
+      listen: async (name, fn) => {
+        if (name === "analyst-delta") (window.__anListeners ||= []).push(fn);
+        return () => {};
+      },
+    },
     core: {
       invoke: async (cmd, args) => {
         if (!handlers[cmd]) throw "Unsupported in fake backend: " + cmd;
@@ -325,6 +364,23 @@ async function liveFlow(browser, errors) {
   if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Time and sales");
   await page.keyboard.press("Escape");
   await page.waitForSelector(".stock-grid");
+  // Aperture Analyst: one-time setup, then a cited answer that used a web
+  // search, with news Aperture already had filtered out of the results.
+  await page.click('.fn-strip [data-value="ASK"]');
+  await page.click('[data-action="an-install"]');
+  await page.click('[data-action="an-quick"][data-value="0"]');
+  await page.waitForSelector(".an-answer a.cite[href='https://news.example.org/eu']", { timeout: 10000 });
+  await page.waitForSelector(".an-steps li:has-text('1 new of 2 results')");
+  await page.waitForSelector(".an-answer button.cite[data-value='TAS']");
+  await page.waitForSelector(".an-sources >> text=Fixture Corp faces EU fine");
+  const sys = await page.evaluate(() => window.__anMessages[0].content);
+  for (const t of ["You are Aperture Analyst", "Never call yourself Gemma", "not personal financial advice", "[P] PRICE", "BRIEFING for AAPL"]) if (!sys.includes(t)) throw Error("Analyst instructions missing: " + t);
+  await page.fill("#an-input", "What are the risks?");
+  await page.press("#an-input", "Enter");
+  await page.waitForFunction(() => document.querySelectorAll(".an-turn .an-answer:not(.an-draft)").length === 2, null, { timeout: 10000 });
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Analyst");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".stock-grid");
   // Valuation inputs come from the company's filings.
   await page.waitForSelector("[data-tile='DCF'] >> text=Inputs from the company's SEC filings", { timeout: 10000 });
   await page.click('.fn-strip [data-value="DCF"]');
@@ -353,7 +409,7 @@ async function liveFlow(browser, errors) {
   await page.keyboard.press("Escape");
   await page.waitForSelector(".stock-grid");
   await page.click('.fn-strip [data-value="FA"]');
-  await page.waitForSelector("td:has-text('totalRevenue')");
+  await page.waitForSelector("td[title='totalRevenue']:has-text('Total revenue')");
   if (!(await page.locator("body").innerText()).includes("10.00%")) throw Error("SEC revenue growth missing");
   await page.click('.fn-strip [data-value="CF"]');
   await page.waitForSelector("h2:has-text('CIK 0000320193')");

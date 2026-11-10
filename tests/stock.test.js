@@ -190,3 +190,16 @@ test("minute bars summarise the latest session", () => {
   assert.equal(m.high, 12);
   assert.equal(minuteSession({}).rows.length, 0);
 });
+
+test("statement rows read like a printed statement", async () => {
+  const { metricLabel, statementRows } = await import("../src/stock.js");
+  assert.equal(metricLabel("costofGoodsAndServicesSold"), "Cost of goods and services sold");
+  assert.equal(metricLabel("ebitda"), "EBITDA");
+  assert.equal(metricLabel("incomeBeforeTax"), "Income before tax");
+  assert.equal(metricLabel("depreciationAndAmortization"), "Depreciation and amortization");
+  assert.equal(metricLabel("netIncomeFromContinuingOperations"), "Net income from continuing operations");
+  assert.equal(metricLabel("operatingCashflow"), "Operating cash flow");
+  assert.equal(metricLabel("changeInExchangeRate"), "Change in exchange rate");
+  assert.equal(metricLabel("totalNonCurrentAssets"), "Total non current assets");
+  assert.deepEqual(statementRows(["fiscalDateEnding", "ebit", "zeta", "netIncome", "grossProfit", "alpha", "totalRevenue"], "INCOME_STATEMENT"), ["totalRevenue", "grossProfit", "ebit", "netIncome", "alpha", "zeta"]);
+});

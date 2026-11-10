@@ -7,6 +7,7 @@
 export const VIEWS = [
   { code: "DES", label: "Description" },
   { code: "GP", label: "Chart" },
+  { code: "ASK", label: "Analyst" },
   { code: "FA", label: "Financials" },
   { code: "CN", label: "News" },
   { code: "HDS", label: "Holders" },
@@ -338,3 +339,72 @@ export function minuteSession(data) {
   return { date, rows: day, volume, vwap: volume > 0 ? pv / volume : null, high: Math.max(...day.map((r) => r.high)), low: Math.min(...day.map((r) => r.low)), open: day[0].open, close: day.at(-1).close };
 }
 
+
+// ---- Financial statement labels ---------------------------------------------
+// Alpha Vantage names rows in camelCase ("costofGoodsAndServicesSold"). These
+// read the way statements are usually printed.
+const METRIC_LABELS = {
+  ebit: "EBIT",
+  ebitda: "EBITDA",
+  costofGoodsAndServicesSold: "Cost of goods and services sold",
+  comprehensiveIncomeNetOfTax: "Comprehensive income, net of tax",
+  sellingGeneralAndAdministrative: "Selling, general and administrative",
+  propertyPlantEquipment: "Property, plant and equipment",
+  propertyPlantEquipmentNet: "Property, plant and equipment, net",
+  longTermDebtNoncurrent: "Long-term debt, non-current",
+  longTermDebt: "Long-term debt",
+  shortLongTermDebtTotal: "Short- and long-term debt, total",
+  currentLongTermDebt: "Current portion of long-term debt",
+  shortTermDebt: "Short-term debt",
+  operatingCashflow: "Operating cash flow",
+  cashflowFromInvestment: "Cash flow from investing",
+  cashflowFromFinancing: "Cash flow from financing",
+  capitalExpenditures: "Capital expenditures",
+  proceedsFromRepurchaseOfEquity: "Proceeds from (repurchase of) equity",
+  paymentsForRepurchaseOfCommonStock: "Payments to repurchase common stock",
+  paymentsForRepurchaseOfEquity: "Payments to repurchase equity",
+  paymentsForRepurchaseOfPreferredStock: "Payments to repurchase preferred stock",
+  dividendPayoutCommonStock: "Dividends paid, common stock",
+  dividendPayoutPreferredStock: "Dividends paid, preferred stock",
+  changeInCashAndCashEquivalents: "Change in cash and cash equivalents",
+  cashAndCashEquivalentsAtCarryingValue: "Cash and cash equivalents",
+  cashAndShortTermInvestments: "Cash and short-term investments",
+  commonStockSharesOutstanding: "Common shares outstanding",
+  totalShareholderEquity: "Total shareholders' equity",
+  netIncomeFromContinuingOperations: "Net income from continuing operations",
+  interestAndDebtExpense: "Interest and debt expense",
+  incomeTaxExpense: "Income tax expense",
+  researchAndDevelopment: "Research and development",
+};
+// Words that keep their capitals when a camelCase name is split.
+const ACRONYMS = { ebit: "EBIT", ebitda: "EBITDA", eps: "EPS", ppe: "PP&E" };
+export function metricLabel(key) {
+  if (METRIC_LABELS[key]) return METRIC_LABELS[key];
+  const words = String(key || "")
+    .replace(/cashflow/gi, "CashFlow")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => ACRONYMS[w] || w);
+  if (!words.length) return "";
+  const first = words[0] === words[0].toUpperCase() ? words[0] : words[0][0].toUpperCase() + words[0].slice(1);
+  return [first, ...words.slice(1)].join(" ");
+}
+export const STATEMENTS = [
+  ["INCOME_STATEMENT", "Income statement"],
+  ["BALANCE_SHEET", "Balance sheet"],
+  ["CASH_FLOW", "Cash flow"],
+];
+// Headline rows first, in statement order; everything else after, A–Z.
+const FIRST = {
+  INCOME_STATEMENT: ["totalRevenue", "costOfRevenue", "grossProfit", "researchAndDevelopment", "sellingGeneralAndAdministrative", "operatingExpenses", "operatingIncome", "ebitda", "ebit", "interestExpense", "incomeBeforeTax", "incomeTaxExpense", "netIncome"],
+  BALANCE_SHEET: ["totalAssets", "totalCurrentAssets", "cashAndCashEquivalentsAtCarryingValue", "totalLiabilities", "totalCurrentLiabilities", "longTermDebt", "totalShareholderEquity", "commonStockSharesOutstanding"],
+  CASH_FLOW: ["operatingCashflow", "capitalExpenditures", "cashflowFromInvestment", "cashflowFromFinancing", "dividendPayout", "paymentsForRepurchaseOfCommonStock", "netIncome", "changeInCashAndCashEquivalents"],
+};
+export function statementRows(keys, statement) {
+  const first = FIRST[statement] || [];
+  const rest = keys.filter((k) => !first.includes(k) && !["fiscalDateEnding", "reportedCurrency"].includes(k));
+  return [...first.filter((k) => keys.includes(k)), ...rest.sort((a, b) => metricLabel(a).localeCompare(metricLabel(b)))];
+}

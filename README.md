@@ -78,6 +78,7 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 |---|---|---|
 | Description | `DES` | Profile, key statistics, risk metrics, research journal, earnings (reported and upcoming, EPS and revenue vs estimates) |
 | Chart | `GP` | TradingView-style candles or line at 1m, 5m, 15m, 1H, 4H, daily and weekly; the newest candle moves with live trades, redrawn in real time or every 1s/5s/15s/1m (or paused); volume, MA20/MA50, comparison overlay (daily and weekly), PNG export |
+| Analyst | `ASK` | Aperture Analyst: ask about the stock ("Why is it moving?", latest filing, risks, bull vs bear). Answers cite Aperture's own panels and web news; see [Aperture Analyst](#aperture-analyst) |
 | Financials | `FA` | Annual/quarterly statements (Alpha Vantage) and SEC revenue history |
 | News | `CN` | Company news from the last 7 days with summaries (Finnhub) |
 | Holders | `HDS` | Everything under [Holders (HDS)](#holders-hds) |
@@ -237,10 +238,22 @@ This is a substantial first implementation of the requested release and analysis
 - No paid-feed workaround is represented as legally safe. An API denial is displayed, not bypassed.
 - Saved keys, database and backups are local plaintext protected by your OS account; no encryption-at-rest claim is made.
 
+## Aperture Analyst
+
+An AI research assistant that runs on your computer. It isn't a cloud service: it's Google's open Gemma 4 E4B model (Apache 2.0) running through [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT).
+
+- **Setup:** one download of about 5 GB from the Analyst view or Settings: the model from Hugging Face and the llama.cpp server from GitHub, both pinned to exact versions and checked against SHA-256 checksums. It lives in the app-data folder, so app updates don't download it again. Settings → Aperture Analyst removes it.
+- **What it knows:** each question comes with a briefing built from Aperture's data for the open stock: price and volume, order flow, Finnhub news, SEC filings, 13F/13D/G/insider changes, key statistics, GS Quant risk and earnings. Each item has a source id that the answer cites, and citations link to the source or the Aperture panel.
+- **Internet:** it can search recent news (Bing News RSS) and read public web pages from its sources or search results. News already in Aperture is filtered out of searches, so it surfaces what Aperture missed. Pages on this computer or the local network can't be read, and page text is treated as untrusted data.
+- **Rules:** it calls itself Aperture Analyst, answers only from the briefing and tool results, cites every fact, says when nothing explains a move, and gives research, not personal advice (no buy/sell/hold calls or price targets). See `src/analyst.js`.
+- **Privacy:** questions and Aperture's data stay on the computer; only its web searches and the pages it reads go online.
+- **Resources:** about 6 GB of memory while answering. It uses the GPU on Apple Silicon Macs and the processor elsewhere (slower). The engine stops after 15 minutes without a question, and when Aperture quits.
+
 ## Project map
 
 - `src/main.js`: UI/workflows
 - `src/pricechart.js`, `src/candles.js`: price charts (Lightweight Charts), timeframes and live candles
+- `src/analyst.js`, `src-tauri/src/analyst.rs`, `src-tauri/src/analyst_host.rs`: Aperture Analyst (instructions, briefing, tools; model download, local server, news search and page reading)
 - `src/orderflow.js`: volume at price, grouped trades and delta from trade prints
 - `src/engine.js`: pure analytics, validation, imports and preview accounting
 - `src/sample.js`: deterministic synthetic demonstration data

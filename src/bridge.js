@@ -73,3 +73,13 @@ export const quantForget = () => call("quant_forget");
 export const quantAnalyze = (input) => call("quant_analyze", { input });
 export const quantAnalyzeBatch = (inputs) => call("quant_analyze_batch", { inputs });
 export const quantCached = (symbols) => call("quant_cached", { symbols });
+// Aperture Analyst: Gemma 4 running on this computer (desktop only).
+export const analystStatus = () => call("analyst_status");
+export const analystInstall = () => call("analyst_install");
+export const analystRemove = () => call("analyst_remove");
+export const analystChat = (id, messages, tools) => call("analyst_chat", { id, messages, tools });
+export const analystCancel = () => (native ? invoke("analyst_cancel") : Promise.resolve());
+export const analystNews = (query) => call("analyst_news", { query });
+export const analystRead = (url) => call("analyst_read", { url });
+// Streamed reply text: fn({ id, text?, stage? }).
+export const onAnalystDelta = (fn) => window.__TAURI__?.event?.listen?.("analyst-delta", (e) => fn(e.payload));

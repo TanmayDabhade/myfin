@@ -8,3 +8,4 @@ pub mod universe;
 pub mod market;
 pub mod legacy;
 pub mod quant;
+pub mod analyst;
