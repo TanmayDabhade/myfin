@@ -25,7 +25,9 @@ const base = (intraday) => ({
   },
   rightPriceScale: { borderColor: "#2b2b2b", scaleMargins: { top: 0.08, bottom: 0.24 } },
   timeScale: { borderColor: "#2b2b2b", timeVisible: intraday, secondsVisible: false, rightOffset: 8, barSpacing: 7, minBarSpacing: 0.5 },
-  localization: { priceFormatter: (p) => p.toFixed(2) },
+  // A fixed locale: the browser's language can be a POSIX name such as
+  // "C.UTF-8" (Linux), which Intl rejects.
+  localization: { locale: "en-US", priceFormatter: (p) => p.toFixed(2) },
 });
 const quiet = { lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false };
 
@@ -125,7 +127,7 @@ export function deltaChart(host) {
     ...base(true),
     rightPriceScale: { borderColor: "#2b2b2b", scaleMargins: { top: 0.1, bottom: 0.1 } },
     timeScale: { borderColor: "#2b2b2b", timeVisible: true, secondsVisible: true, rightOffset: 4 },
-    localization: { priceFormatter: (v) => (v < 0 ? "−" : v > 0 ? "+" : "") + compactVol(Math.abs(v)) },
+    localization: { locale: "en-US", priceFormatter: (v) => (v < 0 ? "−" : v > 0 ? "+" : "") + compactVol(Math.abs(v)) },
   });
   const line = chart.addSeries(BaselineSeries, {
     baseValue: { type: "price", price: 0 },

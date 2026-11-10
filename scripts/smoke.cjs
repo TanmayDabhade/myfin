@@ -265,6 +265,8 @@ async function liveFlow(browser, errors) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.addInitScript(quantStandin);
   await context.addInitScript(fakeBackend);
+  // Linux CI reports a POSIX language name, which Intl rejects as a locale.
+  await context.addInitScript(() => Object.defineProperty(navigator, "language", { get: () => "C.UTF-8" }));
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("http://127.0.0.1:1420");
