@@ -35,9 +35,12 @@ jobs:
             os: macos-latest
             args: --target universal-apple-darwin --bundles dmg
     steps:
+      # Build the PR merged into the current main (github.sha is that merge
+      # commit), so a preview never drops work that was already merged from
+      # other PRs. The publisher still checks the PR's own head commit.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:

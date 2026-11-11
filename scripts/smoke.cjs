@@ -96,13 +96,15 @@ function fakeBackend() {
     // Aperture Analyst: a scripted stand-in for the local model. First turn
     // asks for a news search; after the tool result it answers with citations.
     analyst_status: () => {
-      const c = (window.__anCfg ||= { choice: "gemma", provider: "", model: "", keys: {} });
-      const ready = c.choice === "gemma" ? !!window.__anInstalled : c.choice === "online" ? !!c.keys[c.provider] && !!c.model : false;
+      const c = (window.__anCfg ||= { choice: "", provider: "", model: "", keys: {} });
+      const choice = c.choice || "gemma";
+      const ready = choice === "gemma" ? !!window.__anInstalled : c.choice === "online" ? !!c.keys[c.provider] && !!c.model : false;
       const names = { openrouter: "OpenRouter", openai: "OpenAI", anthropic: "Anthropic (Claude)", gemini: "Google Gemini" };
       return {
         supported: true,
-        choice: c.choice,
-        local: c.choice !== "online",
+        choice,
+        chosen: !!c.choice,
+        local: choice !== "online",
         ready,
         installed: ready,
         model: { name: "Gemma 4 E4B", file: "gemma.gguf", bytes: 4977171584, license: "Apache 2.0", installed: !!window.__anInstalled },
@@ -396,6 +398,11 @@ async function liveFlow(browser, errors) {
   // Aperture Analyst: one-time setup, then a cited answer that used a web
   // search, with news Aperture already had filtered out of the results.
   await page.click('.fn-strip [data-value="ASK"]');
+  // First visit offers the two ways to run it before any download.
+  await page.waitForSelector('.an-path[data-value="online"]');
+  if (await page.locator('[data-action="an-install"]').count()) throw Error("Analyst setup jumped to the Gemma download");
+  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-first.png", fullPage: true });
+  await page.click('.an-path[data-value="local"]');
   await page.click('[data-action="an-install"]');
   await page.click('[data-action="an-quick"][data-value="0"]');
   await page.waitForSelector(".an-answer a.cite[href='https://news.example.org/eu']", { timeout: 10000 });

@@ -153,6 +153,8 @@ pub fn status(host: &Host, data: &Path, running: bool) -> Value {
     json!({
         "supported": rt.is_some(),
         "choice": cfg.choice(),
+        // false until the user has picked a way to run it.
+        "chosen": !cfg.choice.is_empty(),
         "local": cfg.local(),
         "ready": ready,
         "installed": ready,

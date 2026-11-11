@@ -1807,6 +1807,9 @@ function analystOnlinePane() {
   return `${tabs}<div class="an-opt on"><div class="an-opt-body">${connect}${model}</div></div><small class="an-privacy">With an online account, the briefing (Aperture's data for the open stock) and your questions are sent to ${esc(p.name)} and billed to that account. The analyst's rules stay the same: every claim cites its source, and it gives research, not buy or sell advice. ChatGPT Plus and Claude Pro/Max plans can't be used by other apps yet; these accounts are billed separately.</small>`;
 }
 function analystChooser() {
+  // First visit: the two ways to run it, side by side, before any details.
+  if (!analyst.ready && !analyst.chosen && !an.mode)
+    return `<div class="an-paths"><button class="an-path" data-action="an-mode" data-value="online"><b>Use your AI account</b><span>Claude, GPT, Gemini and hundreds more: sign in with OpenRouter in your browser, or connect your OpenAI, Anthropic or Google account. Nothing to download.</span><small>The stock's data and your questions are sent to that service.</small></button><button class="an-path" data-action="an-mode" data-value="local"><b>Run on this computer</b><span>Free and private: download Gemma 4 (${gb(analyst.model?.bytes || 0)}), use a model file you already have, or connect Ollama or LM Studio.</span><small>Needs about 6 GB of free memory while answering.</small></button></div>`;
   const mode = an.mode || (analyst.local === false ? "online" : "local");
   const tabs = `<div class="segmented an-modes">${button("On this computer", "an-mode", mode === "local" ? "active" : "", 'data-value="local"')}${button("Online account", "an-mode", mode === "online" ? "active" : "", 'data-value="online"')}</div>`;
   return `<div class="an-choose">${tabs}${an.error ? `<p class="an-error">${esc(an.error)}</p>` : ""}${mode === "local" ? analystLocal() : analystOnlinePane()}</div>`;
