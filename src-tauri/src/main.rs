@@ -117,7 +117,16 @@ async fn analyst_now(b: &Backend) -> Value {
 async fn analyst_configure(b: tauri::State<'_, Backend>, choice: Option<String>, server_url: Option<String>, server_model: Option<String>, provider: Option<String>, model: Option<String>) -> Result<Value, String> {
     let mut c = analyst_host::load_config(&b.data_dir);
     if let Some(u) = server_url {
-        c.server_url = if u.trim().is_empty() { String::new() } else { analyst::server_url(&u)?.to_string() };
+        let next = if u.trim().is_empty() { String::new() } else { analyst::server_url(&u)?.to_string() };
+        // A saved server key belongs to the address it was entered for: a new
+        // address never receives it.
+        if next != c.server_url {
+            let mut keys = analyst_host::load_keys(&b.data_dir);
+            if keys.remove("server").is_some() {
+                analyst_host::save_keys(&b.data_dir, &keys)?;
+            }
+        }
+        c.server_url = next;
     }
     if let Some(m) = server_model {
         c.server_model = m.trim().chars().take(200).collect();

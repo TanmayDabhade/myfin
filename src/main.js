@@ -1776,7 +1776,7 @@ function analystLocal() {
     "server",
     "A model server you already run",
     "Ollama, LM Studio, llama.cpp or any server with an OpenAI-compatible API. Plain http is allowed only for addresses on this computer.",
-    `<div class="an-form"><input id="an-server-url" placeholder="http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)" value="${esc(sv.url || "")}" spellcheck="false"><input id="an-server-model" list="an-list-server" placeholder="Model, e.g. qwen3:14b" value="${esc(sv.model || "")}" spellcheck="false">${modelList("server")}<input id="an-server-key" type="password" autocomplete="off" placeholder="${sv.hasKey ? "Key saved · leave empty to keep it" : "Key (only if the server needs one)"}">${button(ch === "server" ? "Save" : "Use this server", "an-server-save", "primary")}</div>${sv.url ? modelNote("server") : ""}`,
+    `<div class="an-form"><input id="an-server-url" placeholder="http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)" value="${esc(sv.url || "")}" spellcheck="false"><input id="an-server-model" list="an-list-server" placeholder="Model, e.g. qwen3:14b" value="${esc(sv.model || "")}" spellcheck="false">${modelList("server")}<input id="an-server-key" type="password" autocomplete="off" placeholder="${sv.hasKey ? "Key saved · leave empty to keep it (a new address clears it)" : "Key (only if the server needs one)"}">${button(ch === "server" ? "Save" : "Use this server", "an-server-save", "primary")}</div>${sv.url ? modelNote("server") : ""}`,
   )}${engine}<small class="an-privacy">Questions and Aperture's data stay on this computer (or your own server); only the analyst's web searches and the pages it reads go online.</small>`;
 }
 function analystOnlinePane() {
@@ -2020,8 +2020,9 @@ async function analystSetupAction(action, value) {
       const serverUrl = field("an-server-url"),
         key = field("an-server-key");
       if (!serverUrl) throw new Error("Enter the server's address first.");
-      if (key) await analystSetKey("server", key);
+      // Changing the address deletes the old key, so save the address first.
       st = await analystConfigure({ choice: "server", serverUrl, serverModel: field("an-server-model") });
+      if (key) st = await analystSetKey("server", key);
       loadAnalystModels("server", true);
     } else if (action === "an-signin") {
       an.busy = "signin";
