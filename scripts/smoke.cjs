@@ -99,7 +99,8 @@ function fakeBackend() {
       const c = (window.__anCfg ||= { choice: "", provider: "", model: "", keys: {} });
       const choice = c.choice || "gemma";
       const ready = choice === "gemma" ? !!window.__anInstalled : c.choice === "online" ? !!c.keys[c.provider] && !!c.model : false;
-      const names = { openrouter: "OpenRouter", openai: "OpenAI", anthropic: "Anthropic (Claude)", gemini: "Google Gemini" };
+      const names = { openrouter: "OpenRouter", huggingface: "Hugging Face", openai: "OpenAI", anthropic: "Anthropic (Claude)", gemini: "Google Gemini" };
+      const suggested = { openrouter: "anthropic/claude-opus-5.5", huggingface: "deepseek-ai/DeepSeek-V4-Pro" };
       return {
         supported: true,
         choice,
@@ -111,7 +112,7 @@ function fakeBackend() {
         runtime: { name: "llama.cpp b11927", license: "MIT", installed: !!window.__anInstalled },
         gguf: null,
         server: { url: "", model: "", hasKey: false },
-        online: { provider: c.provider, name: names[c.provider] || "", model: c.model, providers: Object.entries(names).map(([id, name]) => ({ id, name, signIn: id === "openrouter", keyUrl: "https://example.com/keys", suggested: id === "openrouter" ? "anthropic/claude-opus-5.5" : "", connected: !!c.keys[id] })) },
+        online: { provider: c.provider, name: names[c.provider] || "", model: c.model, providers: Object.entries(names).map(([id, name]) => ({ id, name, signIn: id in suggested, keyUrl: "https://example.com/keys", suggested: suggested[id] || "", connected: !!c.keys[id] })) },
         downloadBytes: window.__anInstalled ? 0 : 4993171584,
         gpu: true,
         running: false,
@@ -128,9 +129,10 @@ function fakeBackend() {
       Object.assign(window.__anCfg, Object.fromEntries(Object.entries(args).filter(([, v]) => v != null)));
       return window.__TAURI__.core.invoke("analyst_status");
     },
-    analyst_sign_in: () => {
-      Object.assign(window.__anCfg, { choice: "online", provider: "openrouter", model: "anthropic/claude-opus-5.5" });
-      window.__anCfg.keys.openrouter = "sk-or-test";
+    analyst_sign_in: ({ provider = "openrouter" }) => {
+      window.__anSignIns = [...(window.__anSignIns || []), provider];
+      Object.assign(window.__anCfg, { choice: "online", provider, model: { openrouter: "anthropic/claude-opus-5.5", huggingface: "deepseek-ai/DeepSeek-V4-Pro" }[provider] });
+      window.__anCfg.keys[provider] = "token-" + provider;
       return window.__TAURI__.core.invoke("analyst_status");
     },
     analyst_set_key: ({ provider, key }) => {
@@ -141,7 +143,8 @@ function fakeBackend() {
       delete window.__anCfg.keys[provider];
       return window.__TAURI__.core.invoke("analyst_status");
     },
-    analyst_models: () => ["anthropic/claude-opus-5.5", "google/gemini-4-argon", "openai/gpt-5.6-sol"],
+    analyst_models: ({ target }) =>
+      target === "huggingface" ? ["deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Pro-0813", "moonshotai/Kimi-K3", "Qwen/Qwen3.8-27B", "zai-org/GLM-5.3", "openai/gpt-oss-120b", "meta-llama/Llama-4-Scout-17B-16E-Instruct"] : ["anthropic/claude-opus-5.5", "google/gemini-4-argon", "openai/gpt-5.6-sol"],
     analyst_cancel: () => {},
     analyst_news: () => [
       { title: "Fixture Corp faces EU fine over app store", url: "https://news.example.org/eu", source: "Example News", published: "Tue, 10 Nov 2026 13:00:00 GMT", snippet: "Regulators fined the company." },
@@ -419,11 +422,12 @@ async function liveFlow(browser, errors) {
   // is told where it runs.
   await page.click('[data-action="an-change"]');
   await page.click('[data-action="an-mode"][data-value="online"]');
-  await page.waitForSelector('[data-action="an-signin"]');
+  await page.waitForSelector('[data-action="an-signin"][data-value="openrouter"]');
+  await page.waitForSelector('[data-action="an-signin"][data-value="huggingface"]');
   if (await page.locator(".an-choose input[type=password]").count()) throw Error("Online setup asks for an API key");
   if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Analyst setup");
   if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-online.png", fullPage: true });
-  await page.click('[data-action="an-signin"]');
+  await page.click('[data-action="an-signin"][data-value="openrouter"]');
   await page.waitForSelector("#an-input", { timeout: 10000 });
   if (!(await page.locator(".analyst-panel h2").innerText()).includes("Claude Opus 5.5 via OpenRouter")) throw Error("Analyst doesn't show the account in use");
   await page.click('[data-action="an-clear"]');
@@ -433,9 +437,25 @@ async function liveFlow(browser, errors) {
   if (!onlineSys.includes("user's OpenRouter account") || onlineSys.includes("entirely on the user's computer")) throw Error("Analyst not told it runs online");
   await page.click('[data-action="an-change"]');
   await page.click('[data-action="an-mode"][data-value="online"]');
-  await page.waitForSelector("select#an-model optgroup[label=Recommended] option", { state: "attached" });
-  if ((await page.inputValue("select#an-model")) !== "anthropic/claude-opus-5.5") throw Error("Model picker lost the model in use");
+  await page.waitForSelector("select#an-model-openrouter optgroup[label=Recommended] option", { state: "attached" });
+  if ((await page.inputValue("select#an-model-openrouter")) !== "anthropic/claude-opus-5.5") throw Error("Model picker lost the model in use");
   if (await page.locator(".an-choose input[type=password]").count()) throw Error("Online setup asks for an API key");
+  // Hugging Face: its own login, open models recommended, and the analyst
+  // is told it runs there.
+  await page.click('[data-action="an-signin"][data-value="huggingface"]');
+  await page.waitForSelector("[data-account=huggingface] .an-tag", { timeout: 10000 });
+  if ((await page.evaluate(() => window.__anSignIns)).at(-1) !== "huggingface") throw Error("Hugging Face login went to the wrong account");
+  await page.waitForSelector("select#an-model-huggingface optgroup[label=Recommended] option", { state: "attached" });
+  if ((await page.inputValue("select#an-model-huggingface")) !== "deepseek-ai/DeepSeek-V4-Pro") throw Error("Hugging Face picker didn't start on its suggested model");
+  const hfFeatured = await page.locator("select#an-model-huggingface optgroup[label=Recommended] option").evaluateAll((os) => os.map((o) => o.value));
+  for (const id of ["moonshotai/Kimi-K3", "Qwen/Qwen3.8-27B", "zai-org/GLM-5.3", "openai/gpt-oss-120b"]) if (!hfFeatured.includes(id)) throw Error("Hugging Face recommendations missing " + id);
+  if (hfFeatured.includes("deepseek-ai/DeepSeek-V4-Pro-0813")) throw Error("Dated snapshot shown as recommended");
+  await page.selectOption("select#an-model-huggingface", "moonshotai/Kimi-K3");
+  await page.click('[data-action="an-model-save"][data-value="huggingface"]');
+  await page.waitForFunction(() => window.__anCfg.model === "moonshotai/Kimi-K3");
+  await page.waitForFunction(() => document.querySelector(".analyst-panel h2")?.innerText.includes("Kimi K3 via Hugging Face"));
+  if (await page.locator("[data-account=openrouter] .an-tag").count()) throw Error("OpenRouter still marked in use");
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Analyst accounts");
   if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-online-in.png", fullPage: true });
   await page.click('[data-action="an-mode"][data-value="local"]');
   if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-local.png", fullPage: true });

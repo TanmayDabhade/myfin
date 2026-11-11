@@ -176,12 +176,13 @@ async fn analyst_sign_out(b: tauri::State<'_, Backend>, provider: String) -> Res
     Ok(analyst_now(&b).await)
 }
 #[tauri::command]
-async fn analyst_sign_in(app: tauri::AppHandle, b: tauri::State<'_, Backend>) -> Result<Value, String> {
-    analyst_online::sign_in(&app, &b.analyst, &b.data_dir).await?;
+async fn analyst_sign_in(app: tauri::AppHandle, b: tauri::State<'_, Backend>, provider: Option<String>) -> Result<Value, String> {
+    let id = provider.unwrap_or_else(|| "openrouter".into());
+    analyst_online::sign_in(&app, &b.analyst, &b.data_dir, &id).await?;
     let mut c = analyst_host::load_config(&b.data_dir);
-    if c.provider != "openrouter" || c.model.is_empty() {
-        c.provider = "openrouter".into();
-        c.model = analyst::provider("openrouter").map(|p| p.suggested.to_string()).unwrap_or_default();
+    if c.provider != id || c.model.is_empty() {
+        c.model = analyst::provider(&id).map(|p| p.suggested.to_string()).unwrap_or_default();
+        c.provider = id;
     }
     c.choice = "online".into();
     analyst_host::save_config(&b.data_dir, &c)?;

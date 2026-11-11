@@ -1287,6 +1287,7 @@ a.cite:hover, button.cite:hover { background: #3a3a3a; color: #fff; }
 .an-radio { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid #5a5a5a; flex: 0 0 auto; }
 .an-opt.on .an-radio { border-color: #fff; background: radial-gradient(#fff 0 3px, transparent 3.5px); }
 .an-opt-body { padding: 4px 14px 12px 36px; }
+.an-opt[data-account] .an-opt-body { padding-left: 14px; }
 .an-opt > .an-opt-body:first-child { padding: 12px 14px; }
 .an-opt-head + .an-opt-body p { margin: 4px 0 8px; font-size: 12.5px; color: #a9a9a9; }
 .an-opt-body > p { font-size: 12.5px; color: #b5b5b5; }

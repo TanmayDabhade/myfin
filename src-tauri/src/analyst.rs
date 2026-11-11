@@ -387,8 +387,9 @@ pub struct Provider {
     /// Picked when the account offers it and the user hasn't chosen.
     pub suggested: &'static str,
 }
-pub const PROVIDERS: [Provider; 4] = [
+pub const PROVIDERS: [Provider; 5] = [
     Provider { id: "openrouter", name: "OpenRouter", base: "https://openrouter.ai/api/v1", style: Style::OpenAi, key_url: "https://openrouter.ai/settings/keys", sign_in: true, suggested: "anthropic/claude-opus-5.5" },
+    Provider { id: "huggingface", name: "Hugging Face", base: "https://router.huggingface.co/v1", style: Style::OpenAi, key_url: "https://huggingface.co/settings/tokens", sign_in: true, suggested: "deepseek-ai/DeepSeek-V4-Pro" },
     Provider { id: "openai", name: "OpenAI", base: "https://api.openai.com/v1", style: Style::OpenAi, key_url: "https://platform.openai.com/api-keys", sign_in: false, suggested: "" },
     Provider { id: "anthropic", name: "Anthropic (Claude)", base: "https://api.anthropic.com/v1", style: Style::Anthropic, key_url: "https://platform.claude.com/settings/keys", sign_in: false, suggested: "claude-opus-5-5" },
     Provider { id: "gemini", name: "Google Gemini", base: "https://generativelanguage.googleapis.com/v1beta/openai", style: Style::OpenAi, key_url: "https://aistudio.google.com/apikey", sign_in: false, suggested: "" },
@@ -428,6 +429,9 @@ pub fn model_ids(v: &Value) -> Vec<String> {
     let items = v["data"].as_array().or_else(|| v["models"].as_array()).cloned().unwrap_or_default();
     let mut ids: Vec<String> = items
         .iter()
+        // Hugging Face lists the providers serving each model: keep models
+        // at least one of them runs with tools, since the analyst needs them.
+        .filter(|m| m["providers"].as_array().is_none_or(|ps| ps.iter().any(|p| p["supports_tools"] == true)))
         .filter_map(|m| m["id"].as_str().or_else(|| m["name"].as_str()))
         .map(|s| s.trim_start_matches("models/").to_string())
         .filter(|id| {
@@ -931,7 +935,9 @@ mod tests {
         }
         let ids = model_ids(&json!({ "data": [{ "id": "b-chat" }, { "id": "text-embedding-3" }, { "id": "a-chat" }, { "id": "models/gemini-x" }, { "id": "a-chat:batch" }] }));
         assert_eq!(ids, vec!["a-chat", "b-chat", "gemini-x"]);
-        assert!(provider("openrouter").unwrap().sign_in && provider("nope").is_none());
+        let hf = model_ids(&json!({ "data": [{ "id": "q/tools", "providers": [{ "supports_tools": false }, { "supports_tools": true }] }, { "id": "q/plain", "providers": [{ "supports_tools": false }] }] }));
+        assert_eq!(hf, vec!["q/tools"]);
+        assert!(provider("openrouter").unwrap().sign_in && provider("huggingface").unwrap().sign_in && provider("nope").is_none());
     }
 
 }

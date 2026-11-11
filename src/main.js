@@ -1666,7 +1666,8 @@ async function pollTape() {
 // ---- Aperture Analyst ---------------------------------------------------------
 // The user chooses where it runs: on this computer (Gemma 4 E4B, their own
 // GGUF model or a model server they run) or through an online account
-// (OpenRouter sign-in, or an OpenAI, Anthropic or Gemini key). It gets a
+// (OpenRouter or Hugging Face sign-in, or an OpenAI, Anthropic or Gemini
+// key). It gets a
 // briefing built from Aperture's own data for the open stock and may search
 // the web for news and read pages; analyst.js holds its rules.
 let analyst = null, // analyst_status: { supported, choice, ready, job, model, gguf, server, online, … }
@@ -1779,47 +1780,67 @@ function analystLocal() {
     `<div class="an-form"><input id="an-server-url" placeholder="http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)" value="${esc(sv.url || "")}" spellcheck="false"><input id="an-server-model" list="an-list-server" placeholder="Model, e.g. qwen3:14b" value="${esc(sv.model || "")}" spellcheck="false">${modelList("server")}<input id="an-server-key" type="password" autocomplete="off" placeholder="${sv.hasKey ? "Key saved · leave empty to keep it (a new address clears it)" : "Key (only if the server needs one)"}">${button(ch === "server" ? "Save" : "Use this server", "an-server-save", "primary")}</div>${sv.url ? modelNote("server") : ""}`,
   )}${engine}<small class="an-privacy">Questions and Aperture's data stay on this computer (or your own server); only the analyst's web searches and the pages it reads go online.</small>`;
 }
-// The account's best-known models first (newest Claude, GPT and Gemini),
-// then everything else, with readable names.
+// The account's best-known models first (newest Claude, GPT and Gemini on
+// OpenRouter; newest DeepSeek, Kimi, Qwen, GLM and gpt-oss on Hugging
+// Face), then everything else, with readable names.
 function modelChoices(ids) {
   const clean = ids.filter((id) => !/[~:]/.test(id));
-  const newest = (re) => clean.filter((id) => re.test(id) && !/mini|nano|lite|audio|search|realtime|image|preview|instruct|-\d{4}/.test(id)).sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
-  const featured = [...newest(/^anthropic\/claude-(opus|fable)/).slice(0, 2), ...newest(/^anthropic\/claude-sonnet/).slice(0, 1), ...newest(/^openai\/gpt-/).slice(0, 2), ...newest(/^google\/gemini-/).slice(0, 2)];
+  const newest = (re) => clean.filter((id) => re.test(id) && !/mini|nano|lite|audio|search|realtime|image|preview|instruct|vision|exp\b|code|safeguard|fp8|bf16|-\d{4}/i.test(id)).sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
+  const featured = [
+    ...newest(/^anthropic\/claude-(opus|fable)/).slice(0, 2),
+    ...newest(/^anthropic\/claude-sonnet/).slice(0, 1),
+    ...newest(/^openai\/gpt-\d/).slice(0, 2),
+    ...newest(/^google\/gemini-/).slice(0, 2),
+    ...newest(/^deepseek-ai\/DeepSeek-V\d.*Pro/).slice(0, 1),
+    ...newest(/^moonshotai\/Kimi-K\d/).slice(0, 1),
+    ...newest(/^Qwen\/Qwen\d[\d.]*-\d+B$/).slice(0, 1),
+    ...newest(/^zai-org\/GLM-\d[\d.]*$/).slice(0, 1),
+    ...newest(/^openai\/gpt-oss-120b$/),
+  ];
   return { featured, rest: clean.filter((id) => !featured.includes(id)) };
 }
 function modelName(id) {
   const [vendor, name = id] = id.includes("/") ? id.split("/") : ["", id];
   const nice = name.replace(/-/g, " ").replace(/\bgpt\b/i, "GPT").replace(/\b[a-z]/g, (c) => c.toUpperCase());
-  const who = { anthropic: "Anthropic", openai: "OpenAI", google: "Google", "meta-llama": "Meta", mistralai: "Mistral", "x-ai": "xAI", deepseek: "DeepSeek", qwen: "Qwen" }[vendor] || vendor;
+  const who = { anthropic: "Anthropic", openai: "OpenAI", google: "Google", "meta-llama": "Meta", mistralai: "Mistral", "x-ai": "xAI", deepseek: "DeepSeek", "deepseek-ai": "DeepSeek", qwen: "Qwen", moonshotai: "Moonshot AI", "zai-org": "Z.ai" }[vendor.toLowerCase()] || vendor;
   return who ? `${nice} · ${who}` : nice;
 }
-function analystOnlinePane() {
-  const st = analyst,
-    o = st.online || { providers: [] };
-  const p = o.providers.find((x) => x.signIn);
-  if (!p) return "";
+// What each sign-in account offers, shown before logging in.
+const accountPitch = {
+  openrouter: (n) => `Claude, GPT, Gemini and hundreds of other models through one login. Your browser opens ${n}'s login page (Google, GitHub or email). ${n} bills your account for what you use.`,
+  huggingface: (n) => `Open models such as DeepSeek, Kimi, Qwen, GLM and gpt-oss, served by Hugging Face's Inference Providers. Your browser opens ${n}'s login page and asks you to allow inference on your behalf. Free accounts include a small monthly allowance; beyond it, ${n} bills your account.`,
+};
+function analystAccount(st, p) {
+  const o = st.online;
   const inUse = st.choice === "online" && o.provider === p.id;
   let body;
   if (!p.connected)
-    body = `<p>Log in once and the analyst can use Claude, GPT, Gemini and hundreds of other models through your account. Your browser opens ${esc(p.name)}'s login page (Google, GitHub or email); Aperture never sees your password, and you can disconnect it on ${esc(p.name)} at any time. ${esc(p.name)} bills your account for what you use.</p>${button(`Log in with ${esc(p.name)}`, "an-signin", "primary")}${an.busy === "signin" ? `<small class="muted"> Waiting for you to finish logging in in the browser… (click again to reopen the page)</small>` : ""}`;
+    body = `<p>${(accountPitch[p.id] || ((n) => `Log in with your ${n} account.`))(esc(p.name))} Aperture never sees your password, and you can disconnect it on ${esc(p.name)} at any time.</p>${button(`Log in with ${esc(p.name)}`, "an-signin", "primary", `data-value="${p.id}"`)}${an.busy === "signin:" + p.id ? `<small class="muted"> Waiting for you to finish logging in in the browser… (click again to reopen the page)</small>` : ""}`;
   else {
     loadAnalystModels(p.id);
     const m = an.models[p.id] || {};
     const current = inUse && o.model ? o.model : "";
     const { featured, rest } = modelChoices(m.ids || []);
-    const pick = current || featured[0] || p.suggested;
+    const pick = current || (m.ids?.includes(p.suggested) ? p.suggested : featured[0] || p.suggested);
     const opt = (id) => `<option value="${esc(id)}" ${id === pick ? "selected" : ""}>${esc(modelName(id))}</option>`;
+    const field = `an-model-${p.id}`;
     const picker = m.ids?.length
-      ? `<select id="an-model">${current && !m.ids.includes(current) ? opt(current) : ""}<optgroup label="Recommended">${featured.map(opt).join("")}</optgroup><optgroup label="All models">${rest.map(opt).join("")}</optgroup></select>`
-      : `<input id="an-model" value="${esc(pick)}" spellcheck="false">`;
-    body = `<p><b>Logged in to ${esc(p.name)}.</b> ${button("Log out", "an-signout", "", `data-value="${p.id}"`)}</p><div class="an-row"><label class="an-model">Model ${picker}</label>${button(inUse ? "Save model" : "Use this model", "an-model-save", "primary", `data-value="${p.id}"`)}</div>${m.loading || m.error ? modelNote(p.id) : ""}${inUse ? `<small class="an-tag">In use</small>` : ""}`;
+      ? `<select id="${field}">${current && !m.ids.includes(current) ? opt(current) : ""}${featured.length ? `<optgroup label="Recommended">${featured.map(opt).join("")}</optgroup>` : ""}<optgroup label="All models">${rest.map(opt).join("")}</optgroup></select>`
+      : `<input id="${field}" value="${esc(pick)}" spellcheck="false">`;
+    body = `<p><b>Logged in.</b> ${button("Log out", "an-signout", "", `data-value="${p.id}"`)}</p><div class="an-row"><label class="an-model">Model ${picker}</label>${button(inUse ? "Save model" : "Use this model", "an-model-save", "primary", `data-value="${p.id}"`)}</div>${m.loading || m.error ? modelNote(p.id) : ""}`;
   }
-  return `<div class="an-opt on"><div class="an-opt-body">${body}</div></div><small class="an-privacy">Anthropic, OpenAI and Google don't let other apps log in to Claude, ChatGPT or Gemini accounts yet, and Claude Pro/Max or ChatGPT Plus plans only work in their own apps. ${esc(p.name)} is one login for all of their models. The stock's data and your questions are sent to ${esc(p.name)} and the model's maker to answer; the analyst's rules stay the same (cited sources, research not advice).</small>`;
+  return `<div class="an-opt ${inUse ? "on" : ""}" data-account="${p.id}"><div class="an-opt-head"><b>${esc(p.name)}</b>${inUse ? `<small class="an-tag">In use</small>` : ""}</div><div class="an-opt-body">${body}</div></div>`;
+}
+function analystOnlinePane() {
+  const st = analyst,
+    accounts = (st.online?.providers || []).filter((x) => x.signIn);
+  if (!accounts.length) return "";
+  return `${accounts.map((p) => analystAccount(st, p)).join("")}<small class="an-privacy">Anthropic, OpenAI and Google don't let other apps log in to Claude, ChatGPT or Gemini accounts yet, and Claude Pro/Max or ChatGPT Plus plans only work in their own apps; OpenRouter is one login for all of their models. The stock's data and your questions are sent to the account you use and the company serving the model; the analyst's rules stay the same (cited sources, research not advice).</small>`;
 }
 function analystChooser() {
   // First visit: the two ways to run it, side by side, before any details.
   if (!analyst.ready && !analyst.chosen && !an.mode)
-    return `<div class="an-paths"><button class="an-path" data-action="an-mode" data-value="online"><b>Log in with an online account</b><span>Claude, GPT, Gemini and hundreds more through one OpenRouter login in your browser. No keys to copy, nothing to download.</span><small>The stock's data and your questions are sent to that service.</small></button><button class="an-path" data-action="an-mode" data-value="local"><b>Run on this computer</b><span>Free and private: download Gemma 4 (${gb(analyst.model?.bytes || 0)}), use a model file you already have, or connect Ollama or LM Studio.</span><small>Needs about 6 GB of free memory while answering.</small></button></div>`;
+    return `<div class="an-paths"><button class="an-path" data-action="an-mode" data-value="online"><b>Log in with an online account</b><span>Log in with OpenRouter (Claude, GPT, Gemini and hundreds more) or Hugging Face (open models like DeepSeek, Qwen and Kimi) in your browser. No keys to copy, nothing to download.</span><small>The stock's data and your questions are sent to that service.</small></button><button class="an-path" data-action="an-mode" data-value="local"><b>Run on this computer</b><span>Free and private: download Gemma 4 (${gb(analyst.model?.bytes || 0)}), use a model file you already have, or connect Ollama or LM Studio.</span><small>Needs about 6 GB of free memory while answering.</small></button></div>`;
   const mode = an.mode || (analyst.local === false ? "online" : "local");
   const tabs = `<div class="segmented an-modes">${button("On this computer", "an-mode", mode === "local" ? "active" : "", 'data-value="local"')}${button("Online account", "an-mode", mode === "online" ? "active" : "", 'data-value="online"')}</div>`;
   return `<div class="an-choose">${tabs}${an.error ? `<p class="an-error">${esc(an.error)}</p>` : ""}${mode === "local" ? analystLocal() : analystOnlinePane()}</div>`;
@@ -1876,6 +1897,9 @@ function paintAnalyst() {
   document.querySelectorAll("[data-analyst-slot]").forEach((el) => typing(el) || (el.innerHTML = analystBody(el.dataset.analystSlot === "full")));
   const box = $("#analyst-settings");
   if (box && !typing(box)) box.innerHTML = analystSettingsBody();
+  // The header names the model in use, which a model or account change alters.
+  const where = $(".analyst-panel .panel-head h2 small");
+  if (where) where.textContent = analyst?.ready ? `research assistant · ${analystWhere()}` : "research assistant";
   const ask = $(".an-ask");
   if (ask) {
     const busy = analystConv().busy;
@@ -2038,18 +2062,18 @@ async function analystSetupAction(action, value) {
       if (key) st = await analystSetKey("server", key);
       loadAnalystModels("server", true);
     } else if (action === "an-signin") {
-      an.busy = "signin";
+      an.busy = "signin:" + value;
       paintAnalyst();
-      st = await analystSignIn();
+      st = await analystSignIn(value);
       if (stale()) return;
-      loadAnalystModels("openrouter", true);
+      loadAnalystModels(value, true);
     } else if (action === "an-signout") {
       const name = analyst.online?.providers?.find((p) => p.id === value)?.name || value;
       if (!confirm(`Log out of ${name}? Aperture forgets the login on this computer.`)) return;
       st = await analystSignOut(value);
       delete an.models[value];
     } else if (action === "an-model-save") {
-      const model = field("an-model");
+      const model = field("an-model-" + value);
       if (!model) throw new Error("Choose a model first.");
       const ids = an.models[value]?.ids || [];
       if (ids.length && !ids.includes(model)) throw new Error(`${model} isn't in this account's model list. Pick one from the list.`);

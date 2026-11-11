@@ -84,7 +84,7 @@ export const analystConfigure = (c) => call("analyst_configure", c);
 export const analystPickModel = () => call("analyst_pick_model");
 export const analystSetKey = (provider, key) => call("analyst_set_key", { provider, key });
 export const analystSignOut = (provider) => call("analyst_sign_out", { provider });
-export const analystSignIn = () => call("analyst_sign_in");
+export const analystSignIn = (provider) => call("analyst_sign_in", { provider });
 export const analystModels = (target) => call("analyst_models", { target });
 export const analystCancel = () => (native ? invoke("analyst_cancel") : Promise.resolve());
 export const analystNews = (query) => call("analyst_news", { query });
