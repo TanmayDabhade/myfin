@@ -1676,7 +1676,7 @@ const analystTurns = new Map(); // reply id -> turn, for streamed text
 const analystConv = (s = symbol) => (analystConvs[s] ||= { turns: [], busy: false });
 const gb = (b) => (b / 1e9).toFixed(1) + " GB";
 // Setup screen state: which tab and account are shown, model lists, errors.
-const an = { mode: "", provider: "", choosing: false, models: {}, busy: "", error: "" };
+const an = { mode: "", choosing: false, models: {}, busy: "", error: "" };
 function setAnalyst(st) {
   const changed = !!analyst?.ready !== !!st.ready || analyst?.choice !== st.choice;
   analyst = st;
@@ -1714,7 +1714,7 @@ if (native)
 // What the analyst runs on now, in a few words.
 function analystWhere() {
   const st = analyst || {};
-  if (st.choice === "online") return `${st.online?.name || "your account"}${st.online?.model ? ` · ${st.online.model}` : ""}`;
+  if (st.choice === "online") return `${st.online?.model ? `${modelName(st.online.model).split(" · ")[0]} via ` : ""}${st.online?.name || "your account"}`;
   if (st.choice === "server") return `your model server${st.server?.model ? ` · ${st.server.model}` : ""}`;
   if (st.choice === "gguf") return `${st.gguf?.name || "your model"} on this computer`;
   return "Gemma 4 on this computer";
@@ -1779,37 +1779,47 @@ function analystLocal() {
     `<div class="an-form"><input id="an-server-url" placeholder="http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)" value="${esc(sv.url || "")}" spellcheck="false"><input id="an-server-model" list="an-list-server" placeholder="Model, e.g. qwen3:14b" value="${esc(sv.model || "")}" spellcheck="false">${modelList("server")}<input id="an-server-key" type="password" autocomplete="off" placeholder="${sv.hasKey ? "Key saved · leave empty to keep it (a new address clears it)" : "Key (only if the server needs one)"}">${button(ch === "server" ? "Save" : "Use this server", "an-server-save", "primary")}</div>${sv.url ? modelNote("server") : ""}`,
   )}${engine}<small class="an-privacy">Questions and Aperture's data stay on this computer (or your own server); only the analyst's web searches and the pages it reads go online.</small>`;
 }
+// The account's best-known models first (newest Claude, GPT and Gemini),
+// then everything else, with readable names.
+function modelChoices(ids) {
+  const clean = ids.filter((id) => !/[~:]/.test(id));
+  const newest = (re) => clean.filter((id) => re.test(id) && !/mini|nano|lite|audio|search|realtime|image|preview|instruct|-\d{4}/.test(id)).sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
+  const featured = [...newest(/^anthropic\/claude-(opus|fable)/).slice(0, 2), ...newest(/^anthropic\/claude-sonnet/).slice(0, 1), ...newest(/^openai\/gpt-/).slice(0, 2), ...newest(/^google\/gemini-/).slice(0, 2)];
+  return { featured, rest: clean.filter((id) => !featured.includes(id)) };
+}
+function modelName(id) {
+  const [vendor, name = id] = id.includes("/") ? id.split("/") : ["", id];
+  const nice = name.replace(/-/g, " ").replace(/\bgpt\b/i, "GPT").replace(/\b[a-z]/g, (c) => c.toUpperCase());
+  const who = { anthropic: "Anthropic", openai: "OpenAI", google: "Google", "meta-llama": "Meta", mistralai: "Mistral", "x-ai": "xAI", deepseek: "DeepSeek", qwen: "Qwen" }[vendor] || vendor;
+  return who ? `${nice} · ${who}` : nice;
+}
 function analystOnlinePane() {
   const st = analyst,
     o = st.online || { providers: [] };
-  const pid = an.provider || o.provider || "openrouter";
-  const p = o.providers.find((x) => x.id === pid) || o.providers[0];
+  const p = o.providers.find((x) => x.signIn);
   if (!p) return "";
   const inUse = st.choice === "online" && o.provider === p.id;
-  const tabs = `<div class="an-providers">${o.providers.map((x) => button(`${esc(x.name)}${x.connected ? " <small>✓</small>" : ""}`, "an-provider", x.id === p.id ? "active" : "", `data-value="${x.id}"`)).join("")}</div>`;
-  const out = button("Sign out", "an-signout", "", `data-value="${p.id}"`);
-  let connect;
-  if (p.signIn)
-    connect = p.connected
-      ? `<p><b>Signed in to ${esc(p.name)}.</b> ${out}</p>`
-      : `<p>One account gives the analyst Claude, GPT, Gemini and hundreds of other models. You sign in on OpenRouter's site (or create an account there) and Aperture gets a key tied to your account, which you can revoke on OpenRouter any time. You pay OpenRouter for what you use.</p>${button("Sign in with OpenRouter", "an-signin", "primary")}${an.busy === "signin" ? `<small class="muted"> Waiting for you to finish signing in in the browser… (click again to reopen the page)</small>` : ""}`;
-  else
-    connect = p.connected
-      ? `<p><b>${esc(p.name)} is connected.</b> ${out}</p>`
-      : `<p>Connect your ${esc(p.name)} developer account with an API key from ${link(p.keyUrl, "its key page")}. Aperture checks the key with ${esc(p.name)} and keeps it on this computer (owner-only file); it is never shown again.</p><div class="an-row"><input id="an-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your ${esc(p.name)} API key">${button(an.busy === "key" ? "Checking…" : "Connect", "an-key-save", "primary", `data-value="${p.id}"`)}</div>`;
-  let model = "";
-  if (p.connected) {
+  let body;
+  if (!p.connected)
+    body = `<p>Log in once and the analyst can use Claude, GPT, Gemini and hundreds of other models through your account. Your browser opens ${esc(p.name)}'s login page (Google, GitHub or email); Aperture never sees your password, and you can disconnect it on ${esc(p.name)} at any time. ${esc(p.name)} bills your account for what you use.</p>${button(`Log in with ${esc(p.name)}`, "an-signin", "primary")}${an.busy === "signin" ? `<small class="muted"> Waiting for you to finish logging in in the browser… (click again to reopen the page)</small>` : ""}`;
+  else {
     loadAnalystModels(p.id);
-    const ids = an.models[p.id]?.ids || [];
-    const value = inUse && o.model ? o.model : pickModel(p.id, ids, p.suggested);
-    model = `<div class="an-row"><label class="an-model">Model <input id="an-model" list="an-list-${p.id}" value="${esc(value)}" spellcheck="false"></label>${modelList(p.id)}${button(inUse ? "Save model" : `Use ${esc(p.name)}`, "an-model-save", "primary", `data-value="${p.id}"`)}</div>${modelNote(p.id)}${inUse ? `<small class="an-tag">In use</small>` : ""}`;
+    const m = an.models[p.id] || {};
+    const current = inUse && o.model ? o.model : "";
+    const { featured, rest } = modelChoices(m.ids || []);
+    const pick = current || featured[0] || p.suggested;
+    const opt = (id) => `<option value="${esc(id)}" ${id === pick ? "selected" : ""}>${esc(modelName(id))}</option>`;
+    const picker = m.ids?.length
+      ? `<select id="an-model">${current && !m.ids.includes(current) ? opt(current) : ""}<optgroup label="Recommended">${featured.map(opt).join("")}</optgroup><optgroup label="All models">${rest.map(opt).join("")}</optgroup></select>`
+      : `<input id="an-model" value="${esc(pick)}" spellcheck="false">`;
+    body = `<p><b>Logged in to ${esc(p.name)}.</b> ${button("Log out", "an-signout", "", `data-value="${p.id}"`)}</p><div class="an-row"><label class="an-model">Model ${picker}</label>${button(inUse ? "Save model" : "Use this model", "an-model-save", "primary", `data-value="${p.id}"`)}</div>${m.loading || m.error ? modelNote(p.id) : ""}${inUse ? `<small class="an-tag">In use</small>` : ""}`;
   }
-  return `${tabs}<div class="an-opt on"><div class="an-opt-body">${connect}${model}</div></div><small class="an-privacy">With an online account, the briefing (Aperture's data for the open stock) and your questions are sent to ${esc(p.name)} and billed to that account. The analyst's rules stay the same: every claim cites its source, and it gives research, not buy or sell advice. ChatGPT Plus and Claude Pro/Max plans can't be used by other apps yet; these accounts are billed separately.</small>`;
+  return `<div class="an-opt on"><div class="an-opt-body">${body}</div></div><small class="an-privacy">Anthropic, OpenAI and Google don't let other apps log in to Claude, ChatGPT or Gemini accounts yet, and Claude Pro/Max or ChatGPT Plus plans only work in their own apps. ${esc(p.name)} is one login for all of their models. The stock's data and your questions are sent to ${esc(p.name)} and the model's maker to answer; the analyst's rules stay the same (cited sources, research not advice).</small>`;
 }
 function analystChooser() {
   // First visit: the two ways to run it, side by side, before any details.
   if (!analyst.ready && !analyst.chosen && !an.mode)
-    return `<div class="an-paths"><button class="an-path" data-action="an-mode" data-value="online"><b>Use your AI account</b><span>Claude, GPT, Gemini and hundreds more: sign in with OpenRouter in your browser, or connect your OpenAI, Anthropic or Google account. Nothing to download.</span><small>The stock's data and your questions are sent to that service.</small></button><button class="an-path" data-action="an-mode" data-value="local"><b>Run on this computer</b><span>Free and private: download Gemma 4 (${gb(analyst.model?.bytes || 0)}), use a model file you already have, or connect Ollama or LM Studio.</span><small>Needs about 6 GB of free memory while answering.</small></button></div>`;
+    return `<div class="an-paths"><button class="an-path" data-action="an-mode" data-value="online"><b>Log in with an online account</b><span>Claude, GPT, Gemini and hundreds more through one OpenRouter login in your browser. No keys to copy, nothing to download.</span><small>The stock's data and your questions are sent to that service.</small></button><button class="an-path" data-action="an-mode" data-value="local"><b>Run on this computer</b><span>Free and private: download Gemma 4 (${gb(analyst.model?.bytes || 0)}), use a model file you already have, or connect Ollama or LM Studio.</span><small>Needs about 6 GB of free memory while answering.</small></button></div>`;
   const mode = an.mode || (analyst.local === false ? "online" : "local");
   const tabs = `<div class="segmented an-modes">${button("On this computer", "an-mode", mode === "local" ? "active" : "", 'data-value="local"')}${button("Online account", "an-mode", mode === "online" ? "active" : "", 'data-value="online"')}</div>`;
   return `<div class="an-choose">${tabs}${an.error ? `<p class="an-error">${esc(an.error)}</p>` : ""}${mode === "local" ? analystLocal() : analystOnlinePane()}</div>`;
@@ -1999,7 +2009,7 @@ function analystSettingsBody() {
   const now = st.ready ? `<p>In use: <b>${esc(analystWhere())}</b>. ${st.local ? (st.choice === "server" ? "Questions go to your model server." : st.running ? "Running now; it stops after 15 minutes without a question to free memory." : "Starts when you ask a question.") : `Questions and the briefing are sent to ${esc(st.online?.name || "the account")}.`}</p>` : `<p class="muted">Not set up yet. Choose how it runs:</p>`;
   const downloaded = st.model?.installed || st.runtime?.installed;
   const remove = downloaded ? `${button("Remove downloaded models", "an-remove")}<small>Removes the engine${st.model?.installed ? ` and Gemma 4 (frees about ${gb(st.model.bytes)})` : ""}. Your own model files and accounts aren't touched.</small>` : "";
-  return `${now}${analystChooser()}${remove}<small>Web searches go to Bing News and pages are read from their publishers. Account keys are saved in analyst-keys.json in your app-data folder (owner-only permissions).</small>`;
+  return `${now}${analystChooser()}${remove}<small>Web searches go to Bing News and pages are read from their publishers. Your online login is saved in your app-data folder (owner-only permissions) and can be removed with Log out.</small>`;
 }
 function analystPanel() {
   if (!native) return "";
@@ -2032,18 +2042,10 @@ async function analystSetupAction(action, value) {
       paintAnalyst();
       st = await analystSignIn();
       if (stale()) return;
-      an.provider = "openrouter";
       loadAnalystModels("openrouter", true);
-    } else if (action === "an-key-save") {
-      const key = field("an-key");
-      if (!key) throw new Error("Paste the key first.");
-      an.busy = "key";
-      paintAnalyst();
-      st = await analystSetKey(value, key);
-      loadAnalystModels(value, true);
     } else if (action === "an-signout") {
       const name = analyst.online?.providers?.find((p) => p.id === value)?.name || value;
-      if (!confirm(`Disconnect ${name}? The saved key is deleted from this computer.`)) return;
+      if (!confirm(`Log out of ${name}? Aperture forgets the login on this computer.`)) return;
       st = await analystSignOut(value);
       delete an.models[value];
     } else if (action === "an-model-save") {
@@ -3957,16 +3959,10 @@ async function action(act, value) {
       an.error = "";
       paintAnalyst();
       break;
-    case "an-provider":
-      an.provider = value;
-      an.error = "";
-      paintAnalyst();
-      break;
     case "an-choice":
     case "an-pick":
     case "an-server-save":
     case "an-signin":
-    case "an-key-save":
     case "an-signout":
     case "an-model-save":
       // Sign-in waits for the browser, so it runs without holding the app's
