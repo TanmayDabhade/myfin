@@ -8,7 +8,7 @@
 <meta name="description" content="A free, open-source desktop app for stock research: one page per stock with holders, ownership changes, valuation, live trades and an S&P 500 market map.">
 <meta property="og:title" content="Aperture">
 <meta property="og:description" content="Free, open-source stock research on your desktop. Load a stock once; every view follows it.">
-<meta property="og:image" content="demo/08-market-map.jpg">
+<meta property="og:image" content="demo/09-market-map.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -60,8 +60,8 @@ a { color: inherit; }
 .hero { padding-block: 28px 30px; display: grid; gap: 22px 56px; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: end; }
 .hero .eyebrow { grid-column: 1 / -1; }
 .hero .side { display: grid; gap: 20px; min-width: 0; }
-.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 4px #3ecf8e22; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: center; line-height: 1.5; }
+.eyebrow .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 4px #3ecf8e22; }
 h1 {
   margin: 0;
   font: 800 clamp(40px, 6.2vw, 80px)/0.92 var(--display);
@@ -144,14 +144,29 @@ td.free { font-family: var(--mono); font-size: 13px; color: var(--muted); }
 .fact span { color: var(--muted); font-size: 15px; }
 
 /* Download */
-.downloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
-.dl { border: 1px solid var(--line); border-radius: 10px; padding: 22px; display: grid; gap: 10px; align-content: start; background: var(--panel); min-width: 0; }
-.dl h3 { margin: 0; font: 700 20px/1 var(--display); }
-.dl p { margin: 0; color: var(--muted); font-size: 14.5px; }
-.dl .btn { justify-self: start; margin-top: 4px; }
+/* Platform picker: radio chips; every picker on the page shares one choice. */
+.get { display: grid; gap: 12px; min-width: 0; }
+.picker { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.picker legend { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-bottom: 10px; padding: 0; }
+.picker label { position: relative; display: block; }
+.picker input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.picker span { display: block; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; font: 500 13px/1 var(--mono); color: var(--muted); background: var(--panel); transition: color 0.15s, border-color 0.15s; }
+.picker label:hover span { color: var(--fg); border-color: #3a3a40; }
+.picker input:checked + span { color: var(--fg); border-color: var(--fg); background: #16161a; }
+.picker input:focus-visible + span { outline: 2px solid var(--fg); outline-offset: 2px; }
+.btn.wrap-ok { line-height: 1.25; text-align: left; }
+.file { font: 500 12.5px/1.4 var(--mono); color: var(--faint); margin: 0; overflow-wrap: anywhere; }
+.getbox { border: 1px solid var(--line); border-radius: 10px; padding: 24px; background: var(--panel); display: grid; gap: 18px; min-width: 0; }
+.getbox .picker span { padding: 11px 14px; font-size: 14px; background: var(--bg); }
+.getbox .picker input:checked + span { background: #16161a; }
+.getbox .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.getbox .how { margin: 0; color: var(--muted); font-size: 15px; max-width: 70ch; }
+.getbox .how a { color: var(--fg); }
 .cmd { display: flex; align-items: center; gap: 10px; margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 10px 10px 16px; background: #09090b; min-width: 0; }
 .cmd code { font: 500 13px/1.5 var(--mono); color: #d6d6d2; overflow-x: auto; white-space: nowrap; flex: 1; min-width: 0; }
 .cmd button { flex: none; font: 500 12px/1 var(--mono); padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
+
+[hidden] { display: none !important; }
 
 footer { margin-top: 80px; border-top: 1px solid var(--line); padding-block: 28px 40px; color: var(--faint); font-size: 13.5px; display: grid; gap: 8px; }
 footer a { color: var(--muted); }
@@ -187,13 +202,22 @@ footer a { color: var(--muted); }
   </header>
 
   <section class="hero">
-    <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Free · open source · macOS, Windows, Linux · v0.3.0</p>
+    <p class="eyebrow"><span class="dot" aria-hidden="true"></span><span>Free · open source · macOS, Windows, Linux · v<span data-version>0.3.0</span></span></p>
     <h1>Load a stock once. Every view follows.</h1>
     <div class="side">
     <p class="lede">Aperture is a desktop app for researching stocks: who owns them and who's selling, what they're worth on their own filings, every trade as it prints, and the whole S&amp;P 500 on one map. It runs on your computer with free data from your own keys.</p>
-    <div class="actions">
-      <a class="btn primary" href="https://github.com/TanmayDabhade/myfin/releases/latest">Download v0.3.0</a>
-      <a class="btn" href="https://github.com/TanmayDabhade/myfin">View the source</a>
+    <div class="get">
+      <div class="picker" role="radiogroup" aria-label="Your computer">
+        <label><input type="radio" name="os-hero" value="mac-arm" checked><span>Mac · Apple Silicon</span></label>
+        <label><input type="radio" name="os-hero" value="mac-intel"><span>Mac · Intel</span></label>
+        <label><input type="radio" name="os-hero" value="windows"><span>Windows</span></label>
+        <label><input type="radio" name="os-hero" value="linux"><span>Linux</span></label>
+      </div>
+      <div class="actions">
+        <a class="btn primary wrap-ok" data-dl href="https://github.com/TanmayDabhade/myfin/releases/latest">Download v0.3.0 for Mac (Apple Silicon)</a>
+        <a class="btn" href="https://github.com/TanmayDabhade/myfin">View the source</a>
+      </div>
+      <p class="file" data-file></p>
     </div>
     </div>
   </section>
@@ -247,7 +271,7 @@ footer a { color: var(--muted); }
     </div>
 
     <div class="wide">
-      <img src="demo/08-market-map.jpg" alt="The S&amp;P 500 market map: tiles grouped by sector, sized by market cap, coloured green or red by the day's move." loading="lazy">
+      <img src="demo/09-market-map.jpg" alt="The S&amp;P 500 market map: tiles grouped by sector, sized by market cap, coloured green or red by the day's move." loading="lazy">
       <div>
         <h3>The S&amp;P 500 on one map</h3>
         <p>The Screener opens on every S&amp;P 500 company, grouped by sector, sized by market cap and coloured by the move over a day, week, month, quarter, year to date or year. Click any company to open its page.</p>
@@ -286,14 +310,24 @@ footer a { color: var(--muted); }
 
   <section class="block" id="download">
     <h2>Download</h2>
-    <p class="sub">Version 0.3.0. One key is enough to start, and the built-in demo workspace needs none.</p>
-    <div class="downloads">
-      <div class="dl"><h3>macOS</h3><p>Universal .dmg for Apple Silicon and Intel. The app isn't signed by Apple yet: the first time, right-click it in Applications and choose Open.</p><a class="btn primary" href="https://github.com/TanmayDabhade/myfin/releases/latest">Get the .dmg</a></div>
-      <div class="dl"><h3>Windows</h3><p>.exe installer for 64-bit Windows. SmartScreen may ask you to confirm: More info → Run anyway.</p><a class="btn" href="https://github.com/TanmayDabhade/myfin/releases/latest">Get the installer</a></div>
-      <div class="dl"><h3>Linux</h3><p>.deb for Debian and Ubuntu, or a portable .AppImage.</p><a class="btn" href="https://github.com/TanmayDabhade/myfin/releases/latest">Get the package</a></div>
+    <p class="sub">Version <span data-version>0.3.0</span>. One key is enough to start, and the built-in demo workspace needs none.</p>
+    <div class="getbox">
+      <fieldset class="picker">
+        <legend>Your computer</legend>
+        <label><input type="radio" name="os-dl" value="mac-arm" checked><span>Mac · Apple Silicon</span></label>
+        <label><input type="radio" name="os-dl" value="mac-intel"><span>Mac · Intel</span></label>
+        <label><input type="radio" name="os-dl" value="windows"><span>Windows</span></label>
+        <label><input type="radio" name="os-dl" value="linux"><span>Linux</span></label>
+      </fieldset>
+      <div class="row">
+        <a class="btn primary wrap-ok" data-dl href="https://github.com/TanmayDabhade/myfin/releases/latest">Download v0.3.0 for Mac (Apple Silicon)</a>
+        <p class="file" data-file></p>
+      </div>
+      <p class="how" data-how>Universal .dmg: one app that runs natively on Apple Silicon and Intel. The app isn't signed by Apple yet: the first time, right-click it in Applications and choose Open.</p>
+      <p class="note">Other files and checksums are on the <a data-page href="https://github.com/TanmayDabhade/myfin/releases/latest">release page</a>.</p>
     </div>
-    <div class="cmd"><code id="brew">brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git &amp;&amp; brew trust tanmaydabhade/myfin &amp;&amp; brew install --cask tanmaydabhade/myfin/aperture-preview</code><button id="copy" type="button">Copy</button></div>
-    <p class="note" style="margin-top:8px">Homebrew tracks the newest preview build, ahead of releases.</p>
+    <div class="cmd" data-mac-only><code id="brew">brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git &amp;&amp; brew trust tanmaydabhade/myfin &amp;&amp; brew install --cask tanmaydabhade/myfin/aperture-preview</code><button id="copy" type="button">Copy</button></div>
+    <p class="note" style="margin-top:8px" data-mac-only>Homebrew tracks the newest preview build, ahead of releases.</p>
   </section>
 
   <footer>
@@ -303,6 +337,118 @@ footer a { color: var(--muted); }
 </div>
 
 <script>
+// Download picker. The newest release comes from the GitHub API; if that
+// can't be reached, the page falls back to v0.3.0's files below.
+function downloads() {
+  const REPO = "TanmayDabhade/myfin";
+  const gh = (tag, name) => `https://github.com/${REPO}/releases/download/${tag}/${name}`;
+  let release = {
+    version: "0.3.0",
+    page: `https://github.com/${REPO}/releases/tag/v0.3.0`,
+    assets: [
+      ["Market-Lens-v0.3.0-macos-universal.dmg", 12245014],
+      ["Market-Lens-v0.3.0-windows-x64.exe", 4311813],
+      ["Market-Lens-v0.3.0-linux-x64.AppImage", 85928440],
+      ["Market-Lens-v0.3.0-linux-x64.deb", 7745890],
+    ].map(([name, size]) => ({ name, size, url: gh("v0.3.0", name) })),
+  };
+  const UNSIGNED_MAC = "The app isn't signed by Apple yet: the first time, right-click it in Applications and choose Open.";
+  // Each platform tries its own build first, then the universal Mac build.
+  const PLATFORMS = {
+    "mac-arm": { label: "Mac (Apple Silicon)", find: [/macos-(arm64|aarch64)\.dmg$/i, /macos-universal\.dmg$/i], how: UNSIGNED_MAC },
+    "mac-intel": { label: "Mac (Intel)", find: [/macos-(x64|x86_64)\.dmg$/i, /macos-universal\.dmg$/i], how: UNSIGNED_MAC },
+    windows: { label: "Windows", find: [/windows-x64\.exe$/i, /windows-x64.*\.msi$/i], how: "Installer for 64-bit Windows. SmartScreen may ask you to confirm: More info → Run anyway." },
+    linux: { label: "Linux", find: [/linux-x64\.AppImage$/i], how: "Portable .AppImage for 64-bit Linux: make it executable (chmod +x) and run it." },
+  };
+  const all = (sel) => document.querySelectorAll(sel);
+  const mb = (n) => (n / 1e6).toFixed(n < 1e8 ? 1 : 0) + " MB";
+  const asset = (os) => {
+    for (const re of PLATFORMS[os].find) {
+      const a = release.assets.find((x) => re.test(x.name));
+      if (a) return a;
+    }
+    return null;
+  };
+  let current = "mac-arm", picked = false;
+
+  function render(os) {
+    current = os;
+    const p = PLATFORMS[os], a = asset(os);
+    all(".picker input").forEach((r) => (r.checked = r.value === os));
+    all("[data-dl]").forEach((b) => {
+      b.href = a ? a.url : release.page;
+      b.textContent = a ? `Download v${release.version} for ${p.label}` : `See v${release.version} downloads`;
+    });
+    all("[data-file]").forEach((f) => (f.textContent = a ? `${a.name} · ${mb(a.size)}` : `No ${p.label} build in this release yet.`));
+    all("[data-version]").forEach((v) => (v.textContent = release.version));
+    all("[data-page]").forEach((l) => (l.href = release.page));
+    all("[data-mac-only]").forEach((el) => (el.hidden = !os.startsWith("mac")));
+    const how = document.querySelector("[data-how]");
+    if (how) {
+      how.textContent = (a && /universal/i.test(a.name) ? "Universal .dmg: one app that runs natively on Apple Silicon and Intel. " : "") + p.how;
+      const deb = os === "linux" && release.assets.find((x) => /linux-x64\.deb$/i.test(x.name));
+      if (deb) {
+        const link = document.createElement("a");
+        link.href = deb.url;
+        link.textContent = `Get the .deb (${mb(deb.size)})`;
+        how.append(" On Debian or Ubuntu? ", link, ".");
+      }
+    }
+  }
+
+  all(".picker input").forEach((r) =>
+    r.addEventListener("change", () => {
+      picked = true;
+      render(r.value);
+      try { localStorage.setItem("aperture-os", r.value); } catch {}
+    })
+  );
+
+  // Pick the visitor's computer from the browser. Apple Silicon vs Intel is a
+  // best guess (both currently get the same universal build).
+  function macArch() {
+    try {
+      const gl = document.createElement("canvas").getContext("webgl");
+      const ext = gl && gl.getExtension("WEBGL_debug_renderer_info");
+      const gpu = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "";
+      if (/intel|amd|radeon|nvidia/i.test(gpu)) return "mac-intel";
+    } catch {}
+    return "mac-arm";
+  }
+  function guess() {
+    const ua = navigator.userAgent;
+    const plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+    if (/android|iphone|ipad|ipod|mobile/i.test(ua)) return null;
+    if (/win/i.test(plat) || /windows/i.test(ua)) return "windows";
+    if (/mac/i.test(plat) || /mac os x/i.test(ua)) return macArch();
+    if (/linux|x11|cros/i.test(plat + " " + ua)) return "linux";
+    return null;
+  }
+  let saved = null;
+  try { saved = localStorage.getItem("aperture-os"); } catch {}
+  const start = PLATFORMS[saved] ? saved : guess() || "mac-arm";
+  render(start);
+  // Chromium can tell ARM from x86 directly.
+  if (!PLATFORMS[saved] && start.startsWith("mac") && navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+    navigator.userAgentData.getHighEntropyValues(["architecture"]).then((h) => {
+      if (picked) return;
+      if (h.architecture === "x86" && current === "mac-arm") render("mac-intel");
+      if (h.architecture === "arm" && current === "mac-intel") render("mac-arm");
+    }).catch(() => {});
+  }
+
+  fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { Accept: "application/vnd.github+json" } })
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((r) => {
+      const assets = (r.assets || []).map((a) => ({ name: a.name, size: a.size, url: a.browser_download_url }));
+      if (!r.tag_name || !assets.length) return;
+      release = { version: r.tag_name.replace(/^v/, ""), page: r.html_url, assets };
+      render(current);
+    })
+    .catch(() => {});
+}
+downloads();
+
 (() => {
   const FALLBACK = { width: 1440, height: 900, steps: [{ image: "demo/01-overview.jpg", caption: "Your watchlist, with real-time prices streaming in.", click: null }] };
   const $ = (id) => document.getElementById(id);
