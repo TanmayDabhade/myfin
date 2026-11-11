@@ -96,13 +96,15 @@ function fakeBackend() {
     // Aperture Analyst: a scripted stand-in for the local model. First turn
     // asks for a news search; after the tool result it answers with citations.
     analyst_status: () => {
-      const c = (window.__anCfg ||= { choice: "gemma", provider: "", model: "", keys: {} });
-      const ready = c.choice === "gemma" ? !!window.__anInstalled : c.choice === "online" ? !!c.keys[c.provider] && !!c.model : false;
+      const c = (window.__anCfg ||= { choice: "", provider: "", model: "", keys: {} });
+      const choice = c.choice || "gemma";
+      const ready = choice === "gemma" ? !!window.__anInstalled : c.choice === "online" ? !!c.keys[c.provider] && !!c.model : false;
       const names = { openrouter: "OpenRouter", openai: "OpenAI", anthropic: "Anthropic (Claude)", gemini: "Google Gemini" };
       return {
         supported: true,
-        choice: c.choice,
-        local: c.choice !== "online",
+        choice,
+        chosen: !!c.choice,
+        local: choice !== "online",
         ready,
         installed: ready,
         model: { name: "Gemma 4 E4B", file: "gemma.gguf", bytes: 4977171584, license: "Apache 2.0", installed: !!window.__anInstalled },
@@ -396,6 +398,11 @@ async function liveFlow(browser, errors) {
   // Aperture Analyst: one-time setup, then a cited answer that used a web
   // search, with news Aperture already had filtered out of the results.
   await page.click('.fn-strip [data-value="ASK"]');
+  // First visit offers the two ways to run it before any download.
+  await page.waitForSelector('.an-path[data-value="online"]');
+  if (await page.locator('[data-action="an-install"]').count()) throw Error("Analyst setup jumped to the Gemma download");
+  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-first.png", fullPage: true });
+  await page.click('.an-path[data-value="local"]');
   await page.click('[data-action="an-install"]');
   await page.click('[data-action="an-quick"][data-value="0"]');
   await page.waitForSelector(".an-answer a.cite[href='https://news.example.org/eu']", { timeout: 10000 });
@@ -413,17 +420,23 @@ async function liveFlow(browser, errors) {
   await page.click('[data-action="an-change"]');
   await page.click('[data-action="an-mode"][data-value="online"]');
   await page.waitForSelector('[data-action="an-signin"]');
+  if (await page.locator(".an-choose input[type=password]").count()) throw Error("Online setup asks for an API key");
   if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Analyst setup");
   if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-online.png", fullPage: true });
   await page.click('[data-action="an-signin"]');
   await page.waitForSelector("#an-input", { timeout: 10000 });
-  if (!(await page.locator(".analyst-panel h2").innerText()).includes("OpenRouter")) throw Error("Analyst doesn't show the account in use");
+  if (!(await page.locator(".analyst-panel h2").innerText()).includes("Claude Opus 5.5 via OpenRouter")) throw Error("Analyst doesn't show the account in use");
   await page.click('[data-action="an-clear"]');
   await page.click('[data-action="an-quick"][data-value="3"]');
   await page.waitForFunction(() => document.querySelectorAll(".an-turn .an-answer:not(.an-draft)").length === 1, null, { timeout: 10000 });
   const onlineSys = await page.evaluate(() => window.__anMessages[0].content);
   if (!onlineSys.includes("user's OpenRouter account") || onlineSys.includes("entirely on the user's computer")) throw Error("Analyst not told it runs online");
   await page.click('[data-action="an-change"]');
+  await page.click('[data-action="an-mode"][data-value="online"]');
+  await page.waitForSelector("select#an-model optgroup[label=Recommended] option", { state: "attached" });
+  if ((await page.inputValue("select#an-model")) !== "anthropic/claude-opus-5.5") throw Error("Model picker lost the model in use");
+  if (await page.locator(".an-choose input[type=password]").count()) throw Error("Online setup asks for an API key");
+  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-online-in.png", fullPage: true });
   await page.click('[data-action="an-mode"][data-value="local"]');
   if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-local.png", fullPage: true });
   await page.click('[data-action="an-choice"][data-value="gemma"]');

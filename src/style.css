@@ -1274,6 +1274,11 @@ a.cite:hover, button.cite:hover { background: #3a3a3a; color: #fff; }
 .an-setup ul { padding-left: 18px; margin: 10px 0 16px; }
 .an-setup li { margin: 5px 0; }
 .an-choose { margin-top: 6px; }
+.an-paths { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 6px; }
+.an-path { display: grid; gap: 8px; align-content: start; text-align: left; padding: 18px; border: 1px solid #2e2e2e; border-radius: 12px; background: #141414; color: #c9c9c9; font-size: 12.5px; line-height: 1.55; white-space: normal; }
+.an-path:hover { border-color: #fff; background: #1a1a1a; }
+.an-path b { font-size: 14.5px; color: #fff; }
+.an-path small { color: #7d7d7d; font-size: 11.5px; }
 .an-modes { margin: 0 0 14px; }
 .an-opt { border: 1px solid #262626; border-radius: 10px; background: #121212; margin: 0 0 10px; }
 .an-opt.on { border-color: #4a4a4a; background: #161616; }
@@ -1292,8 +1297,8 @@ a.cite:hover, button.cite:hover { background: #3a3a3a; color: #fff; }
 .an-form input:first-child { grid-column: 1 / -1; }
 .an-form button { justify-self: start; }
 .an-file { font-size: 12px; color: #d0d0d0; font-family: ui-monospace, Menlo, monospace; }
-.an-model { display: flex; align-items: center; gap: 8px; flex: 1 1 320px; font-size: 12.5px; color: #a9a9a9; }
-.an-model input { flex: 1; }
+.an-model { display: flex; flex-direction: row; align-items: center; gap: 10px; flex: 1 1 320px; margin: 0; font-size: 12.5px; color: #a9a9a9; }
+.an-model input, .an-model select { flex: 1; min-width: 0; }
 .an-providers { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
 .an-providers button { font-size: 12px; padding: 6px 12px; border-radius: 8px; background: #111; border-color: #262626; }
 .an-providers button.active { border-color: #fff; color: #fff; background: #1d1d1d; }
