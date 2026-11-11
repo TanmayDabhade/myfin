@@ -104,7 +104,7 @@ import { INTERVALS, FREQUENCIES, intervalOf, frequencyOf, isIntraday, fromTwelve
 import { groupPrints, volumeAtPrice, levelOf, cumulativeDelta, largeSize, flowSummary, since as printsSince } from "./orderflow.js";
 import { priceChart, deltaChart } from "./pricechart.js";
 import { systemPrompt, TOOLS as ANALYST_TOOLS, QUICK_QUESTIONS, buildBriefing, checkToolCall, normalUrl, newsNotInAperture, newsResult, pageResult, cleanAnswer, citedIds, answerHtml } from "./analyst.js";
-import { analystStatus, analystInstall, analystRemove, analystChat, analystCancel, analystNews, analystRead, onAnalystDelta } from "./bridge.js";
+import { analystStatus, analystInstall, analystRemove, analystChat, analystCancel, analystNews, analystRead, onAnalystDelta, analystConfigure, analystPickModel, analystSetKey, analystSignOut, analystSignIn, analystModels } from "./bridge.js";
 import {
   risk,
   equityCurve,
@@ -1664,24 +1664,32 @@ async function pollTape() {
   }
 }
 // ---- Aperture Analyst ---------------------------------------------------------
-// Gemma 4 E4B on this computer (llama.cpp, started by the desktop app). It
-// gets a briefing built from Aperture's own data for the open stock and may
-// search the web for news and read pages; analyst.js holds its rules.
-let analyst = null, // analyst_status: { supported, installed, job, model, downloadBytes, … }
+// The user chooses where it runs: on this computer (Gemma 4 E4B, their own
+// GGUF model or a model server they run) or through an online account
+// (OpenRouter sign-in, or an OpenAI, Anthropic or Gemini key). It gets a
+// briefing built from Aperture's own data for the open stock and may search
+// the web for news and read pages; analyst.js holds its rules.
+let analyst = null, // analyst_status: { supported, choice, ready, job, model, gguf, server, online, … }
   analystPoll = null;
 const analystConvs = {}; // symbol -> { turns: [], busy }
 const analystTurns = new Map(); // reply id -> turn, for streamed text
 const analystConv = (s = symbol) => (analystConvs[s] ||= { turns: [], busy: false });
 const gb = (b) => (b / 1e9).toFixed(1) + " GB";
+// Setup screen state: which tab and account are shown, model lists, errors.
+const an = { mode: "", provider: "", choosing: false, models: {}, busy: "", error: "" };
+function setAnalyst(st) {
+  const changed = !!analyst?.ready !== !!st.ready || analyst?.choice !== st.choice;
+  analyst = st;
+  if (st.ready && changed) an.choosing = false;
+  // Becoming ready (or not) changes the whole view (the question box).
+  if (changed && page === "Stock" && stockView === "ASK") refresh();
+  else paintAnalyst();
+}
 function loadAnalystStatus() {
   if (!native) return;
   analystStatus()
     .then((st) => {
-      const changed = !!analyst?.installed !== !!st.installed;
-      analyst = st;
-      // Installing or removing changes the whole view (the question box).
-      if (changed && page === "Stock" && stockView === "ASK") refresh();
-      else paintAnalyst();
+      setAnalyst(st);
       if (st.job?.running && !analystPoll) analystPoll = setInterval(loadAnalystStatus, 1000);
       if (!st.job?.running && analystPoll) {
         clearInterval(analystPoll);
@@ -1703,21 +1711,113 @@ if (native)
     if (el) el.textContent = t.draft || analystStageText(t);
     else paintAnalyst();
   });
-function analystStageText(t) {
-  return t.stage === "loading" ? "Starting Aperture Analyst… the first answer after launch can take a minute while the model loads." : "Thinking…";
+// What the analyst runs on now, in a few words.
+function analystWhere() {
+  const st = analyst || {};
+  if (st.choice === "online") return `${st.online?.name || "your account"}${st.online?.model ? ` · ${st.online.model}` : ""}`;
+  if (st.choice === "server") return `your model server${st.server?.model ? ` · ${st.server.model}` : ""}`;
+  if (st.choice === "gguf") return `${st.gguf?.name || "your model"} on this computer`;
+  return "Gemma 4 on this computer";
 }
-// Setup: what it is, the one-time download and its progress.
+const analystOnline = () => (analyst?.choice === "online" ? analyst.online?.name || "your account" : "");
+function analystStageText(t) {
+  if (t.stage === "loading") return "Starting Aperture Analyst… the first answer after launch can take a minute while the model loads.";
+  if (t.stage === "waiting") return `Asking ${analystWhere()}…`;
+  return "Thinking…";
+}
+// The account's models, loaded once per account (or model server).
+function loadAnalystModels(target, force = false) {
+  if (!force && an.models[target]) return;
+  an.models[target] = { loading: true, ids: [] };
+  analystModels(target)
+    .then((ids) => (an.models[target] = { ids }))
+    .catch((e) => (an.models[target] = { ids: [], error: message(e) }))
+    .finally(paintAnalyst);
+}
+// A sensible first pick from an account's models when none is suggested.
+function pickModel(provider, ids, suggested) {
+  if (suggested && (!ids.length || ids.includes(suggested))) return suggested;
+  const rank = provider === "gemini" ? [/^gemini-[\d.]+-pro$/, /^gemini-.*pro/, /^gemini-.*flash/] : provider === "openai" ? [/^gpt-[\d.]+$/, /^gpt-[\d.]+-[a-z]+$/, /^gpt-/] : [/claude-opus/, /claude-sonnet/, /gpt-/];
+  const bad = /mini|nano|audio|search|realtime|codex|preview|instruct|lite|\d{4}-\d\d-\d\d/;
+  for (const re of rank) {
+    const hit = ids.filter((id) => re.test(id) && !bad.test(id)).sort().reverse()[0];
+    if (hit) return hit;
+  }
+  return suggested || ids[0] || "";
+}
+const modelList = (target) => `<datalist id="an-list-${target}">${(an.models[target]?.ids || []).map((id) => `<option value="${esc(id)}"></option>`).join("")}</datalist>`;
+const modelNote = (target) => {
+  const m = an.models[target];
+  if (!m) return "";
+  if (m.loading) return `<small class="muted">Loading the model list…</small>`;
+  if (m.error) return `<small class="an-error">${esc(m.error)}</small>`;
+  return `<small class="muted">${int(m.ids.length)} models available. Start typing to search.</small>`;
+};
+function analystProgress() {
+  const j = analyst?.job || {};
+  if (j.running) return `<div class="an-progress"><div class="an-bar"><i style="width:${j.total ? ((j.done / j.total) * 100).toFixed(1) : 0}%"></i></div><small>${esc(j.stage || "Downloading…")} ${j.total ? `${gb(j.done)} of ${gb(j.total)}` : ""}</small></div>`;
+  return j.error ? `<p class="an-error">${esc(j.error)}</p>` : "";
+}
+function analystLocal() {
+  const st = analyst,
+    ch = st.choice,
+    j = st.job || {};
+  const opt = (id, title, desc, extra = "") => `<div class="an-opt ${ch === id ? "on" : ""}"><button class="an-opt-head" data-action="an-choice" data-value="${id}"><span class="an-radio"></span><b>${title}</b>${ch === id ? `<small class="an-tag">${st.ready ? "In use" : "Selected"}</small>` : ""}</button><div class="an-opt-body"><p>${desc}</p>${extra}</div></div>`;
+  const engine = !st.supported ? `<p class="an-error">The llama.cpp engine isn't available for this computer, so use a model server or an online account.</p>` : "";
+  const download = (what) => (ch === what && !st.ready && st.supported && !j.running ? button(`${j.error ? "Resume download" : "Download"} · ${gb(st.downloadBytes)}`, "an-install", "primary") : "") + (ch === what ? analystProgress() : "");
+  const g = st.gguf;
+  const sv = st.server || {};
+  return `${opt("gemma", "Gemma 4 E4B <small>recommended</small>", `Google DeepMind's open model (${esc(st.model?.license || "Apache 2.0")}), ${gb(st.model?.bytes || 0)}, run by the ${esc(st.runtime?.name || "llama.cpp")} engine (MIT). Both downloads are checked against published checksums. Needs about 6 GB of free memory while answering. ${st.gpu ? "Uses this Mac's GPU." : "Runs on the processor, so answers take longer on this computer."}${st.model?.installed ? " <b>Downloaded.</b>" : ""}`, download("gemma"))}${opt(
+    "gguf",
+    "A model file you choose",
+    "Any chat model in GGUF format, for example from Hugging Face (Qwen, Llama, Mistral, Phi, a bigger Gemma…), run by the same llama.cpp engine. Pick a model that supports tool calls so it can search the web. It needs memory a little above the file's size.",
+    `<div class="an-row">${g ? `<span class="an-file ${g.found ? "" : "an-error"}">${esc(g.name)} · ${g.found ? gb(g.bytes) : "file not found"}</span>` : ""}${button(g ? "Choose another file…" : "Choose a .gguf file…", "an-pick")}</div>${download("gguf")}`,
+  )}${opt(
+    "server",
+    "A model server you already run",
+    "Ollama, LM Studio, llama.cpp or any server with an OpenAI-compatible API. Plain http is allowed only for addresses on this computer.",
+    `<div class="an-form"><input id="an-server-url" placeholder="http://localhost:11434/v1 (Ollama) or http://localhost:1234/v1 (LM Studio)" value="${esc(sv.url || "")}" spellcheck="false"><input id="an-server-model" list="an-list-server" placeholder="Model, e.g. qwen3:14b" value="${esc(sv.model || "")}" spellcheck="false">${modelList("server")}<input id="an-server-key" type="password" autocomplete="off" placeholder="${sv.hasKey ? "Key saved · leave empty to keep it (a new address clears it)" : "Key (only if the server needs one)"}">${button(ch === "server" ? "Save" : "Use this server", "an-server-save", "primary")}</div>${sv.url ? modelNote("server") : ""}`,
+  )}${engine}<small class="an-privacy">Questions and Aperture's data stay on this computer (or your own server); only the analyst's web searches and the pages it reads go online.</small>`;
+}
+function analystOnlinePane() {
+  const st = analyst,
+    o = st.online || { providers: [] };
+  const pid = an.provider || o.provider || "openrouter";
+  const p = o.providers.find((x) => x.id === pid) || o.providers[0];
+  if (!p) return "";
+  const inUse = st.choice === "online" && o.provider === p.id;
+  const tabs = `<div class="an-providers">${o.providers.map((x) => button(`${esc(x.name)}${x.connected ? " <small>✓</small>" : ""}`, "an-provider", x.id === p.id ? "active" : "", `data-value="${x.id}"`)).join("")}</div>`;
+  const out = button("Sign out", "an-signout", "", `data-value="${p.id}"`);
+  let connect;
+  if (p.signIn)
+    connect = p.connected
+      ? `<p><b>Signed in to ${esc(p.name)}.</b> ${out}</p>`
+      : `<p>One account gives the analyst Claude, GPT, Gemini and hundreds of other models. You sign in on OpenRouter's site (or create an account there) and Aperture gets a key tied to your account, which you can revoke on OpenRouter any time. You pay OpenRouter for what you use.</p>${button("Sign in with OpenRouter", "an-signin", "primary")}${an.busy === "signin" ? `<small class="muted"> Waiting for you to finish signing in in the browser… (click again to reopen the page)</small>` : ""}`;
+  else
+    connect = p.connected
+      ? `<p><b>${esc(p.name)} is connected.</b> ${out}</p>`
+      : `<p>Connect your ${esc(p.name)} developer account with an API key from ${link(p.keyUrl, "its key page")}. Aperture checks the key with ${esc(p.name)} and keeps it on this computer (owner-only file); it is never shown again.</p><div class="an-row"><input id="an-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your ${esc(p.name)} API key">${button(an.busy === "key" ? "Checking…" : "Connect", "an-key-save", "primary", `data-value="${p.id}"`)}</div>`;
+  let model = "";
+  if (p.connected) {
+    loadAnalystModels(p.id);
+    const ids = an.models[p.id]?.ids || [];
+    const value = inUse && o.model ? o.model : pickModel(p.id, ids, p.suggested);
+    model = `<div class="an-row"><label class="an-model">Model <input id="an-model" list="an-list-${p.id}" value="${esc(value)}" spellcheck="false"></label>${modelList(p.id)}${button(inUse ? "Save model" : `Use ${esc(p.name)}`, "an-model-save", "primary", `data-value="${p.id}"`)}</div>${modelNote(p.id)}${inUse ? `<small class="an-tag">In use</small>` : ""}`;
+  }
+  return `${tabs}<div class="an-opt on"><div class="an-opt-body">${connect}${model}</div></div><small class="an-privacy">With an online account, the briefing (Aperture's data for the open stock) and your questions are sent to ${esc(p.name)} and billed to that account. The analyst's rules stay the same: every claim cites its source, and it gives research, not buy or sell advice. ChatGPT Plus and Claude Pro/Max plans can't be used by other apps yet; these accounts are billed separately.</small>`;
+}
+function analystChooser() {
+  const mode = an.mode || (analyst.local === false ? "online" : "local");
+  const tabs = `<div class="segmented an-modes">${button("On this computer", "an-mode", mode === "local" ? "active" : "", 'data-value="local"')}${button("Online account", "an-mode", mode === "online" ? "active" : "", 'data-value="online"')}</div>`;
+  return `<div class="an-choose">${tabs}${an.error ? `<p class="an-error">${esc(an.error)}</p>` : ""}${mode === "local" ? analystLocal() : analystOnlinePane()}</div>`;
+}
+// Setup: choose where the analyst runs, then get it ready.
 function analystSetup(compact) {
-  if (!native) return empty("Aperture Analyst runs on your computer in the desktop app.");
+  if (!native) return empty("Aperture Analyst runs in the desktop app.");
   if (!analyst) return empty("Checking Aperture Analyst…");
   if (analyst.error) return empty(esc(analyst.error));
-  if (!analyst.supported) return empty("Aperture Analyst isn't available for this computer yet.");
-  const j = analyst.job || {};
-  const progress = j.running
-    ? `<div class="an-progress"><div class="an-bar"><i style="width:${j.total ? ((j.done / j.total) * 100).toFixed(1) : 0}%"></i></div><small>${esc(j.stage || "Downloading…")} ${j.total ? `${gb(j.done)} of ${gb(j.total)}` : ""}</small></div>`
-    : `${j.error ? `<p class="an-error">${esc(j.error)}</p>` : ""}${button(j.error ? "Resume download" : `Download Aperture Analyst · ${gb(analyst.downloadBytes)}`, "an-install", "primary")}`;
-  if (compact) return `<p class="muted">Ask questions about ${esc(symbol)} and get answers that cite Aperture's data and web news, written on your computer.</p>${progress}`;
-  return `<div class="an-setup"><h3>Set up Aperture Analyst</h3><p>Aperture Analyst answers questions about the open stock using Aperture's own data (prices, order flow, news, SEC filings, holders, risk) and searches the web for news Aperture missed. Every claim links to its source.</p><ul><li><b>Runs on this computer.</b> Your questions and Aperture's data stay here; only its web searches and the pages it reads go online.</li><li><b>One download, ${gb(analyst.downloadBytes)}:</b> ${esc(analyst.model?.name || "the model")} (${esc(analyst.model?.license || "")}, by Google DeepMind) and the ${esc(analyst.runtime?.name || "llama.cpp")} engine (MIT). Both are checked against published checksums.</li><li><b>Needs about 6 GB of free memory</b> while answering. ${analyst.gpu ? "Uses this Mac's GPU." : "Runs on the processor, so answers take longer on this computer."}</li></ul>${progress}</div>`;
+  if (compact) return `<p class="muted">Ask questions about ${esc(symbol)} and get answers that cite Aperture's data and web news. Run it on your computer or with your own AI account.</p>${analystProgress()}${analyst.job?.running ? "" : button("Set up Aperture Analyst", "stock-view", "primary", 'data-value="ASK"')}`;
+  return `<div class="an-setup"><h3>${analyst.ready ? "Change how Aperture Analyst runs" : "Set up Aperture Analyst"}</h3><p>Aperture Analyst answers questions about the open stock using Aperture's own data (prices, order flow, news, SEC filings, holders, risk) and searches the web for news Aperture missed. Every claim links to its source. Choose the model it uses:</p>${analystChooser()}</div>`;
 }
 function analystTurnHtml(t) {
   const steps = t.steps.length ? `<ol class="an-steps">${t.steps.map((x) => `<li class="${x.error ? "warn" : ""}">${esc(x.text)}</li>`).join("")}</ol>` : "";
@@ -1740,25 +1840,29 @@ function analystTurnHtml(t) {
   return `<div class="an-turn"><div class="an-q">${esc(t.q)}</div>${steps}${body}</div>`;
 }
 function analystBody(full) {
-  if (!native || !analyst?.installed) return analystSetup(!full);
+  if (!native || !analyst?.ready || (full && an.choosing)) return analystSetup(!full);
   const conv = analystConv();
   const turns = full ? conv.turns : conv.turns.slice(-1);
   const quick = `<div class="an-quick">${QUICK_QUESTIONS.map(([label], i) => `<button data-action="an-quick" data-value="${i}" ${conv.busy ? "disabled" : ""}>${esc(label)}</button>`).join("")}</div>`;
   if (!turns.length) return `${quick}<p class="muted an-hint">Ask anything about ${esc(symbol)}: why it's moving, what a filing says, the main risks. Answers cite Aperture's panels and web sources.</p>`;
-  return `${quick}<div class="an-log">${turns.map(analystTurnHtml).join("")}</div>${full ? `<p class="an-note">Written on this computer by Aperture Analyst from the cited sources. It can make mistakes: check the sources. Research, not investment advice.</p>` : ""}`;
+  return `${quick}<div class="an-log">${turns.map(analystTurnHtml).join("")}</div>${full ? `<p class="an-note">Written by Aperture Analyst (${esc(analystWhere())}) from the cited sources. It can make mistakes: check the sources. Research, not investment advice.</p>` : ""}`;
 }
 function analystTile() {
   return `<div data-analyst-slot="tile">${analystBody(false)}</div>`;
 }
 function analystView() {
   const conv = analystConv();
-  const ask = native && analyst?.installed ? `<form class="an-ask" onsubmit="return false"><textarea id="an-input" rows="2" maxlength="1000" placeholder="Ask about ${esc(symbol)}… (Enter to send, Shift+Enter for a new line)" ${conv.busy ? "disabled" : ""}></textarea>${conv.busy ? button("Stop", "an-stop") : button("Ask", "an-ask", "primary")}</form>` : "";
-  return `<section class="panel analyst-panel"><div class="panel-head"><h2>Aperture Analyst <small>research assistant · runs on this computer</small></h2>${conv.turns.length && !conv.busy ? button("New conversation", "an-clear") : ""}</div><div data-analyst-slot="full">${analystBody(true)}</div>${ask}</section>`;
+  const ask = native && analyst?.ready && !an.choosing ? `<form class="an-ask" onsubmit="return false"><textarea id="an-input" rows="2" maxlength="1000" placeholder="Ask about ${esc(symbol)}… (Enter to send, Shift+Enter for a new line)" ${conv.busy ? "disabled" : ""}></textarea>${conv.busy ? button("Stop", "an-stop") : button("Ask", "an-ask", "primary")}</form>` : "";
+  const where = analyst?.ready ? `research assistant · ${esc(analystWhere())}` : "research assistant";
+  const head = analyst?.ready && !conv.busy ? `${conv.turns.length && !an.choosing ? button("New conversation", "an-clear") : ""}${button(an.choosing ? "Back to questions" : "Change model", "an-change")}` : "";
+  return `<section class="panel analyst-panel"><div class="panel-head"><h2>Aperture Analyst <small>${where}</small></h2>${head}</div><div data-analyst-slot="full">${analystBody(true)}</div>${ask}</section>`;
 }
 function paintAnalyst() {
-  document.querySelectorAll("[data-analyst-slot]").forEach((el) => (el.innerHTML = analystBody(el.dataset.analystSlot === "full")));
+  // Don't repaint a form the user is typing in.
+  const typing = (el) => el.contains(document.activeElement) && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) && document.activeElement.id !== "an-input";
+  document.querySelectorAll("[data-analyst-slot]").forEach((el) => typing(el) || (el.innerHTML = analystBody(el.dataset.analystSlot === "full")));
   const box = $("#analyst-settings");
-  if (box) box.innerHTML = analystSettingsBody();
+  if (box && !typing(box)) box.innerHTML = analystSettingsBody();
   const ask = $(".an-ask");
   if (ask) {
     const busy = analystConv().busy;
@@ -1820,7 +1924,7 @@ async function askAnalyst(question, label = question) {
   conv.turns.push(t);
   conv.busy = true;
   paintAnalyst();
-  const messages = [{ role: "system", content: `${systemPrompt({ marketOpen: usMarketOpen() })}\n\n${brief.text}` }, ...history, { role: "user", content: q }];
+  const messages = [{ role: "system", content: `${systemPrompt({ marketOpen: usMarketOpen(), online: analystOnline() })}\n\n${brief.text}` }, ...history, { role: "user", content: q }];
   const allowed = new Set(Object.values(brief.sources).map((x) => x.url && normalUrl(x.url)).filter(Boolean));
   const used = { calls: 0, pages: 0 };
   let w = 1;
@@ -1830,11 +1934,15 @@ async function askAnalyst(question, label = question) {
       const offer = used.calls < 3 && round < 4;
       t.draft = "";
       analystTurns.set(t.id, t);
-      const r = await analystChat(t.id, messages, offer ? ANALYST_TOOLS : []);
+      // The tools stay listed (online models need them for the history);
+      // once the budget is spent they may no longer be called.
+      const r = await analystChat(t.id, messages, ANALYST_TOOLS, offer);
       if (t.cancelled || r.finish === "cancelled") break;
       if (offer && r.tool_calls?.length) {
         const calls = r.tool_calls.slice(0, 2).map((c, i) => ({ ...c, id: c.id || `call_${round}_${i}` }));
-        messages.push({ role: "assistant", content: r.content || "", tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments || "{}" } })) });
+        // `raw` (Anthropic's blocks) and `extra_content` (Gemini's signature)
+        // go back exactly as received.
+        messages.push({ role: "assistant", content: r.content || "", tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments || "{}" }, ...(c.extra_content ? { extra_content: c.extra_content } : {}) })), ...(r.raw ? { raw: r.raw } : {}) });
         for (const c of calls) {
           const out = await runAnalystTool(c, { allowed, used, known: facts.news, next: () => w++ });
           Object.assign(t.sources, out.sources || {});
@@ -1883,12 +1991,74 @@ async function runAnalystTool(call, ctx) {
 }
 function analystSettingsBody() {
   if (!analyst) return empty("Checking…");
-  if (!analyst.installed) return analystSetup(false);
-  return `<p>Installed: ${esc(analyst.model?.name)} (${esc(analyst.model?.license)}, ${gb(analyst.model?.bytes || 0)}) with ${esc(analyst.runtime?.name)} (MIT). ${analyst.running ? "Running now; it stops after 15 minutes without a question to free memory." : "Starts when you ask a question."}</p>${button("Remove Aperture Analyst", "an-remove")}<small>Removing frees about ${gb(analyst.model?.bytes || 0)}. Questions stay on this computer; web searches go to Bing News and pages are read from their publishers.</small>`;
+  if (analyst.error) return empty(esc(analyst.error));
+  const st = analyst;
+  const now = st.ready ? `<p>In use: <b>${esc(analystWhere())}</b>. ${st.local ? (st.choice === "server" ? "Questions go to your model server." : st.running ? "Running now; it stops after 15 minutes without a question to free memory." : "Starts when you ask a question.") : `Questions and the briefing are sent to ${esc(st.online?.name || "the account")}.`}</p>` : `<p class="muted">Not set up yet. Choose how it runs:</p>`;
+  const downloaded = st.model?.installed || st.runtime?.installed;
+  const remove = downloaded ? `${button("Remove downloaded models", "an-remove")}<small>Removes the engine${st.model?.installed ? ` and Gemma 4 (frees about ${gb(st.model.bytes)})` : ""}. Your own model files and accounts aren't touched.</small>` : "";
+  return `${now}${analystChooser()}${remove}<small>Web searches go to Bing News and pages are read from their publishers. Account keys are saved in analyst-keys.json in your app-data folder (owner-only permissions).</small>`;
 }
 function analystPanel() {
   if (!native) return "";
-  return `<section class="panel"><div class="panel-head"><h2>Aperture Analyst <small>AI research assistant on this computer</small></h2></div><div id="analyst-settings">${analystSettingsBody()}</div></section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Aperture Analyst <small>AI research assistant · your choice of model</small></h2></div><div id="analyst-settings">${analystSettingsBody()}</div></section>`;
+}
+// Setup actions; errors show in the setup screen.
+async function analystSetupAction(action, value) {
+  an.error = "";
+  // Only the latest sign-in attempt reports back (a click restarts it).
+  const attempt = action === "an-signin" ? (an.signIns = (an.signIns || 0) + 1) : 0;
+  const stale = () => attempt && attempt !== an.signIns;
+  const field = (id) => ($("#" + id)?.value || "").trim();
+  try {
+    let st = null;
+    if (action === "an-choice") {
+      if (value === "gguf" && !analyst.gguf?.found) st = await analystPickModel();
+      else if (value === "server" && !analyst.server?.url) return $("#an-server-url")?.focus();
+      else st = await analystConfigure({ choice: value });
+    } else if (action === "an-pick") st = await analystPickModel();
+    else if (action === "an-server-save") {
+      const serverUrl = field("an-server-url"),
+        key = field("an-server-key");
+      if (!serverUrl) throw new Error("Enter the server's address first.");
+      // Changing the address deletes the old key, so save the address first.
+      st = await analystConfigure({ choice: "server", serverUrl, serverModel: field("an-server-model") });
+      if (key) st = await analystSetKey("server", key);
+      loadAnalystModels("server", true);
+    } else if (action === "an-signin") {
+      an.busy = "signin";
+      paintAnalyst();
+      st = await analystSignIn();
+      if (stale()) return;
+      an.provider = "openrouter";
+      loadAnalystModels("openrouter", true);
+    } else if (action === "an-key-save") {
+      const key = field("an-key");
+      if (!key) throw new Error("Paste the key first.");
+      an.busy = "key";
+      paintAnalyst();
+      st = await analystSetKey(value, key);
+      loadAnalystModels(value, true);
+    } else if (action === "an-signout") {
+      const name = analyst.online?.providers?.find((p) => p.id === value)?.name || value;
+      if (!confirm(`Disconnect ${name}? The saved key is deleted from this computer.`)) return;
+      st = await analystSignOut(value);
+      delete an.models[value];
+    } else if (action === "an-model-save") {
+      const model = field("an-model");
+      if (!model) throw new Error("Choose a model first.");
+      const ids = an.models[value]?.ids || [];
+      if (ids.length && !ids.includes(model)) throw new Error(`${model} isn't in this account's model list. Pick one from the list.`);
+      st = await analystConfigure({ choice: "online", provider: value, model });
+    }
+    if (st) setAnalyst(st);
+  } catch (e) {
+    if (!stale()) an.error = message(e);
+  } finally {
+    if (!stale()) {
+      an.busy = "";
+      paintAnalyst();
+    }
+  }
 }
 // ---- Holders and ownership changes ----
 function holdersTile() {
@@ -3770,10 +3940,36 @@ async function action(act, value) {
       loadAnalystStatus();
       break;
     case "an-remove":
-      if (!confirm("Remove Aperture Analyst and free about 5 GB? You can download it again later.")) break;
+      if (!confirm("Remove the downloaded AI engine and Gemma 4 model? You can download them again later.")) break;
       await analystRemove();
-      analyst = null;
       loadAnalystStatus();
+      break;
+    case "an-change":
+      an.choosing = !an.choosing;
+      an.error = "";
+      refresh();
+      break;
+    case "an-mode":
+      an.mode = value;
+      an.error = "";
+      paintAnalyst();
+      break;
+    case "an-provider":
+      an.provider = value;
+      an.error = "";
+      paintAnalyst();
+      break;
+    case "an-choice":
+    case "an-pick":
+    case "an-server-save":
+    case "an-signin":
+    case "an-key-save":
+    case "an-signout":
+    case "an-model-save":
+      // Sign-in waits for the browser, so it runs without holding the app's
+      // other buttons.
+      if (act === "an-signin") analystSetupAction(act, value);
+      else await analystSetupAction(act, value);
       break;
     case "an-ask": {
       const input = $("#an-input");

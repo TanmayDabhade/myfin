@@ -73,11 +73,19 @@ export const quantForget = () => call("quant_forget");
 export const quantAnalyze = (input) => call("quant_analyze", { input });
 export const quantAnalyzeBatch = (inputs) => call("quant_analyze_batch", { inputs });
 export const quantCached = (symbols) => call("quant_cached", { symbols });
-// Aperture Analyst: Gemma 4 running on this computer (desktop only).
+// Aperture Analyst (desktop only): a model on this computer or one from the
+// user's online account. Account keys never come back to the window.
 export const analystStatus = () => call("analyst_status");
 export const analystInstall = () => call("analyst_install");
 export const analystRemove = () => call("analyst_remove");
-export const analystChat = (id, messages, tools) => call("analyst_chat", { id, messages, tools });
+export const analystChat = (id, messages, tools, allowTools) => call("analyst_chat", { id, messages, tools, allowTools });
+// { choice?, serverUrl?, serverModel?, provider?, model? }
+export const analystConfigure = (c) => call("analyst_configure", c);
+export const analystPickModel = () => call("analyst_pick_model");
+export const analystSetKey = (provider, key) => call("analyst_set_key", { provider, key });
+export const analystSignOut = (provider) => call("analyst_sign_out", { provider });
+export const analystSignIn = () => call("analyst_sign_in");
+export const analystModels = (target) => call("analyst_models", { target });
 export const analystCancel = () => (native ? invoke("analyst_cancel") : Promise.resolve());
 export const analystNews = (query) => call("analyst_news", { query });
 export const analystRead = (url) => call("analyst_read", { url });

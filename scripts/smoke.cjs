@@ -95,32 +95,61 @@ function fakeBackend() {
     },
     // Aperture Analyst: a scripted stand-in for the local model. First turn
     // asks for a news search; after the tool result it answers with citations.
-    analyst_status: () => ({
-      supported: true,
-      installed: !!window.__anInstalled,
-      model: { name: "Gemma 4 E4B", file: "gemma.gguf", bytes: 4977171584, license: "Apache 2.0" },
-      runtime: { name: "llama.cpp b11927", license: "MIT" },
-      downloadBytes: window.__anInstalled ? 0 : 4993171584,
-      gpu: true,
-      running: false,
-      job: { running: false, stage: "", done: 0, total: 0, error: "" },
-    }),
+    analyst_status: () => {
+      const c = (window.__anCfg ||= { choice: "gemma", provider: "", model: "", keys: {} });
+      const ready = c.choice === "gemma" ? !!window.__anInstalled : c.choice === "online" ? !!c.keys[c.provider] && !!c.model : false;
+      const names = { openrouter: "OpenRouter", openai: "OpenAI", anthropic: "Anthropic (Claude)", gemini: "Google Gemini" };
+      return {
+        supported: true,
+        choice: c.choice,
+        local: c.choice !== "online",
+        ready,
+        installed: ready,
+        model: { name: "Gemma 4 E4B", file: "gemma.gguf", bytes: 4977171584, license: "Apache 2.0", installed: !!window.__anInstalled },
+        runtime: { name: "llama.cpp b11927", license: "MIT", installed: !!window.__anInstalled },
+        gguf: null,
+        server: { url: "", model: "", hasKey: false },
+        online: { provider: c.provider, name: names[c.provider] || "", model: c.model, providers: Object.entries(names).map(([id, name]) => ({ id, name, signIn: id === "openrouter", keyUrl: "https://example.com/keys", suggested: id === "openrouter" ? "anthropic/claude-opus-5.5" : "", connected: !!c.keys[id] })) },
+        downloadBytes: window.__anInstalled ? 0 : 4993171584,
+        gpu: true,
+        running: false,
+        job: { running: false, stage: "", done: 0, total: 0, error: "" },
+      };
+    },
     analyst_install: () => {
       window.__anInstalled = true;
     },
     analyst_remove: () => {
       window.__anInstalled = false;
     },
+    analyst_configure: (args) => {
+      Object.assign(window.__anCfg, Object.fromEntries(Object.entries(args).filter(([, v]) => v != null)));
+      return window.__TAURI__.core.invoke("analyst_status");
+    },
+    analyst_sign_in: () => {
+      Object.assign(window.__anCfg, { choice: "online", provider: "openrouter", model: "anthropic/claude-opus-5.5" });
+      window.__anCfg.keys.openrouter = "sk-or-test";
+      return window.__TAURI__.core.invoke("analyst_status");
+    },
+    analyst_set_key: ({ provider, key }) => {
+      window.__anCfg.keys[provider] = key;
+      return window.__TAURI__.core.invoke("analyst_status");
+    },
+    analyst_sign_out: ({ provider }) => {
+      delete window.__anCfg.keys[provider];
+      return window.__TAURI__.core.invoke("analyst_status");
+    },
+    analyst_models: () => ["anthropic/claude-opus-5.5", "google/gemini-4-argon", "openai/gpt-5.6-sol"],
     analyst_cancel: () => {},
     analyst_news: () => [
       { title: "Fixture Corp faces EU fine over app store", url: "https://news.example.org/eu", source: "Example News", published: "Tue, 10 Nov 2026 13:00:00 GMT", snippet: "Regulators fined the company." },
       { title: "Fixture headline", url: "https://example.com/n", source: "Fixture", published: "", snippet: "" },
     ],
     analyst_read: ({ url }) => ({ url, title: "EU fine", text: "Regulators fined the company. ".repeat(20) }),
-    analyst_chat: ({ id, messages, tools }) => {
+    analyst_chat: ({ id, messages, tools, allowTools }) => {
       window.__anMessages = messages;
       const say = (text) => (window.__anListeners || []).forEach((fn) => fn({ payload: { id, text } }));
-      if (tools.length && !messages.some((m) => m.role === "tool"))
+      if (allowTools && tools.length && !messages.some((m) => m.role === "tool"))
         return { content: "", tool_calls: [{ id: "c1", name: "search_news", arguments: JSON.stringify({ query: "Fixture EU fine" }) }], finish: "tool_calls" };
       const text = "**Lower after an EU fine** [W1].\n- Selling outweighed buying [O]\n- Price and volume [P]";
       say(text);
@@ -379,6 +408,27 @@ async function liveFlow(browser, errors) {
   await page.press("#an-input", "Enter");
   await page.waitForFunction(() => document.querySelectorAll(".an-turn .an-answer:not(.an-draft)").length === 2, null, { timeout: 10000 });
   if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Analyst");
+  // Switching to an online account: sign in, pick a model, and the analyst
+  // is told where it runs.
+  await page.click('[data-action="an-change"]');
+  await page.click('[data-action="an-mode"][data-value="online"]');
+  await page.waitForSelector('[data-action="an-signin"]');
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Analyst setup");
+  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-online.png", fullPage: true });
+  await page.click('[data-action="an-signin"]');
+  await page.waitForSelector("#an-input", { timeout: 10000 });
+  if (!(await page.locator(".analyst-panel h2").innerText()).includes("OpenRouter")) throw Error("Analyst doesn't show the account in use");
+  await page.click('[data-action="an-clear"]');
+  await page.click('[data-action="an-quick"][data-value="3"]');
+  await page.waitForFunction(() => document.querySelectorAll(".an-turn .an-answer:not(.an-draft)").length === 1, null, { timeout: 10000 });
+  const onlineSys = await page.evaluate(() => window.__anMessages[0].content);
+  if (!onlineSys.includes("user's OpenRouter account") || onlineSys.includes("entirely on the user's computer")) throw Error("Analyst not told it runs online");
+  await page.click('[data-action="an-change"]');
+  await page.click('[data-action="an-mode"][data-value="local"]');
+  if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT + "-local.png", fullPage: true });
+  await page.click('[data-action="an-choice"][data-value="gemma"]');
+  await page.waitForSelector("#an-input");
+  if (!(await page.locator(".analyst-panel h2").innerText()).includes("Gemma 4 on this computer")) throw Error("Analyst didn't switch back to Gemma");
   await page.keyboard.press("Escape");
   await page.waitForSelector(".stock-grid");
   // Valuation inputs come from the company's filings.
