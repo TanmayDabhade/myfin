@@ -8,7 +8,7 @@
 <meta name="description" content="A free, open-source desktop app for stock research: one page per stock with holders, ownership changes, valuation, live trades and an S&P 500 market map.">
 <meta property="og:title" content="Aperture">
 <meta property="og:description" content="Free, open-source stock research on your desktop. Load a stock once; every view follows it.">
-<meta property="og:image" content="demo/08-market-map.jpg">
+<meta property="og:image" content="demo/09-market-map.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -60,8 +60,8 @@ a { color: inherit; }
 .hero { padding-block: 28px 30px; display: grid; gap: 22px 56px; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: end; }
 .hero .eyebrow { grid-column: 1 / -1; }
 .hero .side { display: grid; gap: 20px; min-width: 0; }
-.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 4px #3ecf8e22; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: center; line-height: 1.5; }
+.eyebrow .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 4px #3ecf8e22; }
 h1 {
   margin: 0;
   font: 800 clamp(40px, 6.2vw, 80px)/0.92 var(--display);
@@ -202,7 +202,7 @@ footer a { color: var(--muted); }
   </header>
 
   <section class="hero">
-    <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Free · open source · macOS, Windows, Linux · v<span data-version>0.3.0</span></p>
+    <p class="eyebrow"><span class="dot" aria-hidden="true"></span><span>Free · open source · macOS, Windows, Linux · v<span data-version>0.3.0</span></span></p>
     <h1>Load a stock once. Every view follows.</h1>
     <div class="side">
     <p class="lede">Aperture is a desktop app for researching stocks: who owns them and who's selling, what they're worth on their own filings, every trade as it prints, and the whole S&amp;P 500 on one map. It runs on your computer with free data from your own keys.</p>
@@ -271,7 +271,7 @@ footer a { color: var(--muted); }
     </div>
 
     <div class="wide">
-      <img src="demo/08-market-map.jpg" alt="The S&amp;P 500 market map: tiles grouped by sector, sized by market cap, coloured green or red by the day's move." loading="lazy">
+      <img src="demo/09-market-map.jpg" alt="The S&amp;P 500 market map: tiles grouped by sector, sized by market cap, coloured green or red by the day's move." loading="lazy">
       <div>
         <h3>The S&amp;P 500 on one map</h3>
         <p>The Screener opens on every S&amp;P 500 company, grouped by sector, sized by market cap and coloured by the move over a day, week, month, quarter, year to date or year. Click any company to open its page.</p>
