@@ -1,8 +1,10 @@
-//! Aperture Analyst on the desktop: downloads the llama.cpp server and the
-//! Gemma 4 model (checksum-verified), runs the server on 127.0.0.1 behind a
-//! per-session key, streams replies to the window, and gives the analyst its
+//! Aperture Analyst on the desktop: the user's choice of where it runs, the
+//! llama.cpp server and the Gemma 4 model (checksum-verified) for running on
+//! this computer, the server on 127.0.0.1 behind a per-session key, replies
+//! streamed to the window from whichever model was chosen, and the analyst's
 //! two internet tools: a news search and a reader for public web pages.
-use crate::analyst::{self, Download, Reply};
+use crate::analyst::{self, Config, Download, Reply};
+use crate::analyst_online as online;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -32,6 +34,7 @@ pub struct Server {
     child: tokio::process::Child,
     port: u16,
     key: String,
+    model: PathBuf,
 }
 
 #[derive(Default)]
@@ -41,6 +44,57 @@ pub struct Host {
     pub last_used: Mutex<Option<Instant>>,
     /// Bumped by analyst_cancel; a reply in flight stops when it changes.
     pub cancel: AtomicU64,
+    /// Bumped by each sign-in attempt; an older one stops waiting.
+    pub sign_in: AtomicU64,
+}
+
+// ---- Settings ----------------------------------------------------------------
+// Outside the download folder, so removing the downloads keeps them.
+fn config_path(data: &Path) -> PathBuf {
+    data.join("analyst.json")
+}
+fn keys_path(data: &Path) -> PathBuf {
+    data.join("analyst-keys.json")
+}
+pub fn load_config(data: &Path) -> Config {
+    std::fs::read_to_string(config_path(data)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+pub fn save_config(data: &Path, c: &Config) -> Result<(), String> {
+    write_private(&config_path(data), &serde_json::to_string_pretty(c).map_err(|e| e.to_string())?)
+}
+pub fn load_keys(data: &Path) -> analyst::Keys {
+    std::fs::read_to_string(keys_path(data)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+pub fn save_keys(data: &Path, k: &analyst::Keys) -> Result<(), String> {
+    write_private(&keys_path(data), &serde_json::to_string(k).map_err(|e| e.to_string())?)
+}
+/// Writes a file readable only by the current OS user.
+fn write_private(path: &Path, body: &str) -> Result<(), String> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(&tmp).map_err(|_| "Could not save the analyst settings".to_string())?;
+    f.write_all(body.as_bytes()).map_err(|_| "Could not save the analyst settings".to_string())?;
+    drop(f);
+    std::fs::rename(&tmp, path).map_err(|_| "Could not save the analyst settings".to_string())
+}
+
+/// Checks that a file is a GGUF model (it starts with the bytes "GGUF").
+pub fn gguf_ok(path: &Path) -> Result<u64, String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|_| "That file can't be opened.".to_string())?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).map_err(|_| "That file is empty.".to_string())?;
+    if &magic != b"GGUF" {
+        return Err("That isn't a GGUF model file. Choose a .gguf file, e.g. one downloaded from Hugging Face.".into());
+    }
+    Ok(f.metadata().map(|m| m.len()).unwrap_or(0))
 }
 
 pub fn dir(data: &Path) -> PathBuf {
@@ -74,16 +128,39 @@ fn runtime() -> Option<Download> {
 }
 
 pub fn status(host: &Host, data: &Path, running: bool) -> Value {
+    let cfg = load_config(data);
+    let keys = load_keys(data);
     let model = analyst::model();
-    let has_model = std::fs::metadata(model_path(data)).map(|m| m.len() == model.size).unwrap_or(false);
+    let has_gemma = std::fs::metadata(model_path(data)).map(|m| m.len() == model.size).unwrap_or(false);
     let has_runtime = server_exe(data).is_some();
     let rt = runtime();
-    let need = (if has_model { 0 } else { model.size }) + (if has_runtime { 0 } else { rt.as_ref().map_or(0, |r| r.size) });
+    let gguf = (!cfg.gguf.is_empty()).then(|| {
+        let p = Path::new(&cfg.gguf);
+        json!({ "path": cfg.gguf, "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), "bytes": std::fs::metadata(p).map(|m| m.len()).unwrap_or(0), "found": p.is_file() })
+    });
+    let runtime_need = if has_runtime { 0 } else { rt.as_ref().map_or(0, |r| r.size) };
+    let (ready, need) = match cfg.choice() {
+        "gemma" => (rt.is_some() && has_gemma && has_runtime, runtime_need + if has_gemma { 0 } else { model.size }),
+        "gguf" => (rt.is_some() && has_runtime && Path::new(&cfg.gguf).is_file(), runtime_need),
+        "server" => (analyst::server_url(&cfg.server_url).is_ok(), 0),
+        _ => (analyst::provider(&cfg.provider).is_some_and(|p| keys.get(p.id).is_some_and(|k| !k.is_empty())) && !cfg.model.is_empty(), 0),
+    };
+    let providers: Vec<Value> = analyst::PROVIDERS
+        .iter()
+        .map(|p| json!({ "id": p.id, "name": p.name, "signIn": p.sign_in, "keyUrl": p.key_url, "suggested": p.suggested, "connected": keys.get(p.id).is_some_and(|k| !k.is_empty()) }))
+        .collect();
+    let online_name = analyst::provider(&cfg.provider).map(|p| p.name).unwrap_or("");
     json!({
         "supported": rt.is_some(),
-        "installed": has_model && has_runtime,
-        "model": { "name": "Gemma 4 E4B", "file": analyst::MODEL_FILE, "bytes": model.size, "license": "Apache 2.0" },
-        "runtime": { "name": format!("llama.cpp {}", analyst::LLAMA_BUILD), "license": "MIT" },
+        "choice": cfg.choice(),
+        "local": cfg.local(),
+        "ready": ready,
+        "installed": ready,
+        "model": { "name": "Gemma 4 E4B", "file": analyst::MODEL_FILE, "bytes": model.size, "license": "Apache 2.0", "installed": has_gemma },
+        "runtime": { "name": format!("llama.cpp {}", analyst::LLAMA_BUILD), "license": "MIT", "installed": has_runtime },
+        "gguf": gguf,
+        "server": { "url": cfg.server_url, "model": cfg.server_model, "hasKey": keys.get("server").is_some_and(|k| !k.is_empty()) },
+        "online": { "provider": cfg.provider, "name": online_name, "model": cfg.model, "providers": providers },
         "downloadBytes": need,
         "gpu": gpu(),
         "running": running,
@@ -206,7 +283,7 @@ pub async fn install(host: Arc<Host>, data: PathBuf) {
         }
         let model = analyst::model();
         let path = model_path(&data);
-        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) != model.size {
+        if load_config(&data).choice() == "gemma" && std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) != model.size {
             fetch(&host, &client, &model, &path, "Downloading Gemma 4 E4B (about 5 GB)…").await?;
         }
         Ok(())
@@ -238,7 +315,7 @@ pub async fn stop(host: &Host) {
     }
 }
 
-fn session_key() -> String {
+pub fn session_key() -> String {
     let mut h = Sha256::new();
     h.update(format!("{:?}{}{:p}", std::time::SystemTime::now(), std::process::id(), &h).as_bytes());
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
@@ -251,18 +328,19 @@ fn session_key() -> String {
 }
 
 /// Starts the server if needed and waits until the model has loaded.
-async fn ensure(host: &Host, client: &reqwest::Client, data: &Path) -> Result<(u16, String), String> {
+async fn ensure(host: &Host, client: &reqwest::Client, data: &Path, model: PathBuf) -> Result<(u16, String), String> {
     let mut guard = host.server.lock().await;
     if let Some(s) = guard.as_mut() {
-        if s.child.try_wait().ok().flatten().is_none() {
+        if s.model == model && s.child.try_wait().ok().flatten().is_none() {
             return Ok((s.port, s.key.clone()));
         }
+        // A different model was chosen (or the server stopped): start again.
+        let _ = s.child.kill().await;
         *guard = None;
     }
-    let exe = server_exe(data).ok_or("Aperture Analyst isn't installed. Download it first.")?;
-    let model = model_path(data);
+    let exe = server_exe(data).ok_or("The AI engine isn't downloaded yet. Download it in the analyst's setup first.")?;
     if !model.is_file() {
-        return Err("The Gemma 4 model isn't downloaded yet.".into());
+        return Err(if model == model_path(data) { "The Gemma 4 model isn't downloaded yet.".to_string() } else { format!("The model file {} can't be found. Choose it again.", model.display()) });
     }
     let port = std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map_err(|e| e.to_string())?.port();
     let key = session_key();
@@ -280,7 +358,7 @@ async fn ensure(host: &Host, client: &reqwest::Client, data: &Path) -> Result<(u
     let started = Instant::now();
     loop {
         if let Some(code) = child.try_wait().ok().flatten() {
-            return Err(format!("The AI engine stopped while loading the model ({code}). The computer may not have enough free memory (about 6 GB)."));
+            return Err(format!("The AI engine stopped while loading the model ({code}). The computer may not have enough free memory for it, or the file isn't a model llama.cpp can run."));
         }
         if let Ok(r) = client.get(&health).timeout(Duration::from_secs(2)).send().await {
             if r.status().is_success() {
@@ -293,62 +371,79 @@ async fn ensure(host: &Host, client: &reqwest::Client, data: &Path) -> Result<(u
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
-    *guard = Some(Server { child, port, key: key.clone() });
+    *guard = Some(Server { child, port, key: key.clone(), model });
     Ok((port, key))
 }
 
-/// One model turn. Text is streamed to the window as `analyst-delta`
-/// events ({ id, text }); the finished message (text and tool calls) is
-/// returned.
-pub async fn chat(app: &tauri::AppHandle, host: &Host, client: &reqwest::Client, data: &Path, id: String, messages: Value, tools: Value) -> Result<Reply, String> {
+/// One model turn on whichever model the user chose. Text is streamed to
+/// the window as `analyst-delta` events ({ id, text }); the finished message
+/// (text and tool calls) is returned. `allow_tools` false asks for an answer.
+pub async fn chat(app: &tauri::AppHandle, host: &Host, local: &reqwest::Client, data: &Path, id: String, messages: Value, tools: Value, allow_tools: bool) -> Result<Reply, String> {
+    let cfg = load_config(data);
+    let model = match cfg.choice() {
+        "gemma" => model_path(data),
+        "gguf" => PathBuf::from(&cfg.gguf),
+        _ => {
+            stop(host).await;
+            return online::chat(app, host, data, &cfg, &id, &messages, &tools, allow_tools).await;
+        }
+    };
     let _ = app.emit("analyst-delta", json!({ "id": id, "stage": "loading" }));
-    let (port, key) = ensure(host, client, data).await?;
+    let (port, key) = ensure(host, local, data, model).await?;
+    let body = analyst::openai_body("local", "", &messages, &tools, allow_tools);
+    let req = local.post(format!("http://127.0.0.1:{port}/v1/chat/completions")).bearer_auth(&key).timeout(Duration::from_secs(600)).json(&body);
+    stream(app, host, &id, req, "The AI engine", false).await
+}
+
+/// Sends a streamed request and assembles the reply (OpenAI or Anthropic
+/// format), stopping early when the user presses Stop.
+pub async fn stream(app: &tauri::AppHandle, host: &Host, id: &str, req: reqwest::RequestBuilder, who: &str, anthropic: bool) -> Result<Reply, String> {
     if let Ok(mut t) = host.last_used.lock() {
         *t = Some(Instant::now());
     }
     let generation = host.cancel.load(Ordering::SeqCst);
-    let mut body = json!({
-        "messages": messages,
-        "stream": true,
-        "temperature": 0.2,
-        "top_p": 0.9,
-        "max_tokens": 1200,
-    });
-    if tools.as_array().is_some_and(|t| !t.is_empty()) {
-        body["tools"] = tools;
-        body["parallel_tool_calls"] = json!(false);
-    }
-    let mut resp = client
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .bearer_auth(&key)
-        .timeout(Duration::from_secs(600))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("The AI engine didn't answer: {e}"))?;
+    let mut resp = req.send().await.map_err(|e| if e.is_connect() || e.is_timeout() { format!("{who} couldn't be reached. Check that it is running and your connection works.") } else { format!("{who} didn't answer: {e}") })?;
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
-        let text: String = resp.text().await.unwrap_or_default().chars().take(300).collect();
-        return Err(format!("The AI engine returned HTTP {status}. {text}"));
+        let text = resp.text().await.unwrap_or_default();
+        return Err(online::http_error(who, status, &text));
     }
     let _ = app.emit("analyst-delta", json!({ "id": id, "stage": "writing" }));
     let mut reply = Reply::default();
+    let mut claude = analyst::AnthropicStream::default();
     let mut buf = String::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+    let mut cancelled = false;
+    while let Some(chunk) = resp.chunk().await.map_err(|_| format!("The connection to {who} dropped. Ask again."))? {
         if host.cancel.load(Ordering::SeqCst) != generation {
-            reply.finish = "cancelled".into();
+            cancelled = true;
             break;
         }
         buf.push_str(&String::from_utf8_lossy(&chunk));
         let (events, done) = analyst::sse_events(&mut buf);
         for e in &events {
-            if let Some(text) = reply.apply(e) {
+            if let Some(err) = e.get("error").filter(|_| !anthropic) {
+                return Err(format!("{who}: {}", err["message"].as_str().unwrap_or("the model returned an error")));
+            }
+            let text = if anthropic { claude.apply(e) } else { reply.apply(e) };
+            if let Some(text) = text {
                 let _ = app.emit("analyst-delta", json!({ "id": id, "text": text }));
             }
         }
         if done {
             break;
         }
+    }
+    if anthropic {
+        if !claude.error.is_empty() {
+            return Err(format!("{who}: {}", claude.error));
+        }
+        reply = claude.finish();
+    }
+    if cancelled {
+        reply.finish = "cancelled".into();
+    }
+    if reply.finish == "refusal" && reply.content.trim().is_empty() {
+        return Err(format!("{who}'s model declined to answer this question. Try rephrasing it."));
     }
     if let Ok(mut t) = host.last_used.lock() {
         *t = Some(Instant::now());

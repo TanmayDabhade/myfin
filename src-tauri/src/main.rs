@@ -11,6 +11,7 @@ mod legacy;
 mod quant;
 mod analyst;
 mod analyst_host;
+mod analyst_online;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -73,7 +74,7 @@ fn open_reference(path: &std::path::Path) -> rusqlite::Result<Connection> {
     universe::init(&db)?;
     Ok(db)
 }
-// ---- Aperture Analyst (Gemma 4 on this computer) ----------------------------
+// ---- Aperture Analyst (on this computer or through the user's account) ------
 #[tauri::command]
 async fn analyst_status(b: tauri::State<'_, Backend>) -> Result<Value, String> {
     let running = b.analyst.server.try_lock().map(|s| s.is_some()).unwrap_or(true);
@@ -101,10 +102,85 @@ async fn analyst_remove(b: tauri::State<'_, Backend>) -> Result<(), String> {
     analyst_host::remove(&b.analyst, &b.data_dir).await
 }
 #[tauri::command]
-async fn analyst_chat(app: tauri::AppHandle, b: tauri::State<'_, Backend>, id: String, messages: Value, tools: Value) -> Result<Value, String> {
+async fn analyst_chat(app: tauri::AppHandle, b: tauri::State<'_, Backend>, id: String, messages: Value, tools: Value, allow_tools: Option<bool>) -> Result<Value, String> {
     let local = reqwest::Client::builder().no_proxy().build().map_err(|e| e.to_string())?;
-    let reply = analyst_host::chat(&app, &b.analyst, &local, &b.data_dir, id, messages, tools).await?;
+    let allow = allow_tools.unwrap_or_else(|| tools.as_array().is_some_and(|t| !t.is_empty()));
+    let reply = analyst_host::chat(&app, &b.analyst, &local, &b.data_dir, id, messages, tools, allow).await?;
     serde_json::to_value(reply).map_err(|e| e.to_string())
+}
+async fn analyst_now(b: &Backend) -> Value {
+    let running = b.analyst.server.try_lock().map(|s| s.is_some()).unwrap_or(true);
+    analyst_host::status(&b.analyst, &b.data_dir, running)
+}
+/// Changes where the analyst runs. Only the fields sent change.
+#[tauri::command]
+async fn analyst_configure(b: tauri::State<'_, Backend>, choice: Option<String>, server_url: Option<String>, server_model: Option<String>, provider: Option<String>, model: Option<String>) -> Result<Value, String> {
+    let mut c = analyst_host::load_config(&b.data_dir);
+    if let Some(u) = server_url {
+        c.server_url = if u.trim().is_empty() { String::new() } else { analyst::server_url(&u)?.to_string() };
+    }
+    if let Some(m) = server_model {
+        c.server_model = m.trim().chars().take(200).collect();
+    }
+    if let Some(p) = provider {
+        let pr = analyst::provider(&p).ok_or("Unknown account")?;
+        if c.provider != p {
+            c.model = pr.suggested.to_string();
+        }
+        c.provider = p;
+    }
+    if let Some(m) = model {
+        c.model = m.trim().chars().take(200).collect();
+    }
+    if let Some(ch) = choice {
+        if !["gemma", "gguf", "server", "online"].contains(&ch.as_str()) {
+            return Err("Unknown choice".into());
+        }
+        c.choice = ch;
+    }
+    analyst_host::save_config(&b.data_dir, &c)?;
+    Ok(analyst_now(&b).await)
+}
+/// Picks a GGUF model file on this computer and runs the analyst on it.
+#[tauri::command]
+async fn analyst_pick_model(app: tauri::AppHandle, b: tauri::State<'_, Backend>) -> Result<Value, String> {
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_title("Choose a GGUF model file").add_filter("GGUF model", &["gguf"]).blocking_pick_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(picked) = picked else { return Ok(analyst_now(&b).await) };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    analyst_host::gguf_ok(&path)?;
+    let mut c = analyst_host::load_config(&b.data_dir);
+    c.gguf = path.to_string_lossy().to_string();
+    c.choice = "gguf".into();
+    analyst_host::save_config(&b.data_dir, &c)?;
+    Ok(analyst_now(&b).await)
+}
+#[tauri::command]
+async fn analyst_set_key(b: tauri::State<'_, Backend>, provider: String, key: String) -> Result<Value, String> {
+    analyst_online::set_key(&b.data_dir, &provider, &key).await?;
+    Ok(analyst_now(&b).await)
+}
+#[tauri::command]
+async fn analyst_sign_out(b: tauri::State<'_, Backend>, provider: String) -> Result<Value, String> {
+    analyst_online::sign_out(&b.data_dir, &provider)?;
+    Ok(analyst_now(&b).await)
+}
+#[tauri::command]
+async fn analyst_sign_in(app: tauri::AppHandle, b: tauri::State<'_, Backend>) -> Result<Value, String> {
+    analyst_online::sign_in(&app, &b.analyst, &b.data_dir).await?;
+    let mut c = analyst_host::load_config(&b.data_dir);
+    if c.provider != "openrouter" || c.model.is_empty() {
+        c.provider = "openrouter".into();
+        c.model = analyst::provider("openrouter").map(|p| p.suggested.to_string()).unwrap_or_default();
+    }
+    c.choice = "online".into();
+    analyst_host::save_config(&b.data_dir, &c)?;
+    Ok(analyst_now(&b).await)
+}
+#[tauri::command]
+async fn analyst_models(b: tauri::State<'_, Backend>, target: String) -> Result<Vec<String>, String> {
+    analyst_online::models(&b.data_dir, &target).await
 }
 #[tauri::command]
 fn analyst_cancel(b: tauri::State<Backend>) {
@@ -1285,7 +1361,7 @@ fn main() {
                     _ => {}
                 }
             }
-            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone()});let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read]).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
+            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone()});let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read,analyst_configure,analyst_pick_model,analyst_set_key,analyst_sign_out,analyst_sign_in,analyst_models]).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
         // Never leave the AI engine running (and holding memory) after quitting.
         if let tauri::RunEvent::Exit=event{let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::block_on(analyst_host::stop(&host));}
     });

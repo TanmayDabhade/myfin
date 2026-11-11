@@ -1,10 +1,13 @@
-//! Aperture Analyst: Google's Gemma 4 E4B running on the user's computer
-//! through llama.cpp's server. This module holds the pure parts (what to
-//! download, how to start the server, news search, readable page text, URL
-//! safety and the streamed reply); downloads and the server process live in
-//! the desktop binary.
-use serde::Serialize;
-use serde_json::Value;
+//! Aperture Analyst. The user picks where it runs: on this computer
+//! (Google's Gemma 4 E4B or their own GGUF model through llama.cpp's server,
+//! or a model server they already run, such as Ollama) or through an online
+//! account (OpenRouter, OpenAI, Anthropic or Google Gemini). This module
+//! holds the pure parts (what to download, how to start the server, the
+//! settings, each provider's request and streamed reply, news search,
+//! readable page text and URL safety); downloads, sign-in and the server
+//! process live in the desktop binary.
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::net::IpAddr;
 
 /// llama.cpp build the app runs. Pinned with checksums: the files come from
@@ -339,6 +342,319 @@ pub fn public_url(raw: &str) -> Result<reqwest::Url, String> {
     Ok(u)
 }
 
+// ---- Where the analyst runs -------------------------------------------------
+
+/// The settings file (`analyst.json` in the app-data folder). Keys are kept
+/// apart, in `analyst-keys.json`, and never sent to the window.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Config {
+    /// "gemma" (the download), "gguf" (the user's model file), "server" (a
+    /// model server already running) or "online" (an account).
+    pub choice: String,
+    pub gguf: String,
+    pub server_url: String,
+    pub server_model: String,
+    pub provider: String,
+    pub model: String,
+}
+impl Config {
+    pub fn choice(&self) -> &str {
+        match self.choice.as_str() {
+            "gguf" | "server" | "online" => &self.choice,
+            _ => "gemma",
+        }
+    }
+    pub fn local(&self) -> bool {
+        self.choice() != "online"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Style {
+    OpenAi,
+    Anthropic,
+}
+pub struct Provider {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base: &'static str,
+    pub style: Style,
+    /// Where the user gets a key from their account.
+    pub key_url: &'static str,
+    /// Signs in through the browser instead of a pasted key.
+    pub sign_in: bool,
+    /// Picked when the account offers it and the user hasn't chosen.
+    pub suggested: &'static str,
+}
+pub const PROVIDERS: [Provider; 4] = [
+    Provider { id: "openrouter", name: "OpenRouter", base: "https://openrouter.ai/api/v1", style: Style::OpenAi, key_url: "https://openrouter.ai/settings/keys", sign_in: true, suggested: "anthropic/claude-opus-5.5" },
+    Provider { id: "openai", name: "OpenAI", base: "https://api.openai.com/v1", style: Style::OpenAi, key_url: "https://platform.openai.com/api-keys", sign_in: false, suggested: "" },
+    Provider { id: "anthropic", name: "Anthropic (Claude)", base: "https://api.anthropic.com/v1", style: Style::Anthropic, key_url: "https://platform.claude.com/settings/keys", sign_in: false, suggested: "claude-opus-5-5" },
+    Provider { id: "gemini", name: "Google Gemini", base: "https://generativelanguage.googleapis.com/v1beta/openai", style: Style::OpenAi, key_url: "https://aistudio.google.com/apikey", sign_in: false, suggested: "" },
+];
+pub fn provider(id: &str) -> Option<&'static Provider> {
+    PROVIDERS.iter().find(|p| p.id == id)
+}
+
+/// Saved account keys, by provider id, plus "server" for a local server
+/// that wants one.
+pub type Keys = std::collections::BTreeMap<String, String>;
+
+/// A model server the user runs. Plain http only on this computer; anything
+/// else must be https so a key and the briefing aren't sent in the clear.
+pub fn server_url(raw: &str) -> Result<reqwest::Url, String> {
+    let mut u = reqwest::Url::parse(raw.trim()).map_err(|_| "Enter the server's address, e.g. http://localhost:11434/v1".to_string())?;
+    let host = u.host_str().unwrap_or("").trim_matches(['[', ']']).to_ascii_lowercase();
+    let loopback = host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    match u.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        "http" => return Err("Use https for a server on another computer (plain http is only allowed on this one).".into()),
+        _ => return Err("The address must start with http:// or https://".into()),
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err("Put the key in the key box, not in the address.".into());
+    }
+    u.set_query(None);
+    u.set_fragment(None);
+    let path = u.path().trim_end_matches('/').trim_end_matches("/chat/completions").to_string();
+    u.set_path(&path);
+    Ok(u)
+}
+
+/// The model list endpoint's ids, chat models first and sorted.
+pub fn model_ids(v: &Value) -> Vec<String> {
+    let items = v["data"].as_array().or_else(|| v["models"].as_array()).cloned().unwrap_or_default();
+    let mut ids: Vec<String> = items
+        .iter()
+        .filter_map(|m| m["id"].as_str().or_else(|| m["name"].as_str()))
+        .map(|s| s.trim_start_matches("models/").to_string())
+        .filter(|id| {
+            let l = id.to_ascii_lowercase();
+            !["embed", "tts", "whisper", "dall-e", "image", "audio", "moderation", "transcribe", "realtime", "veo", "imagen", "aqa", ":batch"].iter().any(|x| l.contains(x))
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Request body in OpenAI's chat-completions format, for llama.cpp, model
+/// servers, OpenRouter, OpenAI and Gemini. `allow_tools` false still sends
+/// the tools to remote models (the history refers to them) but forbids new
+/// calls.
+pub fn openai_body(target: &str, model: &str, messages: &Value, tools: &Value, allow_tools: bool) -> Value {
+    let msgs: Vec<Value> = messages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|m| {
+            let mut m = m.clone();
+            if let Some(o) = m.as_object_mut() {
+                o.remove("raw");
+                if target == "openai" && o.get("role").and_then(|r| r.as_str()) == Some("tool") {
+                    o.remove("name");
+                }
+            }
+            m
+        })
+        .collect();
+    let mut body = json!({ "messages": msgs, "stream": true });
+    if !model.is_empty() {
+        body["model"] = json!(model);
+    }
+    match target {
+        "local" => {
+            body["temperature"] = json!(0.2);
+            body["top_p"] = json!(0.9);
+            body["max_tokens"] = json!(1200);
+        }
+        // Reasoning models refuse sampling settings and count their
+        // reasoning in the completion budget.
+        "openai" => body["max_completion_tokens"] = json!(16000),
+        _ => {
+            body["temperature"] = json!(0.2);
+            body["max_tokens"] = json!(8000);
+        }
+    }
+    let has_tools = tools.as_array().is_some_and(|t| !t.is_empty());
+    if has_tools && (allow_tools || target != "local") {
+        body["tools"] = tools.clone();
+        if !allow_tools {
+            body["tool_choice"] = json!("none");
+        } else if target != "gemini" {
+            body["parallel_tool_calls"] = json!(false);
+        }
+    }
+    body
+}
+
+/// Models that take the server-side refusal fallback (`fallbacks: "default"`).
+pub fn anthropic_fallbacks(model: &str) -> bool {
+    matches!(model, "claude-fable-5-2" | "claude-fable-5-1" | "claude-opus-5-5" | "claude-opus-5" | "claude-sonnet-5-5")
+}
+
+/// The same conversation as an Anthropic Messages API request. System text
+/// moves to `system`, tool results from one round go in one user message,
+/// and an assistant turn with `raw` blocks is sent back exactly as received.
+/// Tools stay the same every round; `allow_tools` false sets tool_choice
+/// none instead, so the conversation's thinking blocks remain valid.
+pub fn anthropic_body(model: &str, messages: &Value, tools: &Value, allow_tools: bool) -> Value {
+    let mut system = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    for m in messages.as_array().into_iter().flatten() {
+        let text = m["content"].as_str().unwrap_or("").to_string();
+        match m["role"].as_str().unwrap_or("") {
+            "system" => system.push(text),
+            "assistant" => {
+                let content = if m["raw"].is_array() {
+                    m["raw"].clone()
+                } else {
+                    let mut blocks = Vec::new();
+                    if !text.trim().is_empty() {
+                        blocks.push(json!({ "type": "text", "text": text }));
+                    }
+                    for c in m["tool_calls"].as_array().into_iter().flatten() {
+                        let input: Value = serde_json::from_str(c["function"]["arguments"].as_str().unwrap_or("{}")).ok().filter(Value::is_object).unwrap_or_else(|| json!({}));
+                        blocks.push(json!({ "type": "tool_use", "id": c["id"], "name": c["function"]["name"], "input": input }));
+                    }
+                    if blocks.is_empty() {
+                        blocks.push(json!({ "type": "text", "text": "…" }));
+                    }
+                    Value::Array(blocks)
+                };
+                out.push(json!({ "role": "assistant", "content": content }));
+            }
+            "tool" => {
+                let block = json!({ "type": "tool_result", "tool_use_id": m["tool_call_id"], "content": text });
+                let merge = out.last().is_some_and(|l| l["role"] == "user" && l["content"].as_array().is_some_and(|c| c.iter().all(|b| b["type"] == "tool_result")));
+                if let Some(c) = out.last_mut().filter(|_| merge).and_then(|l| l["content"].as_array_mut()) {
+                    c.push(block);
+                } else {
+                    out.push(json!({ "role": "user", "content": [block] }));
+                }
+            }
+            _ => out.push(json!({ "role": "user", "content": text })),
+        }
+    }
+    let mut body = json!({ "model": model, "max_tokens": 16000, "stream": true, "messages": out });
+    if !system.is_empty() {
+        body["system"] = json!(system.join("\n\n"));
+    }
+    let tools: Vec<Value> = tools
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| json!({ "name": t["function"]["name"], "description": t["function"]["description"], "input_schema": t["function"]["parameters"] }))
+        .collect();
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+        body["tool_choice"] = if allow_tools { json!({ "type": "auto", "disable_parallel_tool_use": true }) } else { json!({ "type": "none" }) };
+    }
+    if anthropic_fallbacks(model) {
+        body["fallbacks"] = json!("default");
+    }
+    body
+}
+
+/// Builds a [`Reply`] from Anthropic's streamed events.
+#[derive(Default, Debug)]
+pub struct AnthropicStream {
+    blocks: Vec<Value>,
+    inputs: Vec<String>,
+    stop: String,
+    pub error: String,
+}
+impl AnthropicStream {
+    /// Applies one event; returns new answer text to show, if any.
+    pub fn apply(&mut self, ev: &Value) -> Option<String> {
+        let i = ev["index"].as_u64().unwrap_or(0).min(63) as usize;
+        match ev["type"].as_str()? {
+            "content_block_start" => {
+                while self.blocks.len() <= i {
+                    self.blocks.push(Value::Null);
+                    self.inputs.push(String::new());
+                }
+                let mut b = ev["content_block"].clone();
+                if b["type"] == "tool_use" {
+                    b["input"] = json!({});
+                }
+                self.blocks[i] = b;
+                None
+            }
+            "content_block_delta" => {
+                let d = &ev["delta"];
+                let b = self.blocks.get_mut(i)?;
+                let add = |b: &mut Value, key: &str, s: &str| {
+                    let now = b[key].as_str().unwrap_or("").to_string() + s;
+                    b[key] = json!(now);
+                };
+                match d["type"].as_str()? {
+                    "text_delta" => {
+                        let t = d["text"].as_str().filter(|t| !t.is_empty())?;
+                        add(b, "text", t);
+                        return Some(t.to_string());
+                    }
+                    "input_json_delta" => self.inputs[i].push_str(d["partial_json"].as_str().unwrap_or("")),
+                    "thinking_delta" => add(b, "thinking", d["thinking"].as_str().unwrap_or("")),
+                    "signature_delta" => add(b, "signature", d["signature"].as_str().unwrap_or("")),
+                    _ => {}
+                }
+                None
+            }
+            "content_block_stop" => {
+                if let Some(b) = self.blocks.get_mut(i).filter(|b| b["type"] == "tool_use") {
+                    b["input"] = serde_json::from_str::<Value>(&self.inputs[i]).ok().filter(Value::is_object).unwrap_or_else(|| json!({}));
+                }
+                None
+            }
+            "message_delta" => {
+                if let Some(r) = ev["delta"]["stop_reason"].as_str() {
+                    self.stop = r.to_string();
+                }
+                None
+            }
+            "error" => {
+                self.error = ev["error"]["message"].as_str().unwrap_or("The model service returned an error.").to_string();
+                None
+            }
+            _ => None,
+        }
+    }
+    pub fn finish(self) -> Reply {
+        let blocks: Vec<Value> = self.blocks.into_iter().filter(|b| !b.is_null()).collect();
+        // After a mid-answer fallback to another model, the blocks before the
+        // last fallback marker other than text are not sent back.
+        let boundary = blocks.iter().rposition(|b| b["type"] == "fallback");
+        let kept: Vec<Value> = blocks
+            .into_iter()
+            .enumerate()
+            .filter(|(n, b)| boundary.is_none_or(|f| *n >= f || b["type"] == "text"))
+            .map(|(_, b)| b)
+            .collect();
+        let mut r = Reply::default();
+        for b in &kept {
+            match b["type"].as_str() {
+                Some("text") => r.content.push_str(b["text"].as_str().unwrap_or("")),
+                Some("tool_use") => r.tool_calls.push(ToolCall {
+                    id: b["id"].as_str().unwrap_or("").to_string(),
+                    name: b["name"].as_str().unwrap_or("").to_string(),
+                    arguments: b["input"].to_string(),
+                    extra: None,
+                }),
+                _ => {}
+            }
+        }
+        r.finish = match self.stop.as_str() {
+            "tool_use" => "tool_calls".into(),
+            other => other.to_string(),
+        };
+        r.raw = Some(Value::Array(kept));
+        r
+    }
+}
+
 // ---- Streamed reply ---------------------------------------------------------
 
 /// The assistant message assembled from llama-server's streamed chunks
@@ -348,12 +664,20 @@ pub struct Reply {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish: String,
+    /// Anthropic only: the assistant's content blocks exactly as sent
+    /// (thinking included), to send back unchanged on the next round.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<Value>,
 }
 #[derive(Default, Debug, Serialize, Clone, PartialEq)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Provider data that must come back with the call (Gemini's thought
+    /// signature arrives here).
+    #[serde(rename = "extra_content", skip_serializing_if = "Option::is_none")]
+    pub extra: Option<Value>,
 }
 
 impl Reply {
@@ -379,6 +703,9 @@ impl Reply {
             }
             if let Some(a) = tc["function"]["arguments"].as_str() {
                 call.arguments.push_str(a);
+            }
+            if tc.get("extra_content").is_some_and(|x| !x.is_null()) {
+                call.extra = Some(tc["extra_content"].clone());
             }
         }
         let text = delta["content"].as_str().filter(|t| !t.is_empty())?;
@@ -488,7 +815,123 @@ mod tests {
         assert_eq!(shown, vec!["Hel", "lo"]);
         assert_eq!(r.content, "Hello");
         assert_eq!(r.finish, "tool_calls");
-        assert_eq!(r.tool_calls, vec![ToolCall { id: "c1".into(), name: "search_news".into(), arguments: r#"{"query":"AAPL"}"#.into() }]);
+        assert_eq!(r.tool_calls, vec![ToolCall { id: "c1".into(), name: "search_news".into(), arguments: r#"{"query":"AAPL"}"#.into(), extra: None }]);
         assert_eq!(r.apply(&json!({"choices":[]})), None);
     }
+
+    fn convo() -> Value {
+        json!([
+            { "role": "system", "content": "Rules" },
+            { "role": "user", "content": "Why?" },
+            { "role": "assistant", "content": "", "tool_calls": [{ "id": "c1", "type": "function", "function": { "name": "search_news", "arguments": "{\"query\":\"AAPL\"}" }, "extra_content": { "google": { "thought_signature": "sig" } } }], "raw": [{ "type": "thinking", "thinking": "hm", "signature": "s" }, { "type": "tool_use", "id": "c1", "name": "search_news", "input": { "query": "AAPL" } }] },
+            { "role": "tool", "tool_call_id": "c1", "name": "search_news", "content": "W1 result" },
+            { "role": "tool", "tool_call_id": "c2", "name": "read_page", "content": "W2 page" },
+        ])
+    }
+    fn tools() -> Value {
+        json!([{ "type": "function", "function": { "name": "search_news", "description": "Search", "parameters": { "type": "object" } } }])
+    }
+
+    #[test]
+    fn openai_style_bodies_per_target() {
+        let local = openai_body("local", "", &convo(), &tools(), false);
+        assert!(local.get("tools").is_none() && local.get("model").is_none());
+        assert_eq!(local["max_tokens"], 1200);
+        assert!(local["messages"][2].get("raw").is_none());
+        assert_eq!(local["messages"][2]["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "sig");
+        let oa = openai_body("openai", "gpt-x", &convo(), &tools(), true);
+        assert_eq!(oa["model"], "gpt-x");
+        assert!(oa.get("temperature").is_none() && oa["max_completion_tokens"] == 16000);
+        assert!(oa["messages"][3].get("name").is_none());
+        assert_eq!(oa["parallel_tool_calls"], false);
+        let gm = openai_body("gemini", "gemini-x", &convo(), &tools(), false);
+        assert_eq!(gm["tool_choice"], "none");
+        assert!(gm.get("parallel_tool_calls").is_none() && gm["messages"][3]["name"] == "search_news");
+    }
+
+    #[test]
+    fn converts_a_conversation_for_anthropic() {
+        let b = anthropic_body("claude-opus-5-5", &convo(), &tools(), true);
+        assert_eq!(b["system"], "Rules");
+        assert!(b.get("temperature").is_none());
+        assert_eq!(b["fallbacks"], "default");
+        let m = b["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[1]["content"][0]["type"], "thinking");
+        assert_eq!(m[2]["content"].as_array().unwrap().len(), 2, "both tool results in one user message");
+        assert_eq!(m[2]["content"][1]["tool_use_id"], "c2");
+        assert_eq!(b["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(b["tool_choice"]["type"], "auto");
+        let last = anthropic_body("claude-haiku-4-5", &convo(), &tools(), false);
+        assert_eq!(last["tool_choice"]["type"], "none");
+        assert!(last.get("fallbacks").is_none());
+        let plain = anthropic_body("m", &json!([{ "role": "user", "content": "q" }, { "role": "assistant", "content": "", "tool_calls": [{ "id": "x", "function": { "name": "read_page", "arguments": "not json" } }] }]), &json!([]), true);
+        assert_eq!(plain["messages"][1]["content"][0]["input"], json!({}));
+        assert!(plain.get("tools").is_none());
+    }
+
+    #[test]
+    fn reads_anthropic_streams() {
+        let evs = [
+            json!({ "type": "message_start", "message": {} }),
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "Let me" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "abc" } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text", "text": "" } }),
+            json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "Checking." } }),
+            json!({ "type": "content_block_start", "index": 2, "content_block": { "type": "tool_use", "id": "t1", "name": "search_news", "input": {} } }),
+            json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "{\"query\":" } }),
+            json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "\"AAPL\"}" } }),
+            json!({ "type": "content_block_stop", "index": 2 }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+        ];
+        let mut s = AnthropicStream::default();
+        let shown: Vec<String> = evs.iter().filter_map(|e| s.apply(e)).collect();
+        assert_eq!(shown, vec!["Checking."]);
+        let r = s.finish();
+        assert_eq!(r.finish, "tool_calls");
+        assert_eq!(r.content, "Checking.");
+        assert_eq!(r.tool_calls[0].name, "search_news");
+        assert_eq!(serde_json::from_str::<Value>(&r.tool_calls[0].arguments).unwrap()["query"], "AAPL");
+        let raw = r.raw.unwrap();
+        assert_eq!(raw[0]["thinking"], "Let me");
+        assert_eq!(raw[0]["signature"], "abc");
+        assert_eq!(raw[2]["input"]["query"], "AAPL");
+
+        // A mid-answer fallback: the declined model's thinking and tool call are dropped.
+        let mut f = AnthropicStream::default();
+        for e in [
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking", "thinking": "x", "signature": "s" } }),
+            json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text", "text": "Part" } }),
+            json!({ "type": "content_block_start", "index": 2, "content_block": { "type": "tool_use", "id": "old", "name": "read_page" } }),
+            json!({ "type": "content_block_start", "index": 3, "content_block": { "type": "fallback", "from": { "model": "a" }, "to": { "model": "b" } } }),
+            json!({ "type": "content_block_start", "index": 4, "content_block": { "type": "text", "text": " done" } }),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } }),
+        ] {
+            f.apply(&e);
+        }
+        let r = f.finish();
+        let kinds: Vec<&str> = r.raw.as_ref().unwrap().as_array().unwrap().iter().map(|b| b["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, vec!["text", "fallback", "text"]);
+        assert!(r.tool_calls.is_empty());
+        assert_eq!(r.content, "Part done");
+        assert_eq!(r.finish, "end_turn");
+    }
+
+    #[test]
+    fn settings_and_server_addresses() {
+        assert_eq!(Config::default().choice(), "gemma");
+        assert!(!Config { choice: "online".into(), ..Default::default() }.local());
+        assert_eq!(server_url("http://localhost:11434/v1/").unwrap().as_str(), "http://localhost:11434/v1");
+        assert_eq!(server_url("http://127.0.0.1:1234/v1/chat/completions").unwrap().as_str(), "http://127.0.0.1:1234/v1");
+        assert!(server_url("https://llm.example.com/v1").is_ok());
+        for bad in ["http://192.168.1.5:11434/v1", "ftp://localhost/", "https://u:p@example.com/v1", "nonsense"] {
+            assert!(server_url(bad).is_err(), "{bad}");
+        }
+        let ids = model_ids(&json!({ "data": [{ "id": "b-chat" }, { "id": "text-embedding-3" }, { "id": "a-chat" }, { "id": "models/gemini-x" }, { "id": "a-chat:batch" }] }));
+        assert_eq!(ids, vec!["a-chat", "b-chat", "gemini-x"]);
+        assert!(provider("openrouter").unwrap().sign_in && provider("nope").is_none());
+    }
+
 }
