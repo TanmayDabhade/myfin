@@ -12,6 +12,7 @@ mod quant;
 mod analyst;
 mod analyst_host;
 mod analyst_online;
+mod lab;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -244,6 +245,22 @@ async fn export_file(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+fn lab_put(b: tauri::State<Backend>, kind: String, id: String, parent: Option<String>, body: String, immutable: bool) -> Result<(), String> {
+    let db = b.db.lock().map_err(|_| "Database unavailable")?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    lab::put(&db, &kind, &id, parent.as_deref(), &body, immutable, now)
+}
+#[tauri::command]
+fn lab_get(b: tauri::State<Backend>, kind: String, id: String) -> Result<Option<String>, String> {
+    let db = b.db.lock().map_err(|_| "Database unavailable")?;
+    lab::get(&db, &kind, &id)
+}
+#[tauri::command]
+fn lab_list(b: tauri::State<Backend>, kind: String, parent: Option<String>) -> Result<Vec<String>, String> {
+    let db = b.db.lock().map_err(|_| "Database unavailable")?;
+    lab::list(&db, &kind, parent.as_deref())
 }
 #[tauri::command]
 fn load_state(b: tauri::State<Backend>) -> Result<Value, String> {
@@ -1371,7 +1388,7 @@ fn main() {
                     _ => {}
                 }
             }
-            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone()});let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read,analyst_configure,analyst_pick_model,analyst_set_key,analyst_sign_out,analyst_sign_in,analyst_models]).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
+            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;db.execute_batch(lab::SCHEMA)?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone()});let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![lab_put,lab_get,lab_list,quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read,analyst_configure,analyst_pick_model,analyst_set_key,analyst_sign_out,analyst_sign_in,analyst_models]).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
         // Never leave the AI engine running (and holding memory) after quitting.
         if let tauri::RunEvent::Exit=event{let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::block_on(analyst_host::stop(&host));}
     });

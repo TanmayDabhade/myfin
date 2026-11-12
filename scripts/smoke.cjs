@@ -8,8 +8,10 @@ function fakeBackend() {
     v === undefined ? JSON.parse(localStorage.getItem(k) || "null") : localStorage.setItem(k, JSON.stringify(v));
   const bars = (n) =>
     Array.from({ length: n }, (_, i) => {
-      const d = new Date(Date.UTC(2026, 6, 1) + i * 864e5).toISOString().slice(0, 10);
-      const c = 100 + Math.sin(i / 5) * 8 + i * 0.2;
+      // Always ends on the same day; longer histories reach further back.
+      const k = i + 80 - n;
+      const d = new Date(Date.UTC(2026, 6, 1) + k * 864e5).toISOString().slice(0, 10);
+      const c = 100 + Math.sin(k / 5) * 8 + k * 0.2;
       return { datetime: d, open: String(c - 1), high: String(c + 2), low: String(c - 2), close: String(c), volume: "1000000" };
     }).reverse();
   const handlers = {
@@ -19,6 +21,21 @@ function fakeBackend() {
     quant_cached: () => ({}),
     quant_choose: () => null,
     quant_forget: (a) => window.__quantStandin.status(a),
+    // Quant Lab records, with the desktop store's write-once rule.
+    lab_put: ({ kind, id, parent, body, immutable }) => {
+      const all = store("native-lab") || {};
+      const k = kind + ":" + id;
+      const once = immutable || ["snapshot", "run", "selection", "holdout", "event"].includes(kind);
+      if (all[k] && (once || all[k].immutable) && all[k].body !== body) throw "This " + kind + " is already recorded and can't be changed.";
+      all[k] = { kind, parent, body, immutable: once, created: all[k]?.created || Date.now() + Object.keys(all).length / 1e6 };
+      store("native-lab", all);
+    },
+    lab_get: ({ kind, id }) => (store("native-lab") || {})[kind + ":" + id]?.body ?? null,
+    lab_list: ({ kind, parent }) =>
+      Object.values(store("native-lab") || {})
+        .filter((r) => r.kind === kind && (parent == null || r.parent === parent))
+        .sort((x, y) => x.created - y.created)
+        .map((r) => r.body),
     load_state: () => store("native-state"),
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
@@ -45,7 +62,7 @@ function fakeBackend() {
         }
         return wrap({ status: "ok", values: values.reverse() });
       }
-      if (provider === "twelve") return wrap({ status: "ok", values: bars(80) });
+      if (provider === "twelve") return wrap({ status: "ok", values: bars(300) });
       if (provider === "finnhub") {
         if (kind === "company-news") return wrap([{ headline: "Fixture headline", url: "https://example.com/n", source: "Fixture", datetime: 1794070000, summary: "Test" }]);
         if (kind === "metric") return wrap({ metric: { peTTM: 30, dividendYieldIndicatedAnnual: 0.5, netProfitMarginTTM: 25 } });
@@ -334,6 +351,61 @@ async function pickCompany(page, q) {
   await page.waitForSelector(".combo-item");
   await page.press("#graph-search", "Enter");
 }
+const shots = process.env.QL_SHOTS;
+// Quant Lab on demo data: a parameter sweep runs in the worker, two
+// candidates are frozen, the holdout is evaluated once, and a run opens.
+async function quantLabFlow(page) {
+  const shot = (n) => shots && page.screenshot({ path: `${shots}/${n}.png`, fullPage: true });
+  await page.click('[data-page="Quant Lab"]');
+  await page.waitForSelector("h1:has-text('Quant Lab')");
+  await page.click('[data-action="ql-new"]');
+  await page.waitForSelector(".ql-cov:has-text('daily bars')");
+  await page.fill('[data-ql="name"]', "AAPL trend sweep");
+  await page.click('[data-action="ql-mode"][data-value="sweep"]');
+  await page.waitForSelector("text=valid combinations");
+  await shot("1-new");
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Quant Lab setup");
+  await page.click('[data-action="ql-run"]');
+  await page.waitForSelector(".panel-head h2:has-text('Complete')", { timeout: 60000 });
+  await page.click('[data-action="ql-tab"][data-value="leaderboard"]');
+  await page.waitForSelector("[data-ql-pick]");
+  await shot("2-leaderboard");
+  if (await page.locator("body").evaluate((el) => el.scrollWidth > innerWidth)) throw Error("Overflow on Quant Lab leaderboard");
+  await page.locator("[data-ql-pick]").nth(0).check();
+  await page.locator("[data-ql-pick]").nth(1).check();
+  await page.click('[data-action="ql-freeze"]');
+  await page.waitForSelector('[data-action="ql-holdout-ask"]');
+  await page.click('[data-action="ql-holdout-ask"]');
+  await page.click('[data-action="ql-holdout"]');
+  await page.waitForSelector("text=Holdout evaluated · untouched");
+  if (await page.locator('[data-action="ql-holdout-ask"]').count()) throw Error("Holdout offered twice");
+  await shot("3-holdout");
+  await page.locator('[data-action="ql-inspect"]').first().click();
+  await page.waitForSelector('[data-ql-chart="equity"] svg');
+  await page.waitForSelector('[data-ql-chart="price"] svg');
+  await page.waitForSelector('[data-action="ql-split"][data-value="holdout"]');
+  await shot("4-run");
+  await page.click('[data-action="ql-rtab"][data-value="data"]');
+  await page.waitForSelector("text=Manifest SHA-256");
+  await page.reload();
+  await page.click('[data-page="Quant Lab"]');
+  const home = await page.locator("tbody").first().innerText();
+  if (!home.includes("AAPL trend sweep") || !home.includes("Holdout evaluated")) throw Error("Quant Lab experiment not persisted");
+  await shot("5-home");
+  // A long discovery can be cancelled and keeps what it finished.
+  await page.click('[data-action="ql-new"]');
+  await page.waitForSelector(".ql-cov:has-text('daily bars')");
+  await page.click('[data-action="ql-mode"][data-value="discovery"]');
+  await page.fill('[data-ql="discovery.generations"]', "40");
+  await page.fill('[data-ql="discovery.population"]', "80");
+  await page.fill('[data-ql="budget"]', "2000");
+  await page.click('[data-action="ql-run"]');
+  await page.waitForSelector('[data-action="ql-cancel"], .ql-errors', { timeout: 30000 });
+  if (await page.locator(".ql-errors").count()) throw Error("Discovery not started: " + (await page.locator(".ql-errors").innerText()));
+  await page.click('[data-action="ql-cancel"]');
+  await page.waitForSelector(".panel-head h2:has-text('Cancelled')", { timeout: 60000 });
+  await page.waitForSelector("text=Incomplete: stopped before");
+}
 async function liveFlow(browser, errors) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.addInitScript(quantStandin);
@@ -607,6 +679,14 @@ async function liveFlow(browser, errors) {
   await page.click('[data-page="Screener"]');
   await page.click('[data-action="screen-universe"][data-value="workspace"]');
   await page.waitForSelector("text=Visual screener");
+  // Quant Lab through the desktop store and the live price loader.
+  await page.click('[data-page="Quant Lab"]');
+  await page.click('[data-action="ql-new"]');
+  await page.waitForSelector(".ql-cov:has-text('daily bars')");
+  await page.click('[data-action="ql-run"]');
+  await page.waitForSelector(".panel-head h2:has-text('Complete')", { timeout: 60000 });
+  const saved = await page.evaluate(() => Object.keys(JSON.parse(localStorage.getItem("native-lab") || "{}")));
+  if (!saved.some((k) => k.startsWith("experiment:")) || !saved.some((k) => k.startsWith("snapshot:"))) throw Error("Quant Lab did not use the desktop store");
   await context.close();
 }
 const server = spawn(
@@ -714,12 +794,13 @@ const server = spawn(
     if ((await page.locator('input[type="file"]:visible').count()) !== 0)
       throw Error("Visible upload control on " + name);
   }
+  await quantLabFlow(page);
   await liveFlow(browser, errors);
   console.log(
     JSON.stringify({
       errors,
       result:
-        "UI navigation, graph traversal, trades, persistence, alerts, no uploads, first-run setup and automatic live loading passed",
+        "UI navigation, graph traversal, trades, persistence, alerts, no uploads, Quant Lab research and holdout, first-run setup and automatic live loading passed",
     }),
   );
   await browser.close();
