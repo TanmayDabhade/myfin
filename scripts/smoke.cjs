@@ -361,7 +361,7 @@ async function quantLabFlow(page) {
   await page.click('[data-action="ql-new"]');
   await page.waitForSelector(".ql-cov:has-text('daily bars')");
   // Strategy library: prebuilt cards with trade counts, and a bar-by-bar replay.
-  await page.waitForSelector(".ql-card.active .ql-card-n:has-text('trades in training')");
+  await page.waitForSelector(".ql-card.active .ql-card-n:has-text('round trip')");
   if ((await page.locator(".ql-card").count()) < 10) throw Error("Strategy library missing");
   await page.click('[data-action="ql-sim"]');
   await page.waitForSelector('[data-ql-replay="draft"] canvas');

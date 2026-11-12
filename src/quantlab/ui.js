@@ -208,7 +208,16 @@ function tradeCount(d, key, params) {
   }
   return tradeCache.get(k);
 }
-const tradesText = (n) => (n == null ? "Load data to count trades" : `${n} trade${n === 1 ? "" : "s"} in training + validation`);
+// Round trips a rule makes over training + validation with its default
+// settings. Counts only: showing profit here would steer people toward rules
+// that happened to win on this exact history.
+const yearsOf = (d) => (draftBars && d?.windows ? draftBars.filter((b) => b.date >= d.windows.train.from && b.date <= d.windows.validation.to).length / 252 : 0);
+const tradesText = (n, d = ql.draft) => {
+  if (n == null) return "Load data to count trades";
+  const y = yearsOf(d);
+  return `${n} round trip${n === 1 ? "" : "s"}${y >= 1 ? ` · about ${Math.round(n / y)} a year` : ""}`;
+};
+const COUNT_TIP = "How many times this rule bought and later sold over the training + validation dates, with the settings shown. It is a count only, not a result: no profit is shown so the library doesn't steer you toward rules that happened to win on this history.";
 function gallery(d) {
   const sel = d.manual.template;
   const cards = Object.entries(TEMPLATES)
@@ -216,11 +225,11 @@ function gallery(d) {
     .map(([k, t]) => {
       const n = tradeCount(d, k, k === sel ? d.manual.params : TEMPLATE_PARAMS(k));
       const few = n != null && n < MIN_LIBRARY_TRADES && k !== sel;
-      return `<button class="ql-card ${k === sel ? "active" : ""}" data-action="ql-tpl" data-value="${k}" ${few ? `disabled title="Only ${n} trade${n === 1 ? "" : "s"} on this data, fewer than ${MIN_LIBRARY_TRADES}: too few to judge"` : ""}><span class="ql-card-top"><b>${e(t.label)}</b><span class="ql-hz ql-hz-${t.horizon}">${HORIZONS[t.horizon].label}</span></span><small>${e(t.blurb)}</small><span class="ql-card-n ${few ? "down" : ""}">${few ? `Only ${n} trade${n === 1 ? "" : "s"}: too few to judge` : tradesText(n)}</span></button>`;
+      return `<button class="ql-card ${k === sel ? "active" : ""}" data-action="ql-tpl" data-value="${k}" ${few ? `disabled title="Only ${n} trade${n === 1 ? "" : "s"} on this data, fewer than ${MIN_LIBRARY_TRADES}: too few to judge"` : ""}><span class="ql-card-top"><b>${e(t.label)}</b><span class="ql-hz ql-hz-${t.horizon}">${HORIZONS[t.horizon].label}</span></span><small>${e(t.blurb)}</small><span class="ql-card-n ${few ? "down" : ""}" title="${COUNT_TIP}">${few ? `Only ${n} trade${n === 1 ? "" : "s"}: too few to judge` : tradesText(n)}</span></button>`;
     });
   cards.push(`<button class="ql-card ${sel === "custom" ? "active" : ""}" data-action="ql-tpl" data-value="custom"><span class="ql-card-top"><b>Custom rules</b><span class="ql-hz">JSON</span></span><small>Write your own entry and exit rules from the same indicators.</small><span class="ql-card-n">Any horizon</span></button>`);
   const hz = { all: { label: "All", hint: `${Object.keys(TEMPLATES).length} prebuilt strategies. Shorter holding periods make more trades; longer ones fewer.` }, ...HORIZONS };
-  return `<div class="ql-seg" role="group" aria-label="Holding period">${Object.entries(hz).map(([k, h]) => btn(h.label, "ql-horizon", k, ql.horizon === k ? "active" : "")).join("")}</div><p class="muted ql-hint">${e(hz[ql.horizon].hint)} Strategies with fewer than ${MIN_LIBRARY_TRADES} trades on this data are greyed out.</p><div class="ql-gallery">${cards.join("")}</div>`;
+  return `<div class="ql-seg" role="group" aria-label="Holding period">${Object.entries(hz).map(([k, h]) => btn(h.label, "ql-horizon", k, ql.horizon === k ? "active" : "")).join("")}</div><p class="muted ql-hint">${e(hz[ql.horizon].hint)} Each card counts how often the rule would have traded on this data (not whether it made money). Fewer than ${MIN_LIBRARY_TRADES} round trips is too few to judge, so those are greyed out.</p><div class="ql-gallery">${cards.join("")}</div>`;
 }
 function chosen(d) {
   const t = TEMPLATES[d.manual.template];
