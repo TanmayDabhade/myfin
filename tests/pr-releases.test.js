@@ -37,6 +37,7 @@ function fixture() {
     releases: [],
     uploads: [],
     tap: [],
+    files: {},
     published: 0,
     draftAssets: [],
   };
@@ -74,8 +75,8 @@ function fixture() {
       Object.assign(state.release, args);
       return { data: state.release };
     },
-    getContent: async () =>
-      state.currentCask ? { data: state.currentCask } : missing(),
+    getContent: async ({ path }) =>
+      state.files[path] ? { data: state.files[path] } : missing(),
     createOrUpdateFileContents: async (args) => {
       if (state.tapError) throw Error("Branch protected");
       state.tap.push(args);
@@ -131,6 +132,23 @@ test("publishes complete prerelease with actual archive checksums and updates ca
   );
   assert.equal(f.state.tap[0].path, "Casks/aperture-preview.rb");
   assert.equal(f.state.tap[0].branch, "main");
+  assert.equal(f.state.tap[1].path, "bucket/aperture-preview.json");
+  assert.equal(f.state.tap[1].branch, "main");
+  const manifest = JSON.parse(
+    Buffer.from(f.state.tap[1].content, "base64").toString(),
+  );
+  const windows = createHash("sha256").update("archive-2").digest("hex");
+  assert.equal(manifest.version, "0.0.8");
+  assert.equal(manifest.architecture["64bit"].hash, windows);
+  assert.equal(
+    manifest.architecture["64bit"].url,
+    `https://github.com/owner/myfin/releases/download/pr-7-${sha}/Aperture-windows-x64.zip`,
+  );
+  assert.deepEqual(manifest.installer, {
+    file: "Aperture-windows-x64.exe",
+    args: ["/S"],
+  });
+  assert.ok(f.state.release.body.includes(`<!-- windows-sha256: ${windows} -->`));
 });
 test("failed, unrelated or non-PR workflow runs cannot publish", async () => {
   for (const patch of [
@@ -187,13 +205,16 @@ test("partial, duplicate, expired or oversized artifacts cannot create releases"
   }
 });
 test("a missing Linux or Windows build does not block the Mac release and tap", async () => {
-  for (const name of ["Aperture-linux-x64", "Aperture-windows-x64"]) {
+  for (const [name, channels] of [
+    ["Aperture-linux-x64", ["Casks/aperture-preview.rb", "bucket/aperture-preview.json"]],
+    ["Aperture-windows-x64", ["Casks/aperture-preview.rb"]],
+  ]) {
     const f = fixture();
     f.state.artifacts = f.state.artifacts.filter((a) => a.name !== name);
     await publish(f);
     assert.equal(f.state.published, 1);
     assert.equal(f.state.uploads.length, 2);
-    assert.equal(f.state.tap.length, 1);
+    assert.deepEqual(f.state.tap.map((t) => t.path), channels);
   }
 });
 test("the Mac build is required", async () => {
@@ -225,17 +246,67 @@ test("published release rerun is idempotent and can repair tap publication", asy
   await publish(f);
   assert.equal(f.state.uploads.length, 3);
   assert.equal(f.state.published, 1);
-  assert.equal(f.state.tap.length, 1);
+  assert.equal(f.state.tap.length, 2);
+  const manifest = JSON.parse(
+    Buffer.from(f.state.tap[1].content, "base64").toString(),
+  );
+  assert.equal(
+    manifest.architecture["64bit"].hash,
+    createHash("sha256").update("archive-2").digest("hex"),
+  );
 });
-test("an older build cannot downgrade an existing tap", async () => {
+test("a release published before Scoop existed still repairs Homebrew", async () => {
   const f = fixture();
-  f.state.currentCask = {
+  f.state.release = {
+    id: 9,
+    tag_name: `pr-7-${sha}`,
+    draft: false,
+    prerelease: true,
+    html_url: "https://github.com/owner/myfin/releases/tag/test",
+    body: `<!-- macos-sha256: ${"d".repeat(64)} -->`,
+  };
+  await publish(f);
+  assert.equal(f.state.uploads.length, 0);
+  assert.deepEqual(f.state.tap.map((t) => t.path), ["Casks/aperture-preview.rb"]);
+});
+test("a blocked Homebrew write still updates Scoop and then fails", async () => {
+  const f = fixture();
+  f.github.rest.repos.createOrUpdateFileContents = async (args) => {
+    if (args.path.startsWith("Casks/")) throw Error("Branch protected");
+    f.state.tap.push(args);
+  };
+  await assert.rejects(publish(f), /Branch protected/);
+  assert.deepEqual(f.state.tap.map((t) => t.path), ["bucket/aperture-preview.json"]);
+});
+test("an older build cannot downgrade an existing tap or bucket", async () => {
+  const f = fixture();
+  f.state.files["Casks/aperture-preview.rb"] = {
     sha: "existing",
     content: Buffer.from("# build-run-number: 9\n").toString("base64"),
+  };
+  f.state.files["bucket/aperture-preview.json"] = {
+    sha: "existing",
+    content: Buffer.from(
+      publish.scoopManifest({
+        repository: "owner/myfin",
+        tag: `pr-7-${sha}`,
+        checksum: "c".repeat(64),
+        sequence: 9,
+      }),
+    ).toString("base64"),
   };
   await publish(f);
   assert.equal(f.state.published, 1);
   assert.equal(f.state.tap.length, 0);
+});
+test("an unmanaged bucket manifest is never overwritten", async () => {
+  const f = fixture();
+  f.state.files["bucket/aperture-preview.json"] = {
+    sha: "existing",
+    content: Buffer.from('{"version": "1.0"}').toString("base64"),
+  };
+  await assert.rejects(publish(f), /unmanaged bucket/);
+  assert.deepEqual(f.state.tap.map((t) => t.path), ["Casks/aperture-preview.rb"]);
 });
 test("tag collisions fail rather than point a release at the wrong source", async () => {
   const f = fixture();
@@ -256,22 +327,29 @@ test("cask interpolation rejects executable or invalid metadata", () => {
     { checksum: "no_check" },
     { sequence: -1 },
   ])
+  {
     assert.throws(() => publish.cask({ ...safe, ...patch }), /Invalid/);
+    assert.throws(() => publish.scoopManifest({ ...safe, ...patch }), /Invalid/);
+  }
 });
 
 test("concurrent tap updates re-read the cask and never downgrade", async () => {
   const f = fixture();
   let calls = 0;
-  f.github.rest.repos.createOrUpdateFileContents = async () => {
+  f.github.rest.repos.createOrUpdateFileContents = async ({ path }) => {
     calls++;
-    f.state.currentCask = {
+    f.state.files[path] = {
       sha: "newer",
-      content: Buffer.from("# build-run-number: 10\n").toString("base64"),
+      content: Buffer.from(
+        path.endsWith(".rb")
+          ? "# build-run-number: 10\n"
+          : '{"##": ["build-run-number: 10"]}',
+      ).toString("base64"),
     };
     throw Object.assign(Error("Conflict"), { status: 409 });
   };
   await publish(f);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(f.state.published, 1);
 });
 test("interrupted draft is reused instead of creating a duplicate release", async () => {

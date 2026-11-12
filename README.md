@@ -23,7 +23,25 @@ brew update
 brew upgrade --cask tanmaydabhade/myfin/aperture-preview
 ```
 
-The cask uses versioned, checksum-verified universal Mac builds. These are unsigned/unnotarized previews of individual PRs. See [release behavior, activation, and install-or-upgrade command](docs/RELEASES.md). Windows and Linux installers are attached to each successful PR prerelease.
+The cask uses versioned, checksum-verified universal Mac builds. These are unsigned/unnotarized previews of individual PRs. See [release behavior, activation, and install-or-upgrade command](docs/RELEASES.md). Linux installers are attached to each successful PR prerelease.
+
+## Install and update with Scoop on Windows (preview channel)
+
+The same channel for Windows, in PowerShell. Scoop needs Git to add a bucket (`scoop install git`).
+
+```powershell
+scoop bucket add myfin https://github.com/TanmayDabhade/myfin
+scoop install myfin/aperture-preview
+```
+
+To replace the installed app with the newer build:
+
+```powershell
+scoop update
+scoop update aperture-preview
+```
+
+Scoop runs the checksum-verified NSIS installer silently, so Aperture lands in `%LOCALAPPDATA%\Aperture` with Start menu and desktop shortcuts, exactly as if you had run the installer yourself. An upgrade closes a running Aperture and installs over it. Your workspace data stays.
 
 ## Start on macOS
 

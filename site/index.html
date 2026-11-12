@@ -164,6 +164,7 @@ td.free { font-family: var(--mono); font-size: 13px; color: var(--muted); }
 .getbox .how a { color: var(--fg); }
 .cmd { display: flex; align-items: center; gap: 10px; margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 10px 10px 16px; background: #09090b; min-width: 0; }
 .cmd code { font: 500 13px/1.5 var(--mono); color: #d6d6d2; overflow-x: auto; white-space: nowrap; flex: 1; min-width: 0; }
+.note code { font: 500 12px/1.5 var(--mono); }
 .cmd button { flex: none; font: 500 12px/1 var(--mono); padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: pointer; }
 
 [hidden] { display: none !important; }
@@ -326,8 +327,10 @@ footer a { color: var(--muted); }
       <p class="how" data-how>Universal .dmg: one app that runs natively on Apple Silicon and Intel. The app isn't signed by Apple yet: the first time, right-click it in Applications and choose Open.</p>
       <p class="note">Other files and checksums are on the <a data-page href="https://github.com/TanmayDabhade/myfin/releases/latest">release page</a>.</p>
     </div>
-    <div class="cmd" data-mac-only><code id="brew">brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git &amp;&amp; brew trust tanmaydabhade/myfin &amp;&amp; brew install --cask tanmaydabhade/myfin/aperture-preview</code><button id="copy" type="button">Copy</button></div>
+    <div class="cmd" data-mac-only><code id="brew">brew tap tanmaydabhade/myfin https://github.com/TanmayDabhade/myfin.git &amp;&amp; brew trust tanmaydabhade/myfin &amp;&amp; brew install --cask tanmaydabhade/myfin/aperture-preview</code><button data-copy="brew" type="button">Copy</button></div>
     <p class="note" style="margin-top:8px" data-mac-only>Homebrew tracks the newest preview build, ahead of releases.</p>
+    <div class="cmd" data-win-only hidden><code id="scoop">scoop bucket add myfin https://github.com/TanmayDabhade/myfin; scoop install myfin/aperture-preview</code><button data-copy="scoop" type="button">Copy</button></div>
+    <p class="note" style="margin-top:8px" data-win-only hidden>Scoop tracks the newest preview build, ahead of releases. Update with <code>scoop update; scoop update aperture-preview</code>.</p>
   </section>
 
   <footer>
@@ -383,6 +386,7 @@ function downloads() {
     all("[data-version]").forEach((v) => (v.textContent = release.version));
     all("[data-page]").forEach((l) => (l.href = release.page));
     all("[data-mac-only]").forEach((el) => (el.hidden = !os.startsWith("mac")));
+    all("[data-win-only]").forEach((el) => (el.hidden = os !== "windows"));
     const how = document.querySelector("[data-how]");
     if (how) {
       how.textContent = (a && /universal/i.test(a.name) ? "Universal .dmg: one app that runs natively on Apple Silicon and Intel. " : "") + p.how;
@@ -540,20 +544,22 @@ downloads();
     else if (playing) go(i);
   }).observe(stage);
 
-  $("copy").onclick = async () => {
-    const text = $("brew").textContent;
-    try {
-      await navigator.clipboard.writeText(text);
-      $("copy").textContent = "Copied";
-    } catch {
-      const r = document.createRange();
-      r.selectNodeContents($("brew"));
-      getSelection().removeAllRanges();
-      getSelection().addRange(r);
-      $("copy").textContent = "Selected";
-    }
-    setTimeout(() => ($("copy").textContent = "Copy"), 1600);
-  };
+  document.querySelectorAll("[data-copy]").forEach((button) => {
+    const code = $(button.dataset.copy);
+    button.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(code.textContent);
+        button.textContent = "Copied";
+      } catch {
+        const r = document.createRange();
+        r.selectNodeContents(code);
+        getSelection().removeAllRanges();
+        getSelection().addRange(r);
+        button.textContent = "Selected";
+      }
+      setTimeout(() => (button.textContent = "Copy"), 1600);
+    };
+  });
 
   fetch("demo/steps.json")
     .then((r) => r.json())
