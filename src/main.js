@@ -56,6 +56,7 @@ import {
   TX_CODES,
 } from "./holders.js";
 import "./style.css";
+import { labInit, labPage, labAction, labPaint, labOpen } from "./quantlab/ui.js";
 import {
   load,
   save,
@@ -216,9 +217,10 @@ if (state.relationshipGraph) validateGraph(state.relationshipGraph);
 // stock page, which the sidebar lists by ticker.
 const navGroups = [
   ["Markets", ["Overview", "Universe", "Screener", "Economy", "Commodities"]],
+  ["Research", ["Quant Lab"]],
   ["Your account", ["Portfolio", "Trade", "Alerts"]],
 ];
-const navIcons = { Overview: "◫", Universe: "◍", Screener: "☷", Economy: "◎", Commodities: "≋", Portfolio: "◉", Trade: "⇄", Alerts: "◇", Settings: "⚙" };
+const navIcons = { Overview: "◫", Universe: "◍", Screener: "☷", Economy: "◎", Commodities: "≋", Portfolio: "◉", Trade: "⇄", Alerts: "◇", "Quant Lab": "∿", Settings: "⚙" };
 // Dover Strait by default: AISStream's coverage is strong there and thin in
 // some Middle East and open-ocean areas. The last pick is remembered.
 let maritimeSelected = locations.some((x) => x.id === state.vesselLocation)
@@ -499,6 +501,7 @@ function render() {
     Alerts: alerts,
     Commodities: commodities,
     Settings: settings,
+    "Quant Lab": labPage,
   };
   const demo = page !== "Setup" && state.mode === "sample";
   document.getElementById("app").innerHTML =
@@ -517,6 +520,7 @@ function render() {
     fixingWidth = false;
     return;
   }
+  if (page === "Quant Lab") labPaint();
   autoLoad();
   syncVesselStream();
   syncPriceStream();
@@ -1350,7 +1354,7 @@ function stockHead() {
   const watching = state.watchlist.includes(symbol);
   const where = [a?.exchange, a?.country, a?.currency].filter(Boolean).join(" · ") || a?.sector || "";
   const quote = a ? `${livePrice(a)}${liveChange(a)}` : `<span class="muted">${live() ? "Loading prices…" : "No prices in this workspace"}</span>`;
-  return `<section class="stock-head"><div class="sh-top"><div class="sh-id"><h1>${esc(symbol)}</h1><div><b>${esc(prettyName(stockName()))}</b><small>${esc(where)}</small></div></div><div class="sh-price head-price">${quote}</div><div class="sh-actions">${state.mode === "sample" ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}${button(watching ? "★ In watchlist" : "☆ Add to watchlist", "watch-toggle", watching ? "active" : "")}${a ? button("Trade", "goto-trade") : ""}${state.mode === "market" && a ? button("Refresh", "research-refresh") : ""}</div></div><nav class="fn-strip" aria-label="Views of ${esc(symbol)}">${button("Grid", "stock-view", stockView ? "" : "active", 'data-value=""')}${VIEWS.map((v) => button(`${v.label}<kbd>${v.code}</kbd>`, "stock-view", stockView === v.code ? "active" : "", `data-value="${v.code}"`)).join("")}</nav></section>`;
+  return `<section class="stock-head"><div class="sh-top"><div class="sh-id"><h1>${esc(symbol)}</h1><div><b>${esc(prettyName(stockName()))}</b><small>${esc(where)}</small></div></div><div class="sh-price head-price">${quote}</div><div class="sh-actions">${state.mode === "sample" ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}${button(watching ? "★ In watchlist" : "☆ Add to watchlist", "watch-toggle", watching ? "active" : "")}${a ? button("Trade", "goto-trade") : ""}${a ? button("Open in Quant Lab", "goto-quantlab") : ""}${state.mode === "market" && a ? button("Refresh", "research-refresh") : ""}</div></div><nav class="fn-strip" aria-label="Views of ${esc(symbol)}">${button("Grid", "stock-view", stockView ? "" : "active", 'data-value=""')}${VIEWS.map((v) => button(`${v.label}<kbd>${v.code}</kbd>`, "stock-view", stockView === v.code ? "active" : "", `data-value="${v.code}"`)).join("")}</nav></section>`;
 }
 function stockPage() {
   return stockHead() + (stockView ? stockBody() : stockGrid());
@@ -3843,6 +3847,7 @@ function bind() {
   );
 }
 async function action(act, value) {
+  if (act?.startsWith("ql-")) return labAction(act, value);
   switch (act) {
     case "graph-open":
       openStock(symbol, "SPLC");
@@ -3855,6 +3860,12 @@ async function action(act, value) {
       else if (stockAsset()) state.watchlist.push(symbol);
       else throw Error(`No prices for ${symbol} yet, so it can't be watched.`);
       await persist();
+      render();
+      break;
+    case "goto-quantlab":
+      page = "Quant Lab";
+      render();
+      await labOpen(symbol);
       render();
       break;
     case "goto-trade":
@@ -4492,6 +4503,40 @@ document.addEventListener("keydown", (e) => {
   if (e.target.closest?.("input, textarea, select, .combo-list")) return;
   openStock(symbol, null);
 });
+// Quant Lab reads prices through the same loaders and providers as the rest
+// of the app; it has no keys or sources of its own.
+async function labBars(s) {
+  let a = activeMap()[s];
+  if (!a?.bars?.length && live()) {
+    await enqueue("prices:" + s, () => loadPrices(s));
+    a = activeMap()[s];
+  }
+  if (!a?.bars?.length)
+    throw Error(state.mode === "sample" ? `${s} isn't in the demo workspace. Try AAPL, MSFT, NVDA, SPY, QQQ, GLD or TLT.` : `No daily prices for ${s}. Connect a price source in Settings, or check the symbol.`);
+  return {
+    bars: a.bars,
+    providerId: a.origin,
+    source: a.source || a.origin,
+    fetchedAt: a.fetchedAt ?? null,
+    adjustment: a.origin === "sample" ? "synthetic" : a.origin === "twelve" ? "split_only" : "none",
+  };
+}
+await labInit({
+  native,
+  invoke: window.__TAURI__?.core.invoke,
+  esc,
+  fmt,
+  pct,
+  money,
+  table,
+  empty,
+  notify,
+  download,
+  render: () => render(),
+  page: () => page,
+  symbol: () => symbol,
+  barsFor: labBars,
+}).catch((e) => console.error("Quant Lab", e));
 render();
 syncWatchlist();
 autoReference().then(() => refresh());

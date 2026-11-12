@@ -133,6 +133,18 @@ The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldma
 - **Offline only**: only `gs_quant.timeseries` functions that work on local data are used. Nothing is sent to Goldman Sachs and no Marquee account is needed. gs-quant's Marquee features (GS datasets, derivatives pricing, Sortino and drawdown-length reports) need institutional GS credentials and are not used.
 - **How it runs**: the desktop app runs a fixed script (`src-tauri/src/quant.py`) with `python -I -B`, passes the prices on stdin and validates the result. The page can't choose which program runs: it's the built-in Python, `APERTURE_PYTHON`, or one you pick in a file dialog.
 
+## Quant Lab (strategy research)
+
+**Quant Lab** in the sidebar, or **Open in Quant Lab** on a stock page, tests rule-based trading strategies on the daily prices already in your workspace. It uses the same price providers, with no keys of its own.
+
+- **Three ways to get strategies.** Write rules yourself (templates or the JSON rule language), sweep a template's parameters, or run a seeded genetic search over rule trees built from the indicators you allow (SMA, EMA, RSI, ATR, price, volume). Rules are data. Nothing in them is ever run as code.
+- **Honest fills.** A signal is known after the close of bar t and fills at the open of bar t+1. Commission (with a minimum) and slippage apply to every entry and exit. Positions are long only and whole shares.
+- **Validation before the holdout.** Data is split in date order into training, validation and holdout windows, with embargo bars between them. Discovery breeds candidates on training results only. The leaderboard ranks them on walk-forward validation folds, with penalties for drawdown, turnover and too few trades. The holdout stays sealed until you freeze a short list, and each frozen list can be evaluated once. A second list from the same experiment is labelled as having reused the holdout.
+- **Reproducible.** Each run's manifest records the strategy, config, the SHA-256 of the frozen bars, the engine version and the seed. Identical inputs give identical result hashes. You can export manifests, fills (CSV), strategies (JSON) and a short report.
+- **Labels.** Every result is labelled a historical backtest. Windows with fewer closed trades than your minimum are marked *Not statistically informative*. A single instrument chosen by you is flagged as survivorship-biased.
+
+Research runs in a background worker. Datasets, runs, frozen selections and holdout results are written once to `aperture.sqlite`, and the desktop database refuses to replace them. Quant Lab places no orders, real or paper. Forward testing in a separately labelled paper account is planned.
+
 ## Staying current
 
 None of the free data sources push updates, so the app checks each on its own clock while it's open, for every stock on the watchlist:
