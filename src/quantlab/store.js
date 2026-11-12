@@ -15,15 +15,21 @@ export function memoryBackend(storage = null, key = "aperture-quantlab-v1") {
   } catch {}
   // Written in batches: serializing everything on each write is quadratic.
   let timer = null;
-  const flush = () => {
-    if (!storage || timer) return;
-    timer = setTimeout(() => {
-      timer = null;
-      try {
-        storage.setItem(key, JSON.stringify(rows));
-      } catch {}
-    }, 300);
+  const write = () => {
+    clearTimeout(timer);
+    timer = null;
+    try {
+      storage.setItem(key, JSON.stringify(rows));
+    } catch {}
   };
+  const flush = () => {
+    if (storage && !timer) timer = setTimeout(write, 300);
+  };
+  // Leaving or reloading the page must not drop the last batch.
+  if (storage) {
+    globalThis.addEventListener?.("pagehide", () => timer && write());
+    globalThis.document?.addEventListener("visibilitychange", () => document.visibilityState === "hidden" && timer && write());
+  }
   return {
     async put(kind, id, parent, body, immutable) {
       const k = `${kind}:${id}`,
