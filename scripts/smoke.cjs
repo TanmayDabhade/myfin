@@ -360,6 +360,16 @@ async function quantLabFlow(page) {
   await page.waitForSelector("h1:has-text('Quant Lab')");
   await page.click('[data-action="ql-new"]');
   await page.waitForSelector(".ql-cov:has-text('daily bars')");
+  // Strategy library: prebuilt cards with trade counts, and a bar-by-bar replay.
+  await page.waitForSelector(".ql-card.active .ql-card-n:has-text('trades in training')");
+  if ((await page.locator(".ql-card").count()) < 10) throw Error("Strategy library missing");
+  await page.click('[data-action="ql-sim"]');
+  await page.waitForSelector('[data-ql-replay="draft"] canvas');
+  await page.waitForFunction(() => /Bar (\d+)/.exec(document.querySelector('[data-sim="date"]')?.textContent || "")?.[1] > 5);
+  await page.locator('[data-sim="seek"]').evaluate((el) => ((el.value = el.max), el.dispatchEvent(new Event("input"))));
+  if (!/Closed trades\s*[1-9]/.test(await page.locator('[data-sim="stats"]').innerText())) throw Error("Replay shows no trades at the end");
+  if (shots) await page.locator(".ql-sim-panel").screenshot({ path: `${shots}/0-replay.png` });
+  await shot("0-library");
   await page.fill('[data-ql="name"]', "AAPL trend sweep");
   await page.click('[data-action="ql-mode"][data-value="sweep"]');
   await page.waitForSelector("text=valid combinations");
@@ -384,6 +394,7 @@ async function quantLabFlow(page) {
   await page.waitForSelector('[data-ql-chart="equity"] svg');
   await page.waitForSelector('[data-ql-chart="price"] svg');
   await page.waitForSelector('[data-action="ql-split"][data-value="holdout"]');
+  await page.waitForSelector('[data-ql-replay="run"] canvas');
   await shot("4-run");
   await page.click('[data-action="ql-rtab"][data-value="data"]');
   await page.waitForSelector("text=Manifest SHA-256");

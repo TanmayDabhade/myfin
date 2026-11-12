@@ -1,14 +1,15 @@
 // Quant Lab screens: experiments, the three-panel setup, the leaderboard,
 // sealed holdout evaluation, run detail and comparison. Research runs in a
 // Web Worker; everything shown is a historical backtest unless labelled.
-import { TEMPLATES, INDICATORS, canonical, describe, sha256, validateStrategy, indicatorLabel } from "./dsl.js";
-import { makeSnapshot } from "./engine.js";
+import { TEMPLATES, HORIZONS, INDICATORS, canonical, describe, sha256, validateStrategy, indicatorLabel } from "./dsl.js";
+import { makeSnapshot, backtest } from "./engine.js";
+import { mountReplay } from "./replay.js";
 import { validateConfig, defaultSplits, sweepGrid, windowsOf, correlations, SCORE_TEXT, LIMITS, trimCandidates } from "./research.js";
 import { createStore, memoryBackend, nativeBackend } from "./store.js";
 import { lineChart, hover, ticks } from "../riskcharts.js";
 
 let ctx, store;
-const ql = { view: "home", filter: "all", tab: "overview", picks: new Set(), sort: "score", minTrades: 0, maxDD: "", draft: null, exp: null, run: null, compare: null, confirm: null, experiments: [], selections: [], holdouts: {}, events: [] };
+const ql = { horizon: "all", sim: null, view: "home", filter: "all", tab: "overview", picks: new Set(), sort: "score", minTrades: 0, maxDD: "", draft: null, exp: null, run: null, compare: null, confirm: null, experiments: [], selections: [], holdouts: {}, events: [] };
 const jobs = new Map();
 let runWorker = null,
   reqSeq = 0;
@@ -115,6 +116,15 @@ function homeView() {
 }
 
 // ---- New experiment --------------------------------------------------------
+// Three values per parameter around its default keeps a sweep small.
+const sweepDefault = (k) =>
+  SWEEP_DEFAULT[k] ||
+  Object.fromEntries(
+    Object.entries(TEMPLATES[k].params).map(([n, [lo, hi, d]]) => {
+      const from = Math.max(lo, Math.round(d * 0.5)), to = Math.min(hi, Math.max(from + 2, Math.round(d * 1.5)));
+      return [n, { from, to, step: Math.max(1, Math.ceil((to - from) / 2)) }];
+    }),
+  );
 const TEMPLATE_PARAMS = (t) => Object.fromEntries(Object.entries(TEMPLATES[t].params).map(([k, [, , d]]) => [k, d]));
 const SWEEP_DEFAULT = {
   sma_cross: { fast: { from: 5, to: 30, step: 5 }, slow: { from: 20, to: 120, step: 20 } },
@@ -140,7 +150,7 @@ async function newDraft(symbol, base = null) {
     seed: base?.search.seed ?? 42,
     budget: base?.search.maxCandidates ?? 300,
     mode: base?.mode || "manual",
-    manual: { template: "sma_cross", params: TEMPLATE_PARAMS("sma_cross"), json: "" },
+    manual: { template: "price_sma", params: TEMPLATE_PARAMS("price_sma"), json: "" },
     sweep: { template: "sma_cross", ranges: structuredClone(SWEEP_DEFAULT.sma_cross) },
     discovery: { allowedIndicators: ["sma", "ema", "rsi", "atr", "price"], maxExpressionDepth: 3, population: 30, generations: 8, mutationRate: 0.5, crossoverRate: 0.6 },
     windows: base?.validation ? { train: { ...base.validation.train }, validation: { ...base.validation.validation }, holdout: { ...base.validation.holdout } } : null,
@@ -160,6 +170,9 @@ async function loadCoverage(resetWindows) {
   try {
     const got = await ctx.barsFor(d.symbol);
     const snap = makeSnapshot({ symbol: d.symbol, providerId: got.providerId, source: got.source, adjustment: got.adjustment, bars: got.bars, fetchedAt: got.fetchedAt });
+    draftBars = snap.bars;
+    tradeCache.clear();
+    ql.sim = null;
     d.coverage = { from: snap.from, to: snap.to, count: snap.count, source: got.source, adjustment: snap.adjustment, warnings: snap.warnings, blocking: snap.blocking };
     if (resetWindows || !d.windows) {
       const dates = snap.bars.map((b) => b.date);
@@ -172,13 +185,63 @@ async function loadCoverage(resetWindows) {
     d.coverage = { error: err.message };
   }
 }
+// ---- Strategy library -----------------------------------------------------------
+// Below this many closed trades in training + validation a backtest says too
+// little to be worth running, so the prebuilt card is greyed out.
+const MIN_LIBRARY_TRADES = 6;
+let draftBars = null;
+const tradeCache = new Map(),
+  indCache = new Map();
+const PARAM_LABEL = { fast: "Fast period", slow: "Slow period", period: "Period", buyBelow: "Buy below", sellAbove: "Sell above", trend: "Trend average", hold: "Max hold (days)", ema: "EMA period", volume: "Volume average", enter: "Enter above", exit: "Exit below", cooldown: "Cooldown (days)", exitPeriod: "Exit average", fastAtr: "Fast ATR", slowAtr: "Slow ATR" };
+// Counted on training + validation only: the holdout stays unseen.
+function simOpts(d) {
+  return { from: d.windows?.train.from, to: d.windows?.validation.to, initialCash: +d.initialCash || 100000, maxPositionWeight: Math.min(1, (+d.maxWeight || 100) / 100), commissionBps: +d.commissionBps || 0, slippageBps: +d.slippageBps || 0, minCommissionUsd: +d.minCommissionUsd || 0 };
+}
+function tradeCount(d, key, params) {
+  const t = TEMPLATES[key];
+  if (!draftBars || !d.windows || !t.valid(params)) return null;
+  const k = key + canonical(params) + d.windows.train.from + d.windows.validation.to;
+  if (!tradeCache.has(k)) {
+    if (indCache.bars !== draftBars) (indCache.clear(), (indCache.bars = draftBars));
+    const r = backtest(draftBars, t.build(params), { ...simOpts(d), initialCash: 1e7 }, indCache);
+    tradeCache.set(k, r.trades.length + (r.openPosition ? 1 : 0));
+  }
+  return tradeCache.get(k);
+}
+const tradesText = (n) => (n == null ? "Load data to count trades" : `${n} trade${n === 1 ? "" : "s"} in training + validation`);
+function gallery(d) {
+  const sel = d.manual.template;
+  const cards = Object.entries(TEMPLATES)
+    .filter(([, t]) => ql.horizon === "all" || t.horizon === ql.horizon)
+    .map(([k, t]) => {
+      const n = tradeCount(d, k, k === sel ? d.manual.params : TEMPLATE_PARAMS(k));
+      const few = n != null && n < MIN_LIBRARY_TRADES && k !== sel;
+      return `<button class="ql-card ${k === sel ? "active" : ""}" data-action="ql-tpl" data-value="${k}" ${few ? `disabled title="Only ${n} trade${n === 1 ? "" : "s"} on this data, fewer than ${MIN_LIBRARY_TRADES}: too few to judge"` : ""}><span class="ql-card-top"><b>${e(t.label)}</b><span class="ql-hz ql-hz-${t.horizon}">${HORIZONS[t.horizon].label}</span></span><small>${e(t.blurb)}</small><span class="ql-card-n ${few ? "down" : ""}">${few ? `Only ${n} trade${n === 1 ? "" : "s"}: too few to judge` : tradesText(n)}</span></button>`;
+    });
+  cards.push(`<button class="ql-card ${sel === "custom" ? "active" : ""}" data-action="ql-tpl" data-value="custom"><span class="ql-card-top"><b>Custom rules</b><span class="ql-hz">JSON</span></span><small>Write your own entry and exit rules from the same indicators.</small><span class="ql-card-n">Any horizon</span></button>`);
+  const hz = { all: { label: "All", hint: `${Object.keys(TEMPLATES).length} prebuilt strategies. Shorter holding periods make more trades; longer ones fewer.` }, ...HORIZONS };
+  return `<div class="ql-seg" role="group" aria-label="Holding period">${Object.entries(hz).map(([k, h]) => btn(h.label, "ql-horizon", k, ql.horizon === k ? "active" : "")).join("")}</div><p class="muted ql-hint">${e(hz[ql.horizon].hint)} Strategies with fewer than ${MIN_LIBRARY_TRADES} trades on this data are greyed out.</p><div class="ql-gallery">${cards.join("")}</div>`;
+}
+function chosen(d) {
+  const t = TEMPLATES[d.manual.template];
+  return `<div class="ql-chosen"><div class="ql-card-top"><h3>${e(t.label)}</h3><span class="ql-hz ql-hz-${t.horizon}">${HORIZONS[t.horizon].label}</span></div><p class="ql-how-text">${e(t.how)}</p><div class="ql-params">${Object.entries(t.params).map(([k, [lo, hi]]) => field(PARAM_LABEL[k] || k, `manual.params.${k}`, d.manual.params[k], "number", `min="${lo}" max="${hi}" step="1"`)).join("")}</div><div data-ql-preview>${preview(d)}</div><div class="ql-actions">${btn("▶ Watch it trade", "ql-sim", "", "primary")}<span class="muted">Replays this strategy bar by bar over training + validation.</span></div></div>${HOW_IT_WORKS}`;
+}
+const HOW_IT_WORKS = `<details class="ql-how"><summary>How Quant Lab tests a strategy</summary><ol>
+<li><b>Rules, not guesses.</b> A strategy is an entry rule and an exit rule built from moving averages, RSI, ATR, price and volume. Every rule is checked before it runs.</li>
+<li><b>No peeking ahead.</b> Each signal is read at a day's close and filled at the next day's open, with your commission and slippage taken off. Positions are long only, in whole shares.</li>
+<li><b>Three windows.</b> History is split into training, validation and a sealed holdout. Searches only learn from training; candidates are ranked on validation, cut into walk-forward folds so one lucky stretch can't carry a result.</li>
+<li><b>Enough trades to mean something.</b> A result from two or three trades is noise. Strategies need at least the minimum closed trades to be ranked, and the library hides prebuilt ones that trade fewer than ${MIN_LIBRARY_TRADES} times on your data.</li>
+<li><b>One look at the holdout.</b> Freeze a short list and the holdout is evaluated once. That is the closest a backtest gets to unseen data.</li>
+<li><b>Watch it trade.</b> The replay reveals the finished backtest a bar at a time: buys, sells, the equity curve and each closed trade, at a speed you choose.</li></ol>
+<p class="muted">Shorter holding periods (Short-term) mean more trades and more cost drag; trend strategies trade rarely and need longer history. Everything here is a simulation on past prices, not a forecast.</p></details>`;
 const field = (label, path, value, type = "number", extra = "") => `<label>${label}<input type="${type}" data-ql="${path}" value="${e(value)}" ${extra}></label>`;
 function strategyCenter(d) {
   const tabs = `<div class="ql-seg" role="group" aria-label="Strategy mode">${Object.entries(MODES).map(([k, l]) => btn(l, "ql-mode", k, d.mode === k ? "active" : "")).join("")}</div>`;
-  const tplSelect = (path, value, custom) => `<label>Template<select data-ql="${path}" data-ql-rerender>${Object.entries(TEMPLATES).map(([k, t]) => `<option value="${k}" ${value === k ? "selected" : ""}>${t.label}</option>`).join("")}${custom ? `<option value="custom" ${value === "custom" ? "selected" : ""}>Custom rules (JSON)</option>` : ""}</select></label>`;
+  const tplSelect = (path, value, custom) => `<label>Template<select data-ql="${path}" data-ql-rerender>${Object.entries(HORIZONS).map(([h, hz]) => `<optgroup label="${hz.label}">${Object.entries(TEMPLATES).filter(([, t]) => t.horizon === h).map(([k, t]) => `<option value="${k}" ${value === k ? "selected" : ""}>${t.label}</option>`).join("")}</optgroup>`).join("")}${custom ? `<option value="custom" ${value === "custom" ? "selected" : ""}>Custom rules (JSON)</option>` : ""}</select></label>`;
   if (d.mode === "manual") {
     const m = d.manual;
-    if (m.template === "custom") {
+    if (m.template !== "custom") return tabs + gallery(d) + chosen(d);
+    {
       const parsed = (() => {
         try {
           const s = JSON.parse(m.json || "null");
@@ -188,15 +251,12 @@ function strategyCenter(d) {
           return `<p class="down">Not valid JSON yet.</p>`;
         }
       })();
-      return `${tabs}${tplSelect("manual.template", m.template, true)}<label>Strategy definition<textarea rows="16" spellcheck="false" data-ql="manual.json" data-type="text" class="ql-json">${e(m.json || JSON.stringify(TEMPLATES.sma_cross.build(TEMPLATE_PARAMS("sma_cross")), null, 2))}</textarea></label>${parsed}<small>Indicators: ${INDICATORS.join(", ")}. Comparisons: gt, lt, crosses_above, crosses_below, grouped with all / any. Rules are data; nothing in them is run as code.</small>`;
+      return `${tabs}${gallery(d)}<label>Strategy definition<textarea rows="16" spellcheck="false" data-ql="manual.json" data-type="text" class="ql-json">${e(m.json || JSON.stringify(TEMPLATES.sma_cross.build(TEMPLATE_PARAMS("sma_cross")), null, 2))}</textarea></label>${parsed}<small>Indicators: ${INDICATORS.join(", ")}. Comparisons: gt, lt, crosses_above, crosses_below, grouped with all / any. Rules are data; nothing in them is run as code.</small><div class="ql-actions">${btn("▶ Watch it trade", "ql-sim", "", "primary")}</div>${HOW_IT_WORKS}`;
     }
-    const t = TEMPLATES[m.template];
-    const s = t.build(m.params);
-    return `${tabs}${tplSelect("manual.template", m.template, true)}<div class="ql-params">${Object.entries(t.params).map(([k, [lo, hi]]) => field(k, `manual.params.${k}`, m.params[k], "number", `min="${lo}" max="${hi}" step="1"`)).join("")}</div><div data-ql-preview>${preview(d)}</div>`;
   }
   if (d.mode === "sweep") {
     const t = TEMPLATES[d.sweep.template];
-    return `${tabs}${tplSelect("sweep.template", d.sweep.template, false)}${table3(Object.entries(t.params).map(([k, [lo, hi]]) => `<tr><td>${k}</td>${["from", "to", "step"].map((x) => `<td><input type="number" data-ql="sweep.ranges.${k}.${x}" value="${e(d.sweep.ranges[k]?.[x])}" min="${x === "step" ? 1 : lo}" max="${hi}" aria-label="${k} ${x}"></td>`).join("")}</tr>`))}<div data-ql-preview>${preview(d)}</div>`;
+    return `${tabs}${tplSelect("sweep.template", d.sweep.template, false)}${table3(Object.entries(t.params).map(([k, [lo, hi]]) => `<tr><td>${PARAM_LABEL[k] || k}</td>${["from", "to", "step"].map((x) => `<td><input type="number" data-ql="sweep.ranges.${k}.${x}" value="${e(d.sweep.ranges[k]?.[x])}" min="${x === "step" ? 1 : lo}" max="${hi}" aria-label="${k} ${x}"></td>`).join("")}</tr>`))}<div data-ql-preview>${preview(d)}</div>`;
   }
   const x = d.discovery;
   return `${tabs}<p class="muted">A seeded genetic search over rule trees built only from the indicators you allow. It breeds candidates by their training Sharpe; the leaderboard then ranks them on validation.</p><fieldset class="ql-checks"><legend>Allowed indicators</legend>${INDICATORS.map((k) => `<label><input type="checkbox" data-ql-indicator="${k}" ${x.allowedIndicators.includes(k) ? "checked" : ""}>${k.toUpperCase()}</label>`).join("")}</fieldset><div class="ql-params">${field("Max rule depth", "discovery.maxExpressionDepth", x.maxExpressionDepth, "number", `min="1" max="${LIMITS.depth}"`)}${field("Population", "discovery.population", x.population, "number", `min="4" max="${LIMITS.population}"`)}${field("Generations", "discovery.generations", x.generations, "number", `min="1" max="${LIMITS.generations}"`)}${field("Mutation rate", "discovery.mutationRate", x.mutationRate, "number", 'min="0" max="1" step="0.05"')}${field("Crossover rate", "discovery.crossoverRate", x.crossoverRate, "number", 'min="0" max="1" step="0.05"')}</div>`;
@@ -209,7 +269,9 @@ function preview(d) {
   const t = TEMPLATES[d.manual.template];
   if (!t.valid(d.manual.params)) return `<p class="down">These parameters don't make a valid ${t.label}.</p>`;
   const s = t.build(d.manual.params);
-  return `<p class="muted">Enter when ${e(describe(s.entry))}. Exit when ${e(describe(s.exit))}.</p>`;
+  const n = tradeCount(d, d.manual.template, d.manual.params);
+  const hold = s.constraints.maxHoldingBars ? ` Exit after ${s.constraints.maxHoldingBars} days at the latest.` : "";
+  return `<p class="muted">Enter when ${e(describe(s.entry))}. Exit when ${e(describe(s.exit))}.${hold}</p>${n == null ? "" : n < MIN_LIBRARY_TRADES ? `<p class="down">${tradesText(n)}: fewer than ${MIN_LIBRARY_TRADES}, too few to judge. Shorten the periods or the holding limit.</p>` : `<p class="up">${tradesText(n)}.</p>`}`;
 }
 const workloadText = (d) => {
   const load = workload(d);
@@ -250,7 +312,7 @@ function newView() {
     <p class="muted" data-ql-workload>${workloadText(d)}</p>
     ${d.errors.length ? `<ul class="down ql-errors">${d.errors.map((x) => `<li>${e(x)}</li>`).join("")}</ul>` : ""}
     ${btn("Run research", "ql-run", "", "primary", c.count && !(c.blocking || []).length ? "" : "disabled")}
-  </section></div>`;
+  </section></div>${ql.sim ? `<section class="panel ql-sim-panel"><div class="panel-head"><h2>Simulation · ${e(ql.sim.title)} <span class="pill">Training + validation · ${e(ql.sim.from)} → ${e(ql.sim.to)}</span></h2>${btn("Close", "ql-sim-close")}</div><div data-ql-replay="draft"></div></section>` : ""}`;
 }
 function buildConfig(d) {
   const strategy =
@@ -300,6 +362,11 @@ async function startResearch() {
   const benchmark = makeSnapshot({ symbol: d.benchmark, providerId: bench.providerId, source: bench.source, adjustment: bench.adjustment, bars: bench.bars, fetchedAt: bench.fetchedAt });
   config.data.providerId = main.providerId;
   config.data.priceAdjustment = snapshot.adjustment;
+  const few = d.mode === "manual" && d.manual.template !== "custom" ? tradeCount(d, d.manual.template, d.manual.params) : null;
+  if (few != null && few < MIN_LIBRARY_TRADES) {
+    d.errors = [`This strategy makes only ${few} trade${few === 1 ? "" : "s"} in training + validation. Pick one with at least ${MIN_LIBRARY_TRADES}, or shorten its periods.`];
+    return;
+  }
   d.errors = validateConfig(config, snapshot.bars.map((b) => b.date)).concat(snapshot.blocking.map((x) => "Data: " + x));
   if (d.errors.length) return;
   await store.saveSnapshot(snapshot);
@@ -466,7 +533,7 @@ async function openRun(exp, strategyId) {
       if (r?.manifest.strategySha256 === strategyId) runs.push({ ...r, split: h.untouched ? "holdout" : "holdout (reused)" });
     }
   }
-  ql.run = { exp, candidate: c, runs, split: "validation", tab: "trades", bars: data.snapshot.bars };
+  ql.run = { exp, candidate: c, runs, split: "validation", tab: "replay", bars: data.snapshot.bars };
   ql.view = "run";
 }
 function runView() {
@@ -490,8 +557,9 @@ function runView() {
         .map(([l, v, k]) => kpi(l, v, `${DEF[k] || ""} Window: ${r.split}, ${m.from} → ${m.to}.`))
         .join("")}</div>${m.informative ? "" : `<p class="ql-warn">Not statistically informative: ${m.trades} closed trade${m.trades === 1 ? "" : "s"}, below the minimum of ${exp.config.validation.minClosedTrades}.</p>`}`
     : ctx.empty("No bars in this window.");
-  const tabs = { trades: "Trades", rules: "Rules", robustness: "Robustness", data: "Data & assumptions", log: "Execution log" };
+  const tabs = { replay: "Replay", trades: "Trades", rules: "Rules", robustness: "Robustness", data: "Data & assumptions", log: "Execution log" };
   const body = {
+    replay: () => `<p class="muted">The ${e(r.split)} backtest revealed bar by bar. The numbers are final; only the drawing is paced.</p><div data-ql-replay="run"></div>`,
     trades: () =>
       (r.trades.length
         ? ctx.table(["Entry", "Exit", "Shares", "Entry price", "Exit price", "P&L", "Return", "Bars", "Exit reason"], r.trades.map((t) => `<tr><td>${e(t.entryAt)}</td><td>${e(t.exitAt)}</td><td>${t.qty}</td><td>${ctx.money(t.entryPrice)}</td><td>${ctx.money(t.exitPrice)}</td><td class="${t.pnl >= 0 ? "up" : "down"}">${ctx.money(t.pnl)}</td><td>${p(t.return)}</td><td>${t.bars}</td><td>${e(t.exitReason)}</td></tr>`))
@@ -620,6 +688,27 @@ function exportRun(kind) {
   ctx.download(`${base}-report.md`, report, "text/markdown");
 }
 
+// ---- Simulation replay ------------------------------------------------------------
+function simulate() {
+  const d = ql.draft;
+  if (!draftBars || !d?.windows) return ctx.notify("Load data first.", true);
+  const strategy = buildConfig(d).strategy;
+  const errs = strategy ? validateStrategy(strategy) : ["Not valid JSON yet."];
+  if (errs.length) return ctx.notify(errs[0], true);
+  const o = simOpts(d);
+  if (indCache.bars !== draftBars) (indCache.clear(), (indCache.bars = draftBars));
+  ql.sim = { title: strategy.name, from: o.from, to: o.to, data: { bars: draftBars, result: backtest(draftBars, strategy, o, indCache) } };
+}
+function mountReplays() {
+  const draft = document.querySelector('#app [data-ql-replay="draft"]');
+  if (draft && ql.sim) mountReplay(draft, "draft", ql.sim.data);
+  const run = document.querySelector('#app [data-ql-replay="run"]');
+  if (run && ql.run) {
+    const r = ql.run.runs.find((x) => x.split === ql.run.split) || ql.run.runs[0];
+    mountReplay(run, "run:" + r.manifestSha256 + r.split, (ql.run.replay ||= new Map()).get(r) || ql.run.replay.set(r, { bars: ql.run.bars, result: r }).get(r));
+  }
+}
+
 // ---- Actions and bindings ------------------------------------------------------
 export async function labAction(act, value) {
   switch (act) {
@@ -638,6 +727,24 @@ export async function labAction(act, value) {
     case "ql-load":
       readForm();
       await loadCoverage(true);
+      break;
+    case "ql-horizon":
+      ql.horizon = value;
+      break;
+    case "ql-tpl":
+      readForm();
+      ql.draft.manual.template = value;
+      if (value === "custom") ql.draft.manual.json ||= JSON.stringify(TEMPLATES.price_sma.build(TEMPLATE_PARAMS("price_sma")), null, 2);
+      else ql.draft.manual.params = TEMPLATE_PARAMS(value);
+      if (ql.sim) simulate();
+      break;
+    case "ql-sim":
+      readForm();
+      simulate();
+      requestAnimationFrame(() => document.querySelector("#app .ql-sim-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      break;
+    case "ql-sim-close":
+      ql.sim = null;
       break;
     case "ql-mode":
       readForm();
@@ -780,6 +887,7 @@ function readForm() {
 }
 export function labPaint() {
   if (ql.view === "run" && ql.run) paintRun();
+  mountReplays();
   document.querySelectorAll("#app [data-ql]").forEach((el) => {
     el.onchange = () => {
       const before = ql.draft?.manual.template + "|" + ql.draft?.sweep.template;
@@ -787,11 +895,12 @@ export function labPaint() {
       const d = ql.draft;
       if (el.dataset.ql === "manual.template" && d.manual.template !== "custom") d.manual.params = TEMPLATE_PARAMS(d.manual.template);
       if (el.dataset.ql === "manual.template" && d.manual.template === "custom" && !d.manual.json) d.manual.json = JSON.stringify(TEMPLATES.sma_cross.build(TEMPLATE_PARAMS("sma_cross")), null, 2);
-      if (el.dataset.ql === "sweep.template") d.sweep.ranges = structuredClone(SWEEP_DEFAULT[d.sweep.template]);
+      if (el.dataset.ql === "sweep.template") d.sweep.ranges = structuredClone(sweepDefault(d.sweep.template));
       if (el.hasAttribute("data-ql-rerender") || before !== d.manual.template + "|" + d.sweep.template) return ctx.render();
       const pv = document.querySelector("#app [data-ql-preview]"),
         wl = document.querySelector("#app [data-ql-workload]");
       if (pv) pv.innerHTML = preview(d);
+      if (ql.sim && el.dataset.ql.startsWith("manual.")) (simulate(), mountReplays());
       if (wl) wl.textContent = workloadText(d);
     };
   });

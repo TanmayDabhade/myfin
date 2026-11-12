@@ -143,6 +143,8 @@ The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldma
 - **Reproducible.** Each run's manifest records the strategy, config, the SHA-256 of the frozen bars, the engine version and the seed. Identical inputs give identical result hashes. You can export manifests, fills (CSV), strategies (JSON) and a short report.
 - **Labels.** Every result is labelled a historical backtest. Windows with fewer closed trades than your minimum are marked *Not statistically informative*. A single instrument chosen by you is flagged as survivorship-biased.
 
+The **strategy library** holds 13 prebuilt strategies grouped by holding period: short-term (RSI(2) pullback, snap-back to the 5-day average, fast EMA crossover, volume thrust), swing (RSI mean reversion and momentum, price over its average, high/low channel breakout, EMA crossover, volatility breakout) and trend following (SMA crossover, long-trend filter, golden cross). Each card says what the strategy does and how many trades it makes on your data in training + validation. Strategies with fewer than 6 trades are greyed out, because a handful of trades proves nothing. **Watch it trade** replays the backtest bar by bar at 1× to 60×, showing buys, sells, holding periods, equity against buy and hold, and each trade as it closes. Run detail opens on the same replay.
+
 Research runs in a background worker. Datasets, runs, frozen selections and holdout results are written once to `aperture.sqlite`, and the desktop database refuses to replace them. Quant Lab places no orders, real or paper. Forward testing in a separately labelled paper account is planned.
 
 ## Staying current
