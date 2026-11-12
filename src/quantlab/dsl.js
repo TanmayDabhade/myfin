@@ -163,36 +163,166 @@ export const strategyHash = (s) => sha256(canonical(s));
 // ---- Templates ------------------------------------------------------------
 const ind = (kind, period, field) => ({ indicator: { kind, ...(period ? { period } : {}), ...(field ? { field } : {}) } });
 const close = { indicator: { kind: "price", field: "close" } };
-const base = (name, entry, exit) => ({ schemaVersion: 1, name, entry, exit, sizing: { method: "fixed_fraction", fraction: 1 }, constraints: { cooldownBars: 0 } });
+// opts: hold = exit after this many bars at the latest; cooldown = bars to wait after an exit.
+const base = (name, entry, exit, opts = {}) => ({
+  schemaVersion: 1,
+  name,
+  entry,
+  exit,
+  sizing: { method: "fixed_fraction", fraction: 1 },
+  constraints: { cooldownBars: opts.cooldown || 0, ...(opts.hold ? { maxHoldingBars: opts.hold } : {}) },
+});
+const cross = (op, a, b) => ({ op, lhs: a, rhs: b });
+const k = (v) => ({ constant: v });
 
+// How long a strategy usually holds. Shorter horizons trade more often.
+export const HORIZONS = {
+  short: { label: "Short-term", hint: "Holds 1–10 days. Many trades a year." },
+  swing: { label: "Swing", hint: "Holds 2–8 weeks. A trade every month or two." },
+  trend: { label: "Trend following", hint: "Holds months. Few trades, rides long moves." },
+};
+
+// Prebuilt strategies. params: name → [min, max, default]. Each has a short
+// plain-language account of what it does and when it tends to work.
 export const TEMPLATES = {
-  sma_cross: {
-    label: "SMA crossover",
-    params: { fast: [5, 100, 20], slow: [10, 400, 50] },
-    valid: (p) => p.fast < p.slow,
-    build: (p) => base(`SMA ${p.fast}/${p.slow} crossover`, { op: "crosses_above", lhs: ind("sma", p.fast), rhs: ind("sma", p.slow) }, { op: "crosses_below", lhs: ind("sma", p.fast), rhs: ind("sma", p.slow) }),
+  rsi2_pullback: {
+    label: "RSI(2) pullback in an uptrend",
+    horizon: "short",
+    blurb: "Buys a sharp 1–3 day dip while the long trend is up, sells the bounce.",
+    how: "RSI over 2 bars swings to extremes after just a couple of down days. When it falls below the buy level while price is still above its long average, the dip is bought; the position is sold once RSI recovers past the sell level, or after the holding limit.",
+    params: { period: [2, 10, 2], buyBelow: [2, 40, 15], sellAbove: [50, 95, 70], trend: [20, 250, 100], hold: [1, 30, 6] },
+    valid: (p) => p.buyBelow < p.sellAbove,
+    build: (p) =>
+      base(
+        `RSI(${p.period}) < ${p.buyBelow} above SMA ${p.trend}, exit RSI > ${p.sellAbove}`,
+        { all: [cross("lt", ind("rsi", p.period), k(p.buyBelow)), cross("gt", close, ind("sma", p.trend))] },
+        cross("gt", ind("rsi", p.period), k(p.sellAbove)),
+        { hold: p.hold },
+      ),
   },
-  ema_cross: {
-    label: "EMA crossover",
-    params: { fast: [5, 100, 12], slow: [10, 400, 34] },
+  ma_snapback: {
+    label: "Snap-back to the short average",
+    horizon: "short",
+    blurb: "Buys when price slips under its 5-day average in an uptrend, sells when it reclaims it.",
+    how: "Short pullbacks inside an uptrend often reverse within days. Entry is the close crossing below the fast average while above the trend average; exit is the close crossing back above the fast average, or the holding limit.",
+    params: { fast: [3, 20, 5], trend: [20, 250, 50], hold: [1, 30, 8] },
+    valid: (p) => p.fast < p.trend,
+    build: (p) =>
+      base(
+        `Close dips under SMA ${p.fast} above SMA ${p.trend}`,
+        { all: [cross("crosses_below", close, ind("sma", p.fast)), cross("gt", close, ind("sma", p.trend))] },
+        cross("crosses_above", close, ind("sma", p.fast)),
+        { hold: p.hold },
+      ),
+  },
+  ema_fast_cross: {
+    label: "Fast EMA crossover",
+    horizon: "short",
+    blurb: "Very short averages crossing each other. Catches small moves, trades often.",
+    how: "Enters when the fast EMA crosses above the slow EMA and exits on the cross back below. Short periods react within days, so it trades frequently and pays more in costs.",
+    params: { fast: [2, 20, 3], slow: [4, 40, 8] },
     valid: (p) => p.fast < p.slow,
-    build: (p) => base(`EMA ${p.fast}/${p.slow} crossover`, { op: "crosses_above", lhs: ind("ema", p.fast), rhs: ind("ema", p.slow) }, { op: "crosses_below", lhs: ind("ema", p.fast), rhs: ind("ema", p.slow) }),
+    build: (p) => base(`EMA ${p.fast}/${p.slow} crossover`, cross("crosses_above", ind("ema", p.fast), ind("ema", p.slow)), cross("crosses_below", ind("ema", p.fast), ind("ema", p.slow))),
+  },
+  volume_thrust: {
+    label: "Volume thrust",
+    horizon: "short",
+    blurb: "Buys a move above the 10-day EMA when volume is above normal.",
+    how: "A break above a short average on heavy volume suggests real buying. Entry needs both the close crossing above the EMA and volume above its own average; exit is the close falling back under the EMA, or the holding limit.",
+    params: { ema: [3, 50, 10], volume: [5, 100, 20], hold: [1, 60, 10] },
+    valid: () => true,
+    build: (p) =>
+      base(
+        `Close crosses EMA ${p.ema} on volume above its ${p.volume}-day average`,
+        { all: [cross("crosses_above", close, ind("ema", p.ema)), cross("gt", { indicator: { kind: "volume" } }, ind("sma", p.volume, "volume"))] },
+        cross("crosses_below", close, ind("ema", p.ema)),
+        { hold: p.hold },
+      ),
   },
   rsi_reversion: {
     label: "RSI mean reversion",
+    horizon: "swing",
+    blurb: "Classic oversold/overbought: buy when RSI is low, sell when it recovers.",
+    how: "RSI measures recent gains against losses on a 0–100 scale. Below the buy level the stock is considered oversold; the position is closed once RSI climbs past the sell level.",
     params: { period: [2, 30, 14], buyBelow: [5, 45, 30], sellAbove: [50, 95, 55] },
     valid: (p) => p.buyBelow < p.sellAbove,
-    build: (p) => base(`RSI(${p.period}) < ${p.buyBelow}, exit > ${p.sellAbove}`, { op: "lt", lhs: ind("rsi", p.period), rhs: { constant: p.buyBelow } }, { op: "gt", lhs: ind("rsi", p.period), rhs: { constant: p.sellAbove } }),
+    build: (p) => base(`RSI(${p.period}) < ${p.buyBelow}, exit > ${p.sellAbove}`, cross("lt", ind("rsi", p.period), k(p.buyBelow)), cross("gt", ind("rsi", p.period), k(p.sellAbove))),
+  },
+  rsi_momentum: {
+    label: "RSI momentum",
+    horizon: "swing",
+    blurb: "Buys when RSI pushes up through the midline, sells when momentum fades.",
+    how: "The opposite of mean reversion: RSI crossing above the entry level means buyers have taken over. The exit level sits a little lower so small wobbles don't shake the position out.",
+    params: { period: [5, 30, 14], enter: [45, 80, 55], exit: [20, 60, 45] },
+    valid: (p) => p.exit < p.enter,
+    build: (p) => base(`RSI(${p.period}) crosses ${p.enter}, exit under ${p.exit}`, cross("crosses_above", ind("rsi", p.period), k(p.enter)), cross("crosses_below", ind("rsi", p.period), k(p.exit))),
+  },
+  price_sma: {
+    label: "Price over its moving average",
+    horizon: "swing",
+    blurb: "Owns the stock while it closes above its 20-day average.",
+    how: "The simplest trend rule. Enter when the close crosses above the average, exit when it crosses back below. A cooldown avoids re-entering on the very next wobble.",
+    params: { period: [5, 200, 20], cooldown: [0, 20, 2] },
+    valid: () => true,
+    build: (p) => base(`Close over SMA ${p.period}`, cross("crosses_above", close, ind("sma", p.period)), cross("crosses_below", close, ind("sma", p.period)), { cooldown: p.cooldown }),
+  },
+  channel_breakout: {
+    label: "High/low channel breakout",
+    horizon: "swing",
+    blurb: "Buys a close above the average daily high, sells below the average daily low.",
+    how: "The averages of the highs and lows form a channel around price. Closing above the top band is a breakout; the position is held until the close falls under the bottom band, which gives the trade room.",
+    params: { period: [5, 100, 20] },
+    valid: () => true,
+    build: (p) => base(`Close above SMA(high ${p.period}), exit below SMA(low ${p.period})`, cross("crosses_above", close, ind("sma", p.period, "high")), cross("crosses_below", close, ind("sma", p.period, "low"))),
+  },
+  ema_cross: {
+    label: "EMA crossover",
+    horizon: "swing",
+    blurb: "Medium exponential averages crossing. A standard swing trend signal.",
+    how: "Enters when the fast EMA crosses above the slow EMA, exits on the cross back below. EMAs weight recent prices more, so they turn sooner than simple averages.",
+    params: { fast: [5, 100, 12], slow: [10, 400, 34] },
+    valid: (p) => p.fast < p.slow,
+    build: (p) => base(`EMA ${p.fast}/${p.slow} crossover`, cross("crosses_above", ind("ema", p.fast), ind("ema", p.slow)), cross("crosses_below", ind("ema", p.fast), ind("ema", p.slow))),
   },
   vol_breakout: {
     label: "Volatility breakout",
+    horizon: "swing",
+    blurb: "Buys a break above the trend average when daily ranges are expanding.",
+    how: "ATR measures how far price moves in a day. Entry needs the close crossing above the trend average while short-term ATR is above long-term ATR (volatility rising); exit when the close falls back under the average.",
     params: { trend: [10, 200, 50], fastAtr: [2, 30, 5], slowAtr: [10, 100, 20] },
     valid: (p) => p.fastAtr < p.slowAtr,
     build: (p) =>
       base(
         `Close > SMA ${p.trend} with ATR ${p.fastAtr} > ATR ${p.slowAtr}`,
-        { all: [{ op: "crosses_above", lhs: close, rhs: ind("sma", p.trend) }, { op: "gt", lhs: ind("atr", p.fastAtr), rhs: ind("atr", p.slowAtr) }] },
-        { op: "crosses_below", lhs: close, rhs: ind("sma", p.trend) },
+        { all: [cross("crosses_above", close, ind("sma", p.trend)), cross("gt", ind("atr", p.fastAtr), ind("atr", p.slowAtr))] },
+        cross("crosses_below", close, ind("sma", p.trend)),
       ),
+  },
+  sma_cross: {
+    label: "SMA crossover",
+    horizon: "trend",
+    blurb: "20-day average crossing the 50-day. Holds through most of a trend.",
+    how: "Enters when the fast simple average crosses above the slow one and exits on the cross back below. Slower than EMAs, so fewer false signals and fewer trades.",
+    params: { fast: [5, 100, 20], slow: [10, 400, 50] },
+    valid: (p) => p.fast < p.slow,
+    build: (p) => base(`SMA ${p.fast}/${p.slow} crossover`, cross("crosses_above", ind("sma", p.fast), ind("sma", p.slow)), cross("crosses_below", ind("sma", p.fast), ind("sma", p.slow))),
+  },
+  trend_filter: {
+    label: "Long-trend filter",
+    horizon: "trend",
+    blurb: "In the market only while price is above its 100-day average.",
+    how: "Steps aside in long downtrends. Enters when the close crosses above the long average and exits when it closes below the exit average, which can be shorter to get out sooner.",
+    params: { period: [50, 250, 100], exitPeriod: [10, 250, 50], cooldown: [0, 20, 5] },
+    valid: () => true,
+    build: (p) => base(`Close over SMA ${p.period}, exit under SMA ${p.exitPeriod}`, cross("crosses_above", close, ind("sma", p.period)), cross("crosses_below", close, ind("sma", p.exitPeriod)), { cooldown: p.cooldown }),
+  },
+  golden_cross: {
+    label: "Golden cross (50/200)",
+    horizon: "trend",
+    blurb: "The textbook 50/200-day signal. Very few trades; good for context, weak as evidence.",
+    how: "Enters when the 50-day average crosses above the 200-day and exits on the 'death cross' back below. It may trade only once or twice in five years, too few to judge from a backtest.",
+    params: { fast: [20, 100, 50], slow: [100, 300, 200] },
+    valid: (p) => p.fast < p.slow,
+    build: (p) => base(`SMA ${p.fast}/${p.slow} golden cross`, cross("crosses_above", ind("sma", p.fast), ind("sma", p.slow)), cross("crosses_below", ind("sma", p.fast), ind("sma", p.slow))),
   },
 };

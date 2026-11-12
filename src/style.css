@@ -1362,3 +1362,42 @@ textarea.ql-json { resize: vertical; }
 .ql-sel h3, .panel-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .ql-status { display: block; white-space: normal; min-width: 130px; max-width: 190px; color: #8d8d8d; }
 .ql-strat small { max-width: 260px; }
+
+/* Quant Lab strategy library and replay */
+.ql-hint { font-size: 12px; margin: 0 0 10px; }
+.ql-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.ql-card { display: flex; flex-direction: column; align-items: stretch; gap: 6px; text-align: left; padding: 10px 12px; border-radius: 8px; background: #111; border: 1px solid #262626; color: #e5e5e5; white-space: normal; min-width: 0; }
+.ql-card:hover:not(:disabled) { border-color: #4a4a4a; background: #161616; }
+.ql-card.active { border-color: #ededed; background: #1a1a1a; box-shadow: inset 0 0 0 1px #ededed; }
+.ql-card:disabled { opacity: 0.45; cursor: not-allowed; }
+.ql-card small { color: #9a9a9a; font-size: 12px; line-height: 1.4; }
+.ql-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.ql-card-top b, .ql-card-top h3 { font-weight: 600; font-size: 13px; margin: 0; }
+.ql-card-n { font-size: 11px; color: #bababa; margin-top: auto; }
+.ql-hz { flex: none; font-size: 10px; padding: 2px 6px; border-radius: 999px; border: 1px solid #393939; color: #bababa; white-space: nowrap; }
+.ql-hz-short { border-color: #2d5a43; color: #4cc38a; }
+.ql-hz-swing { border-color: #5a4a2d; color: #d6a85c; }
+.ql-hz-trend { border-color: #2d445a; color: #6fa8dc; }
+.ql-chosen { margin-top: 14px; padding: 12px 14px; border: 1px solid #2b2b2b; border-radius: 8px; background: #0f0f0f; }
+.ql-how-text { font-size: 13px; line-height: 1.55; color: #cfcfcf; margin: 8px 0 4px; }
+.ql-how { margin-top: 14px; border-top: 1px solid #222; padding-top: 10px; font-size: 13px; }
+.ql-how summary { cursor: pointer; font-weight: 600; }
+.ql-how ol { padding-left: 18px; line-height: 1.55; color: #cfcfcf; }
+.ql-how li { margin: 6px 0; }
+.ql-sim-panel { margin-top: 16px; }
+.ql-sim-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.ql-sim-bar .ql-seg { margin: 0; }
+.ql-sim-bar input[type="range"] { flex: 1; min-width: 140px; accent-color: #ededed; }
+.ql-sim-date { font-size: 12px; color: #8d8d8d; font-variant-numeric: tabular-nums; min-width: 110px; }
+.ql-sim-body { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; }
+@media (max-width: 900px) { .ql-sim-body { grid-template-columns: minmax(0, 1fr); } }
+.ql-sim-charts canvas { display: block; width: 100%; }
+.ql-sim-cap { font-size: 11px; color: #8d8d8d; margin: 6px 0 4px; }
+.ql-sim-stats { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; font-size: 12px; margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+.ql-sim-stats dt { color: #8d8d8d; }
+.ql-sim-stats dd { margin: 0; text-align: right; }
+.ql-sim-log { list-style: none; margin: 0; padding: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.ql-sim-log li { display: grid; grid-template-columns: minmax(0, 1fr) auto 56px; gap: 8px; padding: 5px 0; border-bottom: 1px solid #1d1d1d; }
+.ql-sim-log li b { text-align: right; font-weight: 500; }
+.ql-sim-log li:first-child { animation: ql-flash 0.6s ease-out; }
+@keyframes ql-flash { from { background: #1f2a24; } to { background: transparent; } }
