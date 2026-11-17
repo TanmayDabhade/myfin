@@ -56,6 +56,14 @@ import {
   TX_CODES,
 } from "./holders.js";
 import "./style.css";
+import wasmUrl from "./options/options.wasm?url";
+import { loadMath, ESTIMATORS } from "./options/math.js";
+import { VOL_SERIES, VOL_CITATION, RV_WINDOWS, fredSeries, rankPercentile, vrpSeries, termRatio, regime, REGIME_RULES, volProfile, realized } from "./vol.js";
+import { multiLine, signedBars, coneChart, SERIES_COLORS } from "./volcharts.js";
+import { bsm, sviFit } from "./options/math.js";
+import { syntheticChain, strikeRows, nearMoney, smile, termPoints, strikeStep, DAY_MS, gammaExposure, GEX_CONVENTIONS, impliedMove, earningsMoves } from "./options/chain.js";
+import { TEMPLATES, buildTemplate, curves, extremes, positionGreeks, scenarioGrid, netPremium, lastExpiry, bookScenario, hedgeSim } from "./options/strategy.js";
+import { optionsChain, optionsHistory, backfillStatus, backfillStart, backfillPause, optionsPurge, agentStatus, agentInstall, agentRemove } from "./bridge.js";
 import { labInit, labPage, labAction, labPaint, labOpen } from "./quantlab/ui.js";
 import {
   load,
@@ -124,6 +132,9 @@ import {
   validateWorkspace,
   migrate,
   number,
+  requirements,
+  parseContract,
+  settleExpiries,
 } from "./engine.js";
 const $ = (s) => document.querySelector(s),
   esc = (x) =>
@@ -154,6 +165,10 @@ const pct = (x) => (x == null ? "—" : fmt(x * 100) + "%"),
           notation: "compact",
           maximumFractionDigits: 2,
         }).format(x);
+// The options and volatility maths (Rust, compiled to WebAssembly). The rest
+// of the app works without it, so a failure only disables those views.
+let mathError = "";
+await loadMath(fetch(wasmUrl)).catch((e) => (mathError = String(e?.message || e)));
 let state = migrate(await load()),
   page = "Overview",
   keyInfo = await keyStatus().catch(() => null),
@@ -216,11 +231,11 @@ if (state.relationshipGraph) validateGraph(state.relationshipGraph);
 // Market-wide and personal pages. Everything about one company lives on the
 // stock page, which the sidebar lists by ticker.
 const navGroups = [
-  ["Markets", ["Overview", "Universe", "Screener", "Economy", "Commodities"]],
+  ["Markets", ["Overview", "Universe", "Screener", "Economy", "Volatility", "Commodities"]],
   ["Research", ["Quant Lab"]],
   ["Your account", ["Portfolio", "Trade", "Alerts"]],
 ];
-const navIcons = { Overview: "◫", Universe: "◍", Screener: "☷", Economy: "◎", Commodities: "≋", Portfolio: "◉", Trade: "⇄", Alerts: "◇", "Quant Lab": "∿", Settings: "⚙" };
+const navIcons = { Volatility: "σ", Overview: "◫", Universe: "◍", Screener: "☷", Economy: "◎", Commodities: "≋", Portfolio: "◉", Trade: "⇄", Alerts: "◇", "Quant Lab": "∿", Settings: "⚙" };
 // Dover Strait by default: AISStream's coverage is strong there and thin in
 // some Middle East and open-ocean areas. The last pick is remembered.
 let maritimeSelected = locations.some((x) => x.id === state.vesselLocation)
@@ -483,6 +498,7 @@ window.addEventListener("resize", () => {
     else {
       drawCharts();
       drawRiskCharts();
+      drawVolCharts();
     }
   }, 150);
 });
@@ -498,18 +514,21 @@ function render() {
     Portfolio: portfolioPage,
     Screener: screener,
     Economy: economy,
+    Volatility: volatilityPage,
     Alerts: alerts,
     Commodities: commodities,
     Settings: settings,
     "Quant Lab": labPage,
   };
   const demo = page !== "Setup" && state.mode === "sample";
+  volBuilds = {};
   document.getElementById("app").innerHTML =
     `<aside><div class="brand"><i>◈</i> APERTURE</div><div class="side-search"><input id="search" placeholder="Ticker or AAPL HDS" aria-label="Search any listing or type a function like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${sideNav()}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content">${page === "Stock" ? "" : `<div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>`}${views[page]()}</section><footer>Aperture 0.3 · USD equity workspace · Daily and intraday prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
   bind();
   bindVessel();
   drawCharts();
   drawRiskCharts();
+  drawVolCharts();
   drawDelta();
   // One corrective pass at most (a scrollbar appearing could otherwise loop).
   const g = document.querySelector(".relationship-graph");
@@ -1362,7 +1381,7 @@ function stockPage() {
 function stockGrid() {
   const tile = (code, body, cls = "") =>
     `<section class="panel tile ${cls}" data-tile="${code}"><div class="panel-head"><h2><button class="tile-title" data-action="stock-view" data-value="${code}">${viewLabel(code)}</button><kbd>${code}</kbd></h2><button class="icon" data-action="stock-view" data-value="${code}" title="Open ${viewLabel(code)}" aria-label="Open ${viewLabel(code)}">⤢</button></div>${body}</section>`;
-  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("ASK", analystTile())}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("RSK", riskTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
+  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("ASK", analystTile())}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("RSK", riskTile())}${tile("VOL", volTile())}${tile("OMON", omonTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
 }
 function stockBody() {
   const views = {
@@ -1376,6 +1395,9 @@ function stockBody() {
     SPLC: relationsView,
     DCF: valuation,
     RSK: riskView,
+    VOL: volView,
+    OMON: omonView,
+    OSA: osaView,
     TAS: tapeView,
     CF: secPanel,
   };
@@ -1943,6 +1965,34 @@ function analystFacts() {
     risk: quantRuns[symbol]?.data?.metrics || null,
     earnings: fh("earnings")?.earningsCalendar || [],
     today: nyDate(Date.now()),
+    options: analyst?.choice === "online" ? null : optionFacts(a),
+  };
+}
+// Volatility and option figures for the on-device Analyst only.
+function optionFacts(a) {
+  if (!a || mathError) return null;
+  const rv = memo(`rv21:${barsKey(a)}`, () => realized(a.bars, { window: 21 })).values.at(-1);
+  const rows = (ivHist[symbol]?.rows || []).filter((r) => r.atm30 != null);
+  const byDate = new Map();
+  for (const r of rows) if (!byDate.has(r.date) || r.source === "alpaca") byDate.set(r.date, r);
+  const merged = [...byDate.values()].sort((x, y) => (x.date < y.date ? -1 : 1));
+  const last = merged.at(-1);
+  const rank = merged.length > 20 ? rankPercentile(merged.map((r) => ({ date: r.date, value: r.atm30 })), 252) : null;
+  const c = chainOf();
+  const cal = fh("earnings")?.earningsCalendar || [];
+  const today = new Date(marketNow()).toISOString().slice(0, 10);
+  const next = cal.filter((e) => e.date >= today).sort((x, y) => (x.date < y.date ? -1 : 1))[0];
+  const im = c && next ? impliedMove(c, next.date, next.hour === "bmo" ? "bmo" : "amc") : null;
+  return {
+    rv21: rv ?? null,
+    atm30: last?.atm30 ?? c?.summary?.atm30 ?? null,
+    atm30Source: last ? (last.source === "alpaca" ? "recorded quotes" : "backfilled trade prints") : "today's chain",
+    atm30Date: last?.date ?? today,
+    ivRank: rank?.rank ?? null,
+    ivDays: rank?.n ?? 0,
+    skew30: last?.skew30 ?? null,
+    impliedMove: im?.move ?? null,
+    impliedMoveExpiry: im?.expiry ?? null,
   };
 }
 // `label` is what the conversation shows (a quick question's short name);
@@ -2861,7 +2911,9 @@ function tradeTable() {
 }
 function portfolioPage() {
   const universe = Object.fromEntries(assets().map((a) => [a.symbol, a])),
-    p = portfolio(account(), universe);
+    marks = optionMarks(),
+    p = portfolio(account(), universe, marks);
+  const shares = p.positions.filter((x) => x.instrument !== "option");
   return `<div class="stats">${stat("Portfolio value", money(p.value), p.incomplete ? "Includes cost-basis fallback for missing marks" : "Cash + latest available marks")}${stat("Return since inception", pct(p.value / account().initial - 1), "No external flows")}${stat("Realized P&L", money(p.realized), "Average-cost accounting, fees included")}${stat("Cash allocation", pct(p.cash / p.value))}</div><section class="panel"><div class="panel-head"><h2>Positions & allocation</h2>${button("Export positions", "positions-export")}</div>${table(
     [
       "Asset",
@@ -2872,17 +2924,18 @@ function portfolioPage() {
       "Weight",
       "Unrealized P&L",
     ],
-    p.positions.map(
-      (p1) =>
-        `<tr><td>${esc(p1.symbol)}</td><td>${fmt(p1.qty, 4)}</td><td>${money(p1.cost / p1.qty)}</td><td>${money(p1.price)}</td><td>${money(p1.market)}</td><td>${pct(p1.market / p.value)}</td><td class="${tone(p1.pnl)}">${money(p1.pnl)}</td></tr>`,
-    ),
-  )}${!p.positions.length ? empty("Buy shares in the Trade workspace to build a portfolio.") : ""}<div class="allocation">${p.positions.map((x) => `<div style="flex:${x.market || 0}" title="${esc(x.symbol)} ${pct(x.market / p.value)}">${esc(x.symbol)}</div>`).join("")}<div style="flex:${p.cash}">Cash</div></div></section><section class="panel"><div class="panel-head"><h2>Paper equity history</h2><small>Daily marks · no dividends or external cash flows</small></div>${equityCurve(account(), universe).length ? spark(equityCurve(account(), universe).map((x) => x.close)) : empty("Your trade history will appear here.")}<div class="metrics"><span>Portfolio volatility</span><b>${pct(risk(equityCurve(account(), universe))?.vol)}</b><span>Portfolio max drawdown</span><b>${pct(risk(equityCurve(account(), universe))?.drawdown)}</b></div><small>Uses historical closes available at each date and the recorded trade ledger. Missing marks fall back to cost basis. Corporate actions and distributions are not processed.</small></section><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Asset risk</h2></div>${table(
+    p.positions.map((p1) => {
+      const m = p1.instrument === "option" ? p1.multiplier || 100 : 1;
+      const name = p1.instrument === "option" ? `${esc(contractLabel(p1.symbol))} <small class="muted">${esc(p1.markSource || "")}</small> ${button("Close", "opt-close", "icon", `data-value="${esc(p1.symbol)}"`)}` : esc(p1.symbol);
+      return `<tr><td>${name}</td><td>${fmt(p1.qty, p1.instrument === "option" ? 0 : 4)}${p1.instrument === "option" ? " ×100" : ""}</td><td>${money(p1.cost / (p1.qty * m))}</td><td>${money(p1.price)}</td><td>${money(p1.market)}</td><td>${pct(p1.market / p.value)}</td><td class="${tone(p1.pnl)}">${money(p1.pnl)}</td></tr>`;
+    }),
+  )}${!p.positions.length ? empty("Buy shares in the Trade workspace to build a portfolio.") : ""}<div class="allocation">${p.positions.map((x) => `<div style="flex:${Math.max(0, x.market || 0)}" title="${esc(x.symbol)} ${pct(x.market / p.value)}">${esc(x.symbol)}</div>`).join("")}<div style="flex:${p.cash}">Cash</div></div></section><section class="panel"><div class="panel-head"><h2>Paper equity history</h2><small>Daily marks · no dividends or external cash flows</small></div>${equityCurve(account(), universe).length ? spark(equityCurve(account(), universe).map((x) => x.close)) : empty("Your trade history will appear here.")}<div class="metrics"><span>Portfolio volatility</span><b>${pct(risk(equityCurve(account(), universe))?.vol)}</b><span>Portfolio max drawdown</span><b>${pct(risk(equityCurve(account(), universe))?.drawdown)}</b></div><small>Uses historical closes available at each date and the recorded trade ledger. Missing marks fall back to cost basis. Corporate actions and distributions are not processed.</small></section><div class="grid halves"><section class="panel"><div class="panel-head"><h2>Asset risk</h2></div>${table(
     ["Asset", "Volatility", "Max drawdown", "Sharpe¹"],
-    p.positions.map((p) => {
+    shares.map((p) => {
       const r = universe[p.symbol] ? risk(universe[p.symbol].bars) : null;
       return `<tr><td>${esc(p.symbol)}</td><td>${pct(r?.vol)}</td><td>${pct(r?.drawdown)}</td><td>${fmt(r?.sharpe)}</td></tr>`;
     }),
-  )}<small>¹ Daily close returns, 252 trading days/year, 4% annual risk-free assumption. Price returns, not total returns. This describes each asset, not historical portfolio performance.</small></section><section class="panel"><div class="panel-head"><h2>Portfolio stress test</h2></div><label>Uniform asset-price shock (%)<input id="shock" type="range" min="-60" max="40" value="-20"></label><div id="stress" class="stress"></div><small>Static positions; cash unchanged. No correlations, options, taxes, or liquidity effects.</small><div class="panel-head"><h2>Benchmark context</h2></div>${[
+  )}<small>¹ Daily close returns, 252 trading days/year, 4% annual risk-free assumption. Price returns, not total returns. This describes each asset, not historical portfolio performance.</small></section><section class="panel"><div class="panel-head"><h2>Portfolio stress test</h2></div><label>Uniform asset-price shock (%)<input id="shock" type="range" min="-60" max="40" value="-20"></label><div id="stress" class="stress"></div><small>Static positions; cash unchanged. No correlations, taxes, or liquidity effects.${p.positions.some((x) => x.instrument === "option") ? " Options move non-linearly: see Option risk below for full revaluation." : ""}</small><div class="panel-head"><h2>Benchmark context</h2></div>${[
     "SPY",
     "QQQ",
   ]
@@ -2895,12 +2948,12 @@ function portfolioPage() {
     .join(
       "",
     )}<small>Benchmark windows may differ from your account inception. Not an excess-return calculation.</small></section></div><section class="panel"><div class="panel-head"><h2>Return correlation</h2></div>${table(
-    ["Asset", ...p.positions.map((x) => esc(x.symbol))],
-    p.positions.map(
+    ["Asset", ...shares.map((x) => esc(x.symbol))],
+    shares.map(
       (x) =>
-        `<tr><td>${esc(x.symbol)}</td>${p.positions.map((y) => `<td>${universe[x.symbol] && universe[y.symbol] ? fmt(correlation(universe[x.symbol].bars, universe[y.symbol].bars)) : "—"}</td>`).join("")}</tr>`,
+        `<tr><td>${esc(x.symbol)}</td>${shares.map((y) => `<td>${universe[x.symbol] && universe[y.symbol] ? fmt(correlation(universe[x.symbol].bars, universe[y.symbol].bars)) : "—"}</td>`).join("")}</tr>`,
     ),
-  )}<small>Daily returns aligned by calendar date. At least 3 overlapping return observations.</small></section>`;
+  )}<small>Daily returns aligned by calendar date. At least 3 overlapping return observations.</small></section>${optionRiskPanel(p, marks)}`;
 }
 function filtered() {
   return assets().filter((a) => {
@@ -3135,7 +3188,7 @@ function setup() {
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${quantPanel()}${analystPanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "massive", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, MASSIVE_API_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${optionDataPanel()}${referencePanel()}${quantPanel()}${analystPanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices, VIX and VIX3M (Cboe, via FRED) and live AIS vessel positions (AISStream). Option chains come from Alpaca's free indicative feed and option history from Massive's free tier, both for your own research. Not included: tick data, exchange (OPRA) option quotes, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in aperture.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -3379,6 +3432,647 @@ function drawRiskCharts() {
     hover(el, chart);
   });
 }
+// ---- Volatility (market page and the stock page's VOL view) ---------------
+// Realized volatility comes from the Rust options maths (WebAssembly);
+// VIX and VIX3M from FRED. Every figure says what it is and where it came from.
+let optStatusAt = 0;
+// Options run on the market's clock: in demo data, the last synthetic close.
+function marketNow() {
+  if (state.mode !== "sample") return Date.now();
+  const last = assets().reduce((m, a) => (a.bars?.at(-1)?.date > m ? a.bars.at(-1).date : m), "");
+  return last ? Date.parse(last + "T21:00:00Z") : Date.now();
+}
+let volRange = "2Y",
+  volEstimator = "yz";
+const VOL_RANGES = [
+  ["1Y", 252],
+  ["2Y", 504],
+  ["5Y", 1260],
+  ["Max", Infinity],
+];
+// Chart slots for the volatility views: id → builder(width). Reset on every render.
+let volBuilds = {};
+const vc = (id, h, label, build) => {
+  volBuilds[id] = build;
+  return `<div class="rc" data-vc="${id}" style="min-height:${h}px" aria-label="${esc(label)}"><div class="rc-tip" hidden></div></div>`;
+};
+function drawVolCharts() {
+  document.querySelectorAll("[data-vc]").forEach((el) => {
+    const W = Math.max(240, Math.round(el.clientWidth));
+    const chart = volBuilds[el.dataset.vc]?.(W);
+    el.querySelector("svg")?.remove();
+    if (!chart) return;
+    el.insertAdjacentHTML("afterbegin", chart.svg);
+    el.style.minHeight = "";
+    hover(el, chart);
+  });
+}
+// The calculations are cheap but render runs often; reuse results for unchanged inputs.
+const volMemo = new Map();
+function memo(key, fn) {
+  if (!volMemo.has(key)) {
+    if (volMemo.size > 60) volMemo.clear();
+    volMemo.set(key, fn());
+  }
+  return volMemo.get(key);
+}
+const barsKey = (a) => `${a.symbol}:${a.bars.length}:${a.bars.at(-1)?.date}:${a.bars.at(-1)?.close}`;
+const volPct = (v, d = 1) => (v == null || !Number.isFinite(v) ? "—" : (v * 100).toFixed(d) + "%");
+const ordinal = (p) => {
+  if (p == null) return "—";
+  const n = Math.round(p * 100);
+  const s = n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th";
+  return n + s;
+};
+const volSeriesData = (id) => (state.mode === "market" ? fredSeries(state.macro[volKey(id)]) : []);
+const rangeCut = (rows) => {
+  const n = VOL_RANGES.find(([k]) => k === volRange)?.[1] ?? 504;
+  return n === Infinity ? rows : rows.slice(-n);
+};
+const rangePick = () => `<div class="seg" role="group" aria-label="Chart range">${VOL_RANGES.map(([k]) => button(k, "vol-range", volRange === k ? "active" : "", `data-value="${k}" aria-pressed="${volRange === k}"`)).join("")}</div>`;
+const fredLink = (id) => link("https://fred.stlouisfed.org/series/" + id, id);
+
+function volatilityPage() {
+  if (mathError) return `<section class="panel">${empty("The volatility calculations didn't load: " + esc(mathError))}</section>`;
+  const vix = volSeriesData("VIXCLS"),
+    v3 = volSeriesData("VXVCLS");
+  const spy = activeMap()[BENCHMARK];
+  const fredNote = !native
+    ? "VIX and VIX3M load from FRED in the desktop app."
+    : state.mode !== "market"
+      ? "VIX and VIX3M load from FRED with Live data. Demo data shows realized volatility only, from synthetic prices."
+      : !hasKey("fred")
+        ? "Add a free FRED key in Settings → Data sources to load VIX and VIX3M."
+        : loadErrors["fred:" + volKey("VIXCLS")] || (vix.length ? "" : "Loading VIX and VIX3M from FRED…");
+  const rank = vix.length > 1 ? rankPercentile(vix, 252) : null;
+  const ratios = vix.length && v3.length ? termRatio(vix, v3) : [];
+  const ratio = ratios.at(-1) || null;
+  const reg = rank ? regime(rank.percentile, ratio && ratio.date === rank.date ? ratio.value : null) : null;
+  const spyRv = spy ? memo("rv21:" + barsKey(spy), () => realized(spy.bars, { window: 21 })) : null;
+  const vrp = spy && vix.length ? memo(`vrp:${barsKey(spy)}:${vix.length}:${vix.at(-1).date}`, () => vrpSeries(vix, spy.bars, { window: 21 })) : null;
+  const v3last = v3.at(-1);
+  const spyNow = spyRv ? spyRv.values.at(-1) : null;
+  const spyTile = kpi(`${BENCHMARK} realized · 21 days`, volPct(spyNow), spy ? `Yang–Zhang, daily OHLC through ${esc(spy.bars.at(-1).date)}` : `add ${BENCHMARK} to compare`);
+  const kpis = rank
+    ? `<div class="stats risk-kpis">${kpi("VIX", rank.current.toFixed(2), `${esc(rank.date)} · 30-day implied volatility of the S&P 500`)}${kpi("VIX ÷ VIX3M", ratio ? ratio.value.toFixed(2) : "—", ratio ? `VIX3M ${v3last.value.toFixed(2)} · ${ratio.value > 1 ? "above 1: near-term stress (backwardation)" : "below 1: the usual upward slope (contango)"}` : "VIX3M not loaded")}${kpi("VIX percentile · 1 year", ordinal(rank.percentile), `rank ${rank.rank == null ? "—" : (rank.rank * 100).toFixed(0) + "%"} of its range ${rank.min.toFixed(1)}–${rank.max.toFixed(1)} · ${rank.n} days${rank.full ? "" : " (less than a year)"}`)}${spyTile}${kpi("Volatility risk premium", vrp?.stats ? `${vrp.stats.mean >= 0 ? "+" : ""}${vrp.stats.mean.toFixed(1)} pts` : "—", vrp?.stats ? `average over ${vrp.stats.n} days to ${esc(vrp.stats.knownThrough)}; positive on ${(vrp.stats.positive * 100).toFixed(0)}% of them` : `VIX minus the realized volatility that followed; needs ${BENCHMARK}`)}</div>`
+    : spy
+      ? (() => {
+          const p = memo(`prof:yz:${barsKey(spy)}`, () => volProfile(spy.bars, "yz"));
+          return `<div class="stats risk-kpis">${spyTile}${kpi(`${BENCHMARK} realized · 1 year`, volPct(p?.cone.find((r) => r.window === 252)?.current), "252 trading days, annualized")}${kpi("21-day vs its past year", p?.rank ? ordinal(p.rank.percentile) : "—", p?.rank ? `percentile over ${p.rank.n} days` : "")}</div>`;
+        })()
+      : "";
+  const regimeLine = reg ? `<p><span class="pill">${esc(reg.label)}</span> <small class="muted">${esc(REGIME_RULES)}</small></p>` : "";
+  const head = `<section class="panel"><div class="panel-head"><h2>Market volatility</h2>${rangePick()}</div><p class="muted">Implied volatility is what option prices expect; realized volatility is what the market then did. VIX is the 30-day implied volatility of the S&P 500 from its option prices; ${BENCHMARK}'s realized volatility here uses daily open, high, low and close (Yang–Zhang).${fredNote ? ` <b>${esc(fredNote)}</b>` : ""}</p>${kpis}${regimeLine}</section>`;
+
+  let charts = "";
+  if (vrp?.rows.length) {
+    const rows = rangeCut(vrp.rows);
+    const dates = rows.map((r) => r.date);
+    charts += `<section class="panel"><div class="panel-head"><h2>Implied vs realized</h2></div><p class="muted">VIX against ${BENCHMARK}'s realized volatility over the previous 21 trading days, both in volatility points.</p>${vc("vix-rv", 230, "VIX and realized volatility", (W) => multiLine(dates, [{ label: "VIX", values: rows.map((r) => r.vix), color: SERIES_COLORS.ink }, { label: `${BENCHMARK} realized, past 21 days`, values: rows.map((r) => r.rvTrailing), color: SERIES_COLORS.blue }], { fmt: (v) => v.toFixed(0) }, W))}<div class="rc-legend"><span><i class="k-line"></i>VIX (implied)</span><span><i style="border-color:${SERIES_COLORS.blue}"></i>${BENCHMARK} realized, past 21 days</span></div></section>`;
+    charts += `<section class="panel"><div class="panel-head"><h2>Volatility risk premium</h2></div><p class="muted">VIX on each day minus ${BENCHMARK}'s realized volatility over the <b>next</b> 21 trading days: how much more movement options priced in than then happened. Blue: options priced more than the market moved. Orange: less. A day's value is only known 21 sessions later, so the chart stops ${vrp.stats ? `at ${esc(vrp.stats.knownThrough)}` : "21 sessions ago"}. ${BENCHMARK} stands in for the S&P 500; VIX's 30 calendar days are about 21 trading days.${vrp.excluded ? ` ${vrp.excluded} likely split day${vrp.excluded > 1 ? "s" : ""} left out.` : ""}</p>${vc("vrp", 180, "Volatility risk premium", (W) => signedBars(dates, rows.map((r) => r.vrp), { fmt: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(0)}`, label: "VIX minus next-21-day realized (pts)" }, W))}</section>`;
+  } else if (vix.length) {
+    const rows = rangeCut(vix);
+    charts += `<section class="panel"><div class="panel-head"><h2>VIX</h2>${native && state.mode === "market" ? button(`Add ${BENCHMARK} to compare`, "vol-add-spy") : ""}</div><p class="muted">Add ${BENCHMARK}'s prices to compare VIX with the volatility that actually followed.</p>${vc("vix", 220, "VIX", (W) => multiLine(rows.map((r) => r.date), [{ label: "VIX", values: rows.map((r) => r.value) }], { fmt: (v) => v.toFixed(0) }, W))}</section>`;
+  } else if (spyRv) {
+    const rows = rangeCut(spy.bars.map((b, i) => ({ date: b.date, value: spyRv.values[i] })).filter((r) => r.value != null));
+    charts += `<section class="panel"><div class="panel-head"><h2>${BENCHMARK} realized volatility</h2></div><p class="muted">21-day Yang–Zhang realized volatility${state.mode === "sample" ? " of the synthetic demo prices" : ""}.</p>${vc("spy-rv", 200, "Realized volatility", (W) => multiLine(rows.map((r) => r.date), [{ label: "21-day realized", values: rows.map((r) => r.value * 100) }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section>`;
+  }
+  if (ratios.length > 1) {
+    const rows = rangeCut(ratios);
+    charts += `<section class="panel"><div class="panel-head"><h2>VIX term structure</h2></div><p class="muted">VIX divided by VIX3M. Usually below 1, because longer-dated options carry more uncertainty. Above 1 (shaded) when the market prices more turbulence in the next month than over the next three; historically that has happened mostly during selloffs.</p>${vc("term", 170, "VIX over VIX3M", (W) => multiLine(rows.map((r) => r.date), [{ label: "VIX ÷ VIX3M", values: rows.map((r) => r.value) }], { fmt: (v) => v.toFixed(2), ref: 1, shade: rows.map((r) => r.value > 1) }, W))}</section>`;
+  }
+  // Realized volatility of every stock in the workspace.
+  const list = assets()
+    .filter((a) => a.bars?.length > 64)
+    .map((a) => {
+      const p = memo(`prof:yz:${barsKey(a)}`, () => volProfile(a.bars, "yz"));
+      const at = (w) => p?.cone.find((r) => r.window === w)?.current;
+      const iv = (ivHist[a.symbol]?.rows || []).filter((r) => r.atm30 != null).at(-1);
+      return { a, p, rv21: at(21), rv63: at(63), rv252: at(252), iv: iv?.atm30 ?? null, ivDate: iv?.date };
+    })
+    .sort((x, y) => (y.rv21 ?? -1) - (x.rv21 ?? -1));
+  const table_ = list.length
+    ? `<section class="panel"><div class="panel-head"><h2>Realized volatility in your workspace</h2></div>${table(
+        ["Stock", "Realized · 21 days", "63 days", "1 year", "21-day vs its past year", "Implied · 30 days", "Implied − realized"],
+        list.map((x) => `<tr><td><button class="link" data-action="vol-open" data-value="${esc(x.a.symbol)}">${esc(x.a.symbol)}</button></td><td>${volPct(x.rv21)}</td><td>${volPct(x.rv63)}</td><td>${volPct(x.rv252)}</td><td>${x.p?.rank ? `${ordinal(x.p.rank.percentile)} percentile${x.p.rank.full ? "" : ` · ${x.p.rank.n} days`}` : "—"}</td><td title="${esc(x.ivDate || "")}">${volPct(x.iv)}</td><td>${x.iv != null && x.rv21 != null ? `${((x.iv - x.rv21) * 100).toFixed(1)} pts` : "—"}</td></tr>`),
+      )}<small>Yang–Zhang estimator on daily bars, annualized with 252 trading days. Each stock's implied volatility, from its option chain and recorded history, is on its Volatility (<kbd>VOL</kbd>) and Options (<kbd>OMON</kbd>) views.</small></section>`
+    : "";
+  const sources = `<section class="panel"><small>VIX (${fredLink("VIXCLS")}) and VIX3M (${fredLink("VXVCLS")}): ${esc(VOL_CITATION)}. Cboe holds the copyright; shown for your own research.${state.macro[volKey("VIXCLS")] ? " " + datasetStamp({ ...state.macro[volKey("VIXCLS")], provider: "fred" }) : ""}</small></section>`;
+  return head + charts + table_ + sources;
+}
+
+function volTile() {
+  if (mathError) return empty("Volatility calculations unavailable.");
+  const a = stockAsset();
+  if (!a) return noStock();
+  const p = memo(`prof:yz:${barsKey(a)}`, () => volProfile(a.bars, "yz"));
+  if (!p) return empty("Needs at least 12 daily bars.");
+  const at = (w) => p.cone.find((r) => r.window === w)?.current;
+  return `<div class="scenarios compact risk-cells"><div class="scenario"><span>Realized · 21 days</span><strong>${volPct(at(21))}</strong></div><div class="scenario"><span>vs its past year</span><strong>${p.rank ? ordinal(p.rank.percentile) : "—"}</strong></div><div class="scenario"><span>Realized · 1 year</span><strong>${volPct(at(252))}</strong></div></div>`;
+}
+
+function volView() {
+  const a = stockAsset();
+  const head = (extra = "") => `<div class="panel-head"><h2>Volatility · ${esc(symbol)}</h2>${extra}</div>`;
+  if (mathError) return `<section class="panel">${head()}${empty("The volatility calculations didn't load: " + esc(mathError))}</section>`;
+  if (!a) return `<section class="panel">${head()}${noStock()}</section>`;
+  const est = ESTIMATORS.find((e) => e.id === volEstimator) || ESTIMATORS[0];
+  const p = memo(`prof:${est.id}:${barsKey(a)}`, () => volProfile(a.bars, est.id));
+  if (!p) return `<section class="panel">${head()}${empty("Realized volatility needs at least 12 daily bars.")}</section>`;
+  const pick = `<div class="seg" role="group" aria-label="Estimator">${ESTIMATORS.map((e) => button(e.label, "vol-estimator", e.id === est.id ? "active" : "", `data-value="${e.id}" aria-pressed="${e.id === est.id}" title="${esc(e.note)}"`)).join("")}</div>`;
+  const label = { 10: "2 weeks", 21: "1 month", 63: "3 months", 126: "6 months", 252: "1 year" };
+  const kpis = `<div class="stats risk-kpis">${p.cone.filter((r) => r.window >= 21).map((r) => kpi(`Realized · ${label[r.window] || r.window + " days"}`, volPct(r.current), `${r.window} trading days, annualized`)).join("")}${kpi("1-month vs its past year", p.rank ? ordinal(p.rank.percentile) : "—", p.rank ? `percentile of the 21-day figure over ${p.rank.n} days` : "")}</div>`;
+  const excluded = p.excluded ? `<p class="muted">Left out ${p.excluded} day${p.excluded > 1 ? "s" : ""} whose open was more than 40% from the prior close (${p.excludedDates.slice(-3).map(esc).join(", ")}): most likely a stock split the price source didn't adjust for. That day's own range still counts.</p>` : "";
+  const intro = `<section class="panel">${head(pick)}<p class="muted">How much ${esc(symbol)} has actually moved, as an annualized standard deviation (one year's typical move). ${esc(est.label)}: ${esc(est.note)} Calculated on this computer from the ${p.bars} daily bars in this workspace, through ${esc(p.asOf)}.</p>${kpis}${excluded}</section>`;
+  const series = rangeCut(p.series);
+  const median = p.cone.find((r) => r.window === 21)?.median;
+  const charts = `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Volatility cone</h2></div><p class="muted">For each window length, the range of every realized-volatility reading in this history. The dot is today. Short windows swing more; where today's dot sits says whether ${esc(symbol)} is calm or turbulent by its own standards.</p>${vc("cone", 230, "Volatility cone", (W) => coneChart(p.cone, { fmt: (v) => (v * 100).toFixed(0) + "%" }, W))}<div class="rc-legend"><span><i class="k-band light"></i>Lowest to highest</span><span><i class="k-band"></i>Middle half</span><span><i class="k-line"></i>Median</span><span><i class="k-dot"></i>Today</span></div></section><section class="panel"><div class="panel-head"><h2>1-month realized volatility</h2>${rangePick()}</div><p class="muted">Rolling 21-trading-day ${esc(est.label)} volatility${median != null ? `; gray line: its median over this history, ${volPct(median)}` : ""}.</p>${vc("rv21", 230, "Rolling realized volatility", (W) => multiLine(series.map((r) => r.date), [{ label: `21-day ${est.label}`, values: series.map((r) => r.value * 100) }], { fmt: (v) => v.toFixed(0) + "%", ref: median != null ? median * 100 : null }, W))}</section></div>`;
+  const compare = `<section class="panel"><div class="panel-head"><h2>Estimators compared · 1 month</h2></div>${table(
+    ["Estimator", "21 days"],
+    ESTIMATORS.map((e) => `<tr><td>${e.id === est.id ? "<b>" + esc(e.label) + "</b>" : esc(e.label)}</td><td>${volPct(p.byEstimator[e.id])}</td></tr>`),
+  )}<dl class="vol-notes">${ESTIMATORS.map((e) => `<dt>${esc(e.label)}</dt><dd>${esc(e.note)}</dd>`).join("")}</dl><small>All use log returns and 252 trading days a year. Range-based estimators are more precise than close-to-close on the same data, but the ones that ignore overnight gaps read low for stocks that gap.</small></section>`;
+  const implied = impliedSection();
+  return intro + charts + compare + implied;
+}
+// ---- Options: chain (OMON), strategy lab (OSA), implied history, settings ----
+const chains = {}; // symbol → { data, error, loading, at }
+const ivHist = {}; // symbol → { rows, error, loading, at }
+let omon = { expiry: {}, range: 10, mode: "prices" };
+let optStatus = null, // backfill_status
+  agentInfo = null; // agent_status
+const greekFmt = { delta: (v) => fmt(v, 2), gamma: (v) => fmt(v, 4), theta: (v) => fmt(v / 365, 3), vega: (v) => fmt(v / 100, 3) };
+const ivPct = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
+const shortDate = (d) => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: d.slice(0, 4) === String(new Date().getUTCFullYear()) ? undefined : "2-digit", timeZone: "UTC" });
+const hasAlpacaKeys = () => hasKey("alpaca") && hasKey("alpacasecret");
+// Realized volatility used for model prices when there's no chain.
+function modelVol(a) {
+  if (!a?.bars?.length) return 0.25;
+  const p = memo(`prof:yz:${barsKey(a)}`, () => volProfile(a.bars, "yz"));
+  return p?.cone.find((r) => r.window === 63)?.current ?? p?.cone.find((r) => r.window === 21)?.current ?? 0.25;
+}
+const syntheticFor = (a) => syntheticChain(a.symbol, a.bars.at(-1).close, a.bars.at(-1).date, { vol: modelVol(a) });
+async function loadChain(s, force = false) {
+  const a = activeMap()[s];
+  if (state.mode === "sample" || !native) {
+    chains[s] = a?.bars?.length ? { data: syntheticFor(a), at: Date.now() } : { error: `No prices for ${s}.` };
+    return;
+  }
+  if (!hasAlpacaKeys()) {
+    chains[s] = { error: "Option chains come from Alpaca's free market-data feed. Add your Alpaca key ID and secret in Settings → Data sources (a paper-trading account's keys are enough; Aperture only reads data)." };
+    return;
+  }
+  chains[s] = { ...(chains[s] || {}), loading: true, error: "" };
+  refresh();
+  try {
+    chains[s] = { data: await optionsChain(s, null, force), at: Date.now() };
+  } catch (e) {
+    chains[s] = { ...chains[s], loading: false, error: message(e) };
+  }
+  refresh();
+}
+async function loadIvHistory(s) {
+  if (!native || state.mode !== "market") return;
+  ivHist[s] = { ...(ivHist[s] || {}), loading: true };
+  try {
+    ivHist[s] = { rows: await optionsHistory(s), at: Date.now() };
+  } catch (e) {
+    ivHist[s] = { rows: [], error: message(e), at: Date.now() };
+  }
+  refresh();
+}
+const chainOf = (s = symbol) => chains[s]?.data || null;
+function chainExpiry(c) {
+  const list = c.expiries.map((e) => e.expiry);
+  const pick = omon.expiry[c.underlying];
+  if (pick && list.includes(pick)) return pick;
+  // Default: the first expiry at least 20 days out.
+  return (c.expiries.find((e) => e.days >= 20) || c.expiries[0])?.expiry;
+}
+function chainSource(c) {
+  if (c.synthetic) return `<span class="tag warn">Synthetic demo chain · model prices</span>`;
+  const t = c.quotes.find((q) => q.quote_time)?.quote_time;
+  return `<span class="tag" title="Alpaca's free indicative feed: quotes derived from, but not equal to, exchange (OPRA) quotes; trades delayed 15 minutes.">Alpaca indicative quotes${t ? " · " + esc(new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })) : ""}</span>`;
+}
+function chainWait(s) {
+  const c = chains[s];
+  if (!c || (c.loading && !c.data)) return empty(`Loading ${esc(s)}'s option chain…`);
+  if (!c.data) return empty(esc(c.error || "No option chain."));
+  return "";
+}
+
+function omonTile() {
+  const c = chainOf();
+  if (!c) return empty(chains[symbol]?.error ? esc(chains[symbol].error) : "Open to load the option chain.");
+  const e = c.expiries.find((x) => x.expiry === chainExpiry(c));
+  return `<div class="scenarios compact risk-cells"><div class="scenario"><span>ATM implied · 30 days</span><strong>${ivPct(c.summary.atm30)}</strong></div><div class="scenario"><span>Skew 90–110%</span><strong>${e?.skew == null ? "—" : (e.skew * 100).toFixed(1) + " pts"}</strong></div><div class="scenario"><span>Expiries</span><strong>${c.expiries.length}</strong></div></div>${c.synthetic ? "<small>Synthetic demo chain</small>" : ""}`;
+}
+
+function omonView() {
+  const head = (x = "") => `<div class="panel-head"><h2>Options · ${esc(symbol)}</h2>${x}</div>`;
+  if (mathError) return `<section class="panel">${head()}${empty(esc(mathError))}</section>`;
+  const wait = chainWait(symbol);
+  if (wait) return `<section class="panel">${head()}${wait}</section>`;
+  const c = chainOf();
+  const exp = chainExpiry(c);
+  const e = c.expiries.find((x) => x.expiry === exp);
+  const rows = nearMoney(strikeRows(c, exp), e.forward ?? c.spot, omon.range);
+  const expPick = `<div class="seg wrap" role="group" aria-label="Expiry">${c.expiries.map((x) => button(`${shortDate(x.expiry)} · ${x.days}d`, "omon-expiry", x.expiry === exp ? "active" : "", `data-value="${x.expiry}"`)).join("")}</div>`;
+  const rangePick_ = `<div class="seg" role="group" aria-label="Strikes">${[[6, "±6"], [10, "±10"], [20, "±20"], [0, "All"]].map(([n, l]) => button(l, "omon-range", omon.range === n ? "active" : "", `data-value="${n}"`)).join("")}</div>`;
+  const modePick = `<div class="seg" role="group" aria-label="Columns">${[["prices", "Prices"], ["greeks", "Greeks"]].map(([m, l]) => button(l, "omon-mode", omon.mode === m ? "active" : "", `data-value="${m}"`)).join("")}</div>`;
+  const greeks = omon.mode === "greeks";
+  const side = (q, kind) => {
+    if (!q) return `<td colspan="6">—</td>`;
+    const add = button("+", "osa-add", "icon", `data-value="${kind}|${q.strike}|${q.expiry}" title="Add to the strategy lab"`);
+    const flags = q.flags.filter((f) => f !== "indicative" && f !== "synthetic");
+    const iv = `<td title="${esc(flags.join(", ") || "")}">${q.iv == null ? `<span class="muted">—</span>` : ivPct(q.iv)}${flags.length ? " ⚠" : ""}</td>`;
+    const cells = greeks
+      ? [`<td>${q.delta == null ? "—" : greekFmt.delta(q.delta)}</td>`, `<td>${q.gamma == null ? "—" : greekFmt.gamma(q.gamma)}</td>`, `<td>${q.theta == null ? "—" : greekFmt.theta(q.theta)}</td>`, `<td>${q.vega == null ? "—" : greekFmt.vega(q.vega)}</td>`, iv]
+      : [`<td>${int(q.open_interest)}</td>`, `<td>${int(q.volume)}</td>`, `<td>${fmt(q.bid)}</td>`, `<td>${fmt(q.ask)}</td>`, iv];
+    return kind === "call" ? `<td>${add}</td>${cells.join("")}` : `${[...cells].reverse().join("")}<td>${add}</td>`;
+  };
+  const colNames = greeks ? ["Δ", "Γ", "Θ/day", "ν/pt", "IV"] : ["OI", "Vol", "Bid", "Ask", "IV"];
+  const f = e.forward ?? c.spot;
+  const body = rows
+    .map((r) => `<tr class="${r.strike < f ? "itm-call" : "itm-put"}${Math.abs(r.strike - f) === Math.min(...rows.map((x) => Math.abs(x.strike - f))) ? " atm" : ""}">${side(r.call, "call")}<td class="strike"><b>${fmt(r.strike, r.strike % 1 ? 2 : 0)}</b></td>${side(r.put, "put")}</tr>`)
+    .join("");
+  const table_ = `<div class="table-wrap chain-wrap"><table class="chain"><thead><tr><th colspan="6" class="calls">Calls</th><th>Strike</th><th colspan="6" class="puts">Puts</th></tr><tr><th></th>${colNames.map((x) => `<th>${x}</th>`).join("")}<th></th>${[...colNames].reverse().map((x) => `<th>${x}</th>`).join("")}<th></th></tr></thead><tbody>${body}</tbody></table></div>`;
+  const kpis = `<div class="stats risk-kpis">${kpi("Spot", money(c.spot), c.synthetic ? "last demo close" : "IEX last trade, Alpaca")}${kpi("Forward", money(f), esc(e.forward_source) + (e.forward_range != null ? ` · spread ${fmt(e.forward_range)}` : ""))}${kpi("ATM implied", ivPct(e.atm_iv), `${shortDate(exp)} · ${e.days} days`)}${kpi("Skew 90–110%", e.skew == null ? "—" : (e.skew * 100).toFixed(1) + " pts", "IV of the 90% strike minus the 110% strike")}${kpi("ATM implied · 30 days", ivPct(c.summary.atm30), "constant maturity, variance-interpolated")}</div>`;
+  const sm = smile(c, exp);
+  const tp = termPoints(c);
+  const fit = memo(`svi:${c.underlying}:${c.as_of}:${exp}`, () => sviFit(sm.filter((p) => p.iv != null).map((p) => ({ k: Math.log(p.strike / f), iv: p.iv })), e.t));
+  const charts = `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Smile · ${shortDate(exp)}</h2></div><p class="muted">Implied volatility of the out-of-the-money option at each strike. Blue: the SVI curve fitted to it${fit ? ` (error ${(fit.rmse * 100).toFixed(2)} vol points over ${fit.points} strikes; ${fit.arbitrageFree ? "no butterfly arbitrage" : "<span class=\"down\">the fit implies butterfly arbitrage: quotes are inconsistent</span>"})` : ""}. Dashed: the feed's own figure, for comparison.</p>${vc("smile", 220, "Volatility smile", (W) => multiLine(sm.map((p) => "$" + fmt(p.strike, p.strike % 1 ? 2 : 0)), [{ label: "Our IV", values: sm.map((p) => (p.iv == null ? null : p.iv * 100)) }, ...(fit ? [{ label: "SVI fit", values: sm.map((p) => fit.iv(Math.log(p.strike / f)) * 100), color: SERIES_COLORS.blue }] : []), { label: c.synthetic ? "Model" : "Alpaca's IV", values: sm.map((p) => (p.vendor == null ? null : p.vendor * 100)), color: SERIES_COLORS.muted, dash: true }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section><section class="panel"><div class="panel-head"><h2>Term structure</h2></div><p class="muted">At-the-money implied volatility by expiry. A hump usually marks an event, such as earnings, inside that expiry.</p>${vc("term-iv", 220, "ATM implied volatility by expiry", (W) => multiLine(tp.map((p) => `${shortDate(p.expiry)} · ${p.days}d`), [{ label: "ATM IV", values: tp.map((p) => p.iv * 100) }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section></div>`;
+  const note = `<small>IV is Aperture's own: Black's formula on the put–call-parity forward, solved from the mid of the out-of-the-money option at each strike; the in-the-money option at that strike uses the same IV, which keeps American early-exercise value out of the solve. Rate: ${esc(c.rate_source)} (${ivPct(c.rate)}). Greeks per share: Θ per calendar day, ν per volatility point. ⚠ marks a quote problem (hover the IV). ${c.synthetic ? "Demo data: the whole chain is synthetic." : "Indicative quotes aren't exchange quotes; spreads and fills based on them aren't realistic."}</small>`;
+  return `<section class="panel">${head(`${chainSource(c)}${native && state.mode === "market" ? button(chains[symbol]?.loading ? "Loading…" : "Refresh", "omon-refresh") : ""}${button("Strategy lab", "stock-view", "", 'data-value="OSA"')}`)}${kpis}<div class="omon-controls">${expPick}${rangePick_}${modePick}</div>${table_}${note}</section>${charts}${earningsPanel(c)}${gexPanel(c)}`;
+}
+
+// ---- Strategy lab -----------------------------------------------------------
+const osaState = (s = symbol) => ((state.strategies ||= {})[s] ||= { legs: [], horizon: 0, ivShift: 0 });
+function osaPricer(s = symbol) {
+  const a = activeMap()[s];
+  const c = chainOf(s);
+  const spot = c?.spot ?? a?.bars?.at(-1)?.close ?? null;
+  const vol = modelVol(a);
+  const r = c?.rate ?? 0.04;
+  // A chain quote for a contract, when the chain has it.
+  const quote = (kind, strike, expiry) => c?.quotes.find((q) => q.kind === kind && q.strike === strike && q.expiry === expiry) || null;
+  const expiryDays = (expiry) => c?.expiries.find((e) => e.expiry === expiry)?.days ?? Math.max(1, Math.round((Date.parse(expiry) - marketNow()) / DAY_MS));
+  // Nearest listed contract to a target strike at the expiry closest to 30 days.
+  const pick = (kind, target) => {
+    if (c) {
+      const e = c.expiries.reduce((x, y) => (Math.abs(y.days - 30) < Math.abs(x.days - 30) ? y : x));
+      const rows = strikeRows(c, e.expiry).filter((r_) => r_[kind]);
+      const row = rows.reduce((x, y) => (Math.abs(y.strike - target) < Math.abs(x.strike - target) ? y : x), rows[0]);
+      return priced({ kind, strike: row.strike, expiry: e.expiry });
+    }
+    const step = strikeStep(spot);
+    const expiry = new Date(marketNow() + 30 * DAY_MS).toISOString().slice(0, 10);
+    return priced({ kind, strike: Math.round(target / step) * step, expiry });
+  };
+  const priced = ({ kind, strike, expiry }) => {
+    const q = quote(kind, strike, expiry);
+    const days = expiryDays(expiry);
+    const mid = q && q.bid > 0 && q.ask >= q.bid ? (q.bid + q.ask) / 2 : null;
+    const iv = q?.iv ?? q?.vendor_iv ?? vol;
+    const model = bsm({ kind, s: spot, k: strike, t: days / 365, r, sigma: iv }).price;
+    return { strike, expiry, days, iv, entry: +(mid ?? model).toFixed(2), basis: mid != null ? (c?.synthetic ? "demo" : "mid") : "model" };
+  };
+  return { a, c, spot, vol, r, pick, priced, expiryDays };
+}
+function osaTile() {
+  const st = osaState();
+  return st.legs.length ? `<p>${st.legs.length} leg${st.legs.length > 1 ? "s" : ""}</p>` : empty("Build an option strategy and see its payoff.");
+}
+function osaView() {
+  const head = (x = "") => `<div class="panel-head"><h2>Strategy lab · ${esc(symbol)}</h2>${x}</div>`;
+  if (mathError) return `<section class="panel">${head()}${empty(esc(mathError))}</section>`;
+  const P = osaPricer();
+  if (!P.spot) return `<section class="panel">${head()}${noStock()}</section>`;
+  const st = osaState();
+  // Refresh each leg's days to expiry (time passes) without touching its entry price.
+  for (const l of st.legs) if (l.kind !== "stock" && l.expiry) l.days = P.expiryDays(l.expiry);
+  const legs = st.legs;
+  const templ = `<div class="seg wrap" role="group" aria-label="Templates">${Object.entries(TEMPLATES).map(([id, t]) => button(t.label, "osa-template", "", `data-value="${id}"`)).join("")}</div>`;
+  const basis = P.c ? (P.c.synthetic ? "Prices: synthetic demo chain" : "Prices: Alpaca indicative mids where quoted") : `Prices: model, at ${ivPct(P.vol)} (${esc(symbol)}'s 3-month realized volatility); load the option chain for market prices`;
+  const expiries = P.c ? P.c.expiries.map((e) => e.expiry) : [];
+  const strikesFor = (l) => (P.c && l.expiry ? strikeRows(P.c, l.expiry).filter((r) => r[l.kind]).map((r) => r.strike) : []);
+  const legRow = (l, i) => {
+    const sel = (field, opts, cur) => `<select data-osa="${i}" data-field="${field}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(v) === String(cur) ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>`;
+    const kinds = [["call", "Call"], ["put", "Put"], ["stock", "Stock"]];
+    const strikes = strikesFor(l);
+    return `<tr><td>${sel("side", [["buy", "Buy"], ["sell", "Sell"]], l.qty >= 0 ? "buy" : "sell")}</td><td><input data-osa="${i}" data-field="qty" type="number" min="1" step="1" value="${Math.abs(l.qty)}" aria-label="Quantity"></td><td>${sel("kind", kinds, l.kind)}</td><td>${l.kind === "stock" ? "—" : strikes.length ? sel("strike", strikes.map((k) => [k, fmt(k, k % 1 ? 2 : 0)]), l.strike) : `<input data-osa="${i}" data-field="strike" type="number" step="any" value="${l.strike}" aria-label="Strike">`}</td><td>${l.kind === "stock" ? "—" : expiries.length ? sel("expiry", expiries.map((x) => [x, shortDate(x)]), l.expiry) : `<input data-osa="${i}" data-field="days" type="number" min="1" step="1" value="${l.days}" aria-label="Days to expiry"> d`}</td><td><input data-osa="${i}" data-field="entry" type="number" step="0.01" value="${l.entry}" aria-label="Entry price"><small class="muted">${esc(l.basis || "")}</small></td><td>${l.kind === "stock" ? "—" : `<input data-osa="${i}" data-field="iv" type="number" step="0.5" value="${((l.iv ?? 0) * 100).toFixed(1)}" aria-label="Implied volatility percent">%`}</td><td>${button("✕", "osa-remove", "icon", `data-value="${i}" aria-label="Remove leg"`)}</td></tr>`;
+  };
+  const legTable = `<div class="table-wrap"><table class="osa-legs"><thead><tr><th>Side</th><th>Qty</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Entry price</th><th>IV</th><th></th></tr></thead><tbody>${legs.map(legRow).join("")}</tbody></table></div><div class="quant-actions">${button("+ Call", "osa-new", "", 'data-value="call"')}${button("+ Put", "osa-new", "", 'data-value="put"')}${button("+ 100 shares", "osa-new", "", 'data-value="stock"')}${legs.length ? button("Clear", "osa-clear") : ""}${legs.length ? button("Paper trade this", "osa-trade", "primary") : ""}${legs.some((l) => l.qty < 0 && l.kind !== "stock") ? `<small class="muted">${account().margin ? "Simulated margin is on for naked shorts." : "Naked shorts need simulated margin (Portfolio → Option risk)."}</small>` : ""}</div>`;
+  if (!legs.length) return `<section class="panel">${head(`<small class="muted">${basis}</small>`)}<p class="muted">Pick a template or add legs. Payoffs, Greeks and scenarios are calculated with Black–Scholes on this computer; they are models of what could happen, not forecasts.</p>${templ}${legTable}</section>`;
+  const opts = { r: P.r, q: 0 };
+  const exp = lastExpiry(legs);
+  const horizon = Math.min(st.horizon || 0, Number.isFinite(exp) ? exp : 0);
+  const x = extremes(legs, P.spot);
+  const g = positionGreeks(legs, P.spot, { ...opts, ivShift: st.ivShift });
+  const prem = netPremium(legs);
+  const money0 = (v) => (v == null ? "—" : !Number.isFinite(v) ? "Unlimited" : (v < 0 ? "−$" : "$") + fmt(Math.abs(v)));
+  const kpis = `<div class="stats risk-kpis">${kpi(prem >= 0 ? "Net cost" : "Net credit", money(Math.abs(prem)), "premiums × 100, plus shares")}${kpi("Max gain at expiry", money0(x?.maxGain), "")}${kpi("Max loss at expiry", money0(x?.maxLoss), "")}${kpi("Break-even", x?.breakEvens.length ? x.breakEvens.map((b) => money(b)).join(" · ") : "—", "at expiry")}${kpi("Greeks now", `Δ ${fmt(g.delta, 0)}`, `Γ ${fmt(g.gamma, 2)} · Θ ${money(g.theta)}/day · ν ${money(g.vega)}/pt`)}</div>`;
+  const controls = `<div class="osa-controls"><label>Days from today: <b>${horizon}</b><input type="range" data-osa-ctl="horizon" min="0" max="${Number.isFinite(exp) ? exp : 0}" value="${horizon}"></label><label>Volatility change: <b>${st.ivShift >= 0 ? "+" : ""}${(st.ivShift * 100).toFixed(0)} pts</b><input type="range" data-osa-ctl="ivShift" min="-20" max="20" value="${Math.round(st.ivShift * 100)}"></label></div>`;
+  const cv = curves(legs, P.spot, { horizons: [0, horizon], ivShift: st.ivShift, ...opts });
+  const labels = cv.prices.map((p) => "$" + fmt(p));
+  const series = [
+    ...(cv.atExpiry ? [{ label: `At expiry (${exp} days)`, values: cv.atExpiry }] : []),
+    { label: "Today", values: cv.lines[0].values, color: SERIES_COLORS.muted, dash: true },
+    ...(horizon > 0 ? [{ label: `In ${horizon} days`, values: cv.lines[1].values, color: SERIES_COLORS.blue }] : []),
+  ];
+  const chart = `<section class="panel"><div class="panel-head"><h2>Profit and loss</h2></div><p class="muted">P&L in dollars against ${esc(symbol)}'s price, using today's entry prices. "Today" and "In n days" price the options with Black–Scholes at each leg's IV${st.ivShift ? `, shifted ${st.ivShift > 0 ? "+" : ""}${(st.ivShift * 100).toFixed(0)} points` : ""}; the gray line is break-even. Spot ${money(P.spot)}.</p>${controls}${vc("osa-pnl", 260, "Strategy profit and loss", (W) => multiLine(labels, series, { fmt: (v) => (v < 0 ? "−$" : "$") + compact(Math.abs(v)), ref: 0 }, W))}<div class="rc-legend">${cv.atExpiry ? `<span><i class="k-line"></i>At expiry</span>` : ""}<span><i class="k-dash"></i>Today</span>${horizon > 0 ? `<span><i style="border-color:${SERIES_COLORS.blue}"></i>In ${horizon} days</span>` : ""}</div></section>`;
+  const grid = scenarioGrid(legs, P.spot, { days: horizon, ...opts });
+  const maxAbs = Math.max(1, ...grid.flatMap((r) => r.cells.map((c_) => Math.abs(c_.pnl))));
+  const scen = `<section class="panel"><div class="panel-head"><h2>Scenarios · in ${horizon} days</h2></div><p class="muted">P&L if ${esc(symbol)} moves (rows) and implied volatility changes (columns) by then. Full revaluation of every leg; no transaction costs.</p><div class="table-wrap"><table class="scen"><thead><tr><th>${esc(symbol)} move</th>${grid[0].cells.map((c_) => `<th>IV ${c_.shift > 0 ? "+" : ""}${(c_.shift * 100).toFixed(0)} pts</th>`).join("")}</tr></thead><tbody>${grid
+    .map((r) => `<tr><td>${r.move > 0 ? "+" : ""}${(r.move * 100).toFixed(0)}% · ${money(P.spot * (1 + r.move))}</td>${r.cells.map((c_) => `<td class="${c_.pnl >= 0 ? "up" : "down"}" style="background:rgba(${c_.pnl >= 0 ? "58,149,216" : "208,122,36"},${(0.06 + (0.3 * Math.abs(c_.pnl)) / maxAbs).toFixed(2)})">${(c_.pnl < 0 ? "−$" : "$") + compact(Math.abs(c_.pnl))}</td>`).join("")}</tr>`)
+    .join("")}</tbody></table></div></section>`;
+  return `<section class="panel">${head(`<small class="muted">${basis}</small>`)}${templ}${legTable}${kpis}</section>${chart}${scen}${hedgePanel(legs, P)}`;
+}
+function osaUpdate(i, field, value) {
+  const st = osaState();
+  const l = st.legs[i];
+  if (!l) return;
+  const P = osaPricer();
+  if (field === "side") l.qty = Math.abs(l.qty) * (value === "sell" ? -1 : 1);
+  else if (field === "qty") l.qty = Math.max(1, Math.round(+value || 1)) * (l.qty < 0 ? -1 : 1);
+  else if (field === "entry") l.entry = Math.max(0, +value || 0);
+  else if (field === "iv") l.iv = Math.max(0.01, (+value || 0) / 100);
+  else if (field === "kind") {
+    if (value === "stock") Object.assign(l, { kind: "stock", qty: Math.sign(l.qty) * 100, entry: P.spot, strike: null, expiry: null, days: null, iv: null, basis: "spot" });
+    else Object.assign(l, { kind: value, ...(l.strike ? P.priced({ kind: value, strike: l.strike, expiry: l.expiry || new Date(marketNow() + 30 * DAY_MS).toISOString().slice(0, 10) }) : P.pick(value, P.spot)), qty: Math.sign(l.qty || 1) * Math.max(1, Math.round(Math.abs(l.qty) / (l.kind === "stock" ? 100 : 1))) });
+  } else if (field === "strike" || field === "expiry") Object.assign(l, P.priced({ kind: l.kind, strike: field === "strike" ? +value : l.strike, expiry: field === "expiry" ? value : l.expiry }));
+  else if (field === "days") {
+    const expiry = new Date(marketNow() + Math.max(1, +value) * DAY_MS).toISOString().slice(0, 10);
+    Object.assign(l, P.priced({ kind: l.kind, strike: l.strike, expiry }));
+  }
+}
+
+// ---- Implied volatility on the VOL view ----------------------------------------
+function impliedSection() {
+  const a = stockAsset();
+  const h = ivHist[symbol];
+  const rows = h?.rows || [];
+  const c = chainOf();
+  if (state.mode !== "market" || !native) {
+    const tp = c ? termPoints(c) : [];
+    return `<section class="panel"><div class="panel-head"><h2>Implied volatility</h2>${c ? "" : button("Load demo chain", "omon-refresh")}</div>${c ? `<p class="muted">From the synthetic demo chain: at-the-money implied volatility by expiry. Implied-volatility history needs Live data.</p>${vc("vol-term", 200, "ATM implied volatility by expiry", (W) => multiLine(tp.map((p) => `${shortDate(p.expiry)} · ${p.days}d`), [{ label: "ATM IV", values: tp.map((p) => p.iv * 100) }], { fmt: (v) => v.toFixed(0) + "%" }, W))}` : empty("Demo data has no implied-volatility history.")}</section>`;
+  }
+  // One value per date: a recorded (quote-based) capture beats a backfilled one.
+  const byDate = new Map();
+  for (const r of rows) if (r.atm30 != null && (!byDate.has(r.date) || r.source === "alpaca")) byDate.set(r.date, r);
+  const merged = [...byDate.values()].sort((x, y) => (x.date < y.date ? -1 : 1));
+  const series = merged.map((r) => ({ date: r.date, value: r.atm30 }));
+  const rank = series.length > 20 ? rankPercentile(series, 252) : null;
+  const rv = a ? memo(`rv21:${barsKey(a)}`, () => realized(a.bars, { window: 21 })) : null;
+  const rvBy = new Map(a ? a.bars.map((b, i) => [b.date, rv.values[i]]) : []);
+  const last = merged.at(-1);
+  const rvNow = rv?.values.at(-1);
+  const sources = new Set(merged.map((r) => r.source));
+  const kp = `<div class="stats risk-kpis">${kpi("ATM implied · 30 days", ivPct(last?.atm30), last ? `${esc(last.date)} · ${last.source === "alpaca" ? "recorded quotes" : "backfill, trade prints"}` : "no history yet")}${kpi("IV rank · 1 year", rank?.rank == null ? "—" : (rank.rank * 100).toFixed(0) + "%", rank ? `${rank.n} days${rank.full ? "" : " (less than a year: provisional)"}` : "needs history")}${kpi("IV percentile · 1 year", rank ? ordinal(rank.percentile) : "—", "share of past days with lower IV")}${kpi("Implied − realized", last?.atm30 != null && rvNow != null ? `${((last.atm30 - rvNow) * 100).toFixed(1)} pts` : "—", "30-day implied minus past 21-day realized")}${kpi("Skew 90–110%", last?.skew30 == null ? "—" : (last.skew30 * 100).toFixed(1) + " pts", "puts over calls, ~30 days")}</div>`;
+  const cut = rangeCut(merged);
+  const chart = cut.length > 1
+    ? `${vc("iv-hist", 230, "Implied vs realized volatility", (W) => multiLine(cut.map((r) => r.date), [{ label: "Implied 30d · recorded", values: cut.map((r) => (r.source === "alpaca" ? r.atm30 * 100 : null)) }, { label: "Implied 30d · backfill", values: cut.map((r) => (r.source === "massive" ? r.atm30 * 100 : null)), dash: true }, { label: "Realized 21d", values: cut.map((r) => (rvBy.get(r.date) == null ? null : rvBy.get(r.date) * 100)), color: SERIES_COLORS.blue }], { fmt: (v) => v.toFixed(0) + "%" }, W))}<div class="rc-legend">${sources.has("alpaca") ? "<span><i class=\"k-line\"></i>Implied, recorded quotes</span>" : ""}${sources.has("massive") ? "<span><i class=\"k-dash\"></i>Implied, backfilled from trade prints (approximate)</span>" : ""}<span><i style="border-color:${SERIES_COLORS.blue}"></i>Realized, past 21 days</span></div>`
+    : "";
+  const how = !rows.length
+    ? empty(`No implied-volatility history for ${esc(symbol)} yet. It builds from two sources: the daily recorder (Alpaca chains after each close) and the Massive backfill (about two years, from Settings → Option data). Add ${esc(symbol)} to the watchlist to include it.`)
+    : "";
+  const sk = cut.filter((r) => r.skew30 != null);
+  const skewChart = sk.length > 5 ? `<h3>Skew · 90% strike minus 110% strike, about 30 days</h3>${vc("skew-hist", 170, "Skew history", (W) => multiLine(sk.map((r) => r.date), [{ label: "Skew (vol points)", values: sk.map((r) => r.skew30 * 100) }], { fmt: (v) => v.toFixed(1), ref: 0 }, W))}<small>Positive: downside puts cost more volatility than upside calls, the usual shape for stocks. A rising line means protection is getting dearer.</small>` : "";
+  return `<section class="panel"><div class="panel-head"><h2>Implied volatility</h2>${rangePick()}</div><p class="muted">At-the-money implied volatility at a constant 30 days, interpolated in variance between expiries. Recorded days come from Alpaca's quotes after the close; backfilled days come from Massive's last trade prints between 15:30 and 16:00, matched to the stock's price in the same minute, so they are noisier.</p>${kp}${chart}${skewChart}${how}</section>`;
+}
+
+// ---- Settings: option data --------------------------------------------------------
+async function loadOptStatus() {
+  if (!native) return;
+  try {
+    [optStatus, agentInfo] = await Promise.all([backfillStatus(), agentStatus()]);
+  } catch (e) {
+    optStatus = { error: message(e) };
+  }
+  if (page === "Settings") {
+    const el = document.getElementById("opt-panel");
+    if (el) el.outerHTML = optionDataPanel();
+  }
+}
+function optionDataPanel() {
+  if (!native) return "";
+  const s = optStatus;
+  const tierNames = ["Reference: prices, splits, dividends, contract lists", "At the money (IV history, IV rank)", "Skew (90% puts, 110% calls)"];
+  const tiers = s?.tiers
+    ? `<table><thead><tr><th>Step</th><th>Done</th><th>Waiting</th><th>Failed or not in plan</th></tr></thead><tbody>${s.tiers
+        .slice(0, 3)
+        .map((t, i) => `<tr><td>${tierNames[i]}</td><td>${int(t.done)}</td><td>${int(t.pending)}</td><td>${int(t.failed)}</td></tr>`)
+        .join("")}</tbody></table>`
+    : "";
+  const status = !s
+    ? "Checking…"
+    : !s.configured
+      ? "Add your free Massive key under Data sources to fill in about two years of implied-volatility history."
+      : s.pending
+        ? `${int(s.pending)} requests to go, about ${s.etaMinutes >= 120 ? Math.round(s.etaMinutes / 60) + " hours" : s.etaMinutes + " minutes"} of running at 4.6 a minute${s.running ? ` · running in the ${esc(s.runner === "agent" ? "background agent" : "app")}` : s.paused ? " · paused" : ""}.`
+        : s.summaryDays
+          ? `Done: ${int(s.summaryDays)} days of implied-volatility history.`
+          : "Not started.";
+  const runs = (agentInfo?.runs || []).slice(0, 4).map((r) => `<li>${new Date(r.started * 1000).toLocaleString()} · ${esc(r.by || "")} · ${esc(r.result || "running…")}</li>`).join("");
+  const agent = agentInfo
+    ? `<div class="panel-head"><h3>Background recorder ${agentInfo.installed ? '<span class="pill on">Installed</span>' : '<span class="pill">Not installed</span>'}</h3>${agentInfo.installed ? button("Remove", "agent-remove") : button("Install", "agent-install", "primary")}</div><p class="muted">Runs Aperture without a window every 30 minutes, using your operating system's own scheduler, so recording continues when the app is closed. After each US market close it saves the option chain of SPY, QQQ and your watchlist (up to 30 symbols) from Alpaca, and it works through the Massive backfill. It only reads data, never places orders, and waits between requests to stay inside each free plan. Without it, the app does the same work while it's open. Log: <code>${esc(agentInfo.log || "")}</code></p>${runs ? `<ul class="run-list">${runs}</ul>` : ""}`
+    : "";
+  return `<section class="panel" id="opt-panel"><div class="panel-head"><h2>Option data</h2>${s?.configured ? (s.pending && !s.paused ? button("Pause backfill", "backfill-pause") : button(s.pending ? "Resume backfill" : "Start backfill", "backfill-start", "primary")) : ""}</div><p><b>Option chains:</b> ${hasAlpacaKeys() ? "from Alpaca's free indicative feed." : "add your Alpaca key ID and secret under Data sources."} <b>History backfill:</b> ${esc(status)}${s?.error ? ` <span class="down">${esc(s.error)}</span>` : ""}</p>${tiers}${s?.configured ? `<p class="muted">Massive's free plan serves the last two years, and that window moves forward each day, so starting early keeps the most history. Downloaded data stays on this computer and is for your own research. If you close your Massive account, its terms require deleting it within 30 days.</p><div class="quant-actions">${button("Delete all Massive data", "options-purge", "", 'data-value="massive"')}</div>` : ""}${agent}</section>`;
+}
+// ---- Paper option trading, expiry settlement, option marks and book risk ----
+const OPTION_FEE = 0.65; // per contract, a common retail commission
+const occFor = (u, expiry, kind, strike) => {
+  if (!/^[A-Z.]{1,6}$/.test(u)) throw Error(`Options on ${u} can't be paper traded (US tickers only).`);
+  return `${u}${expiry.slice(2).replaceAll("-", "")}${kind === "call" ? "C" : "P"}${String(Math.round(strike * 1000)).padStart(8, "0")}`;
+};
+function contractLabel(sym) {
+  const c = parseContract(sym);
+  return c ? `${c.underlying} ${shortDate(c.expiry)} ${fmt(c.strike, c.strike % 1 ? 2 : 0)} ${c.kind === "call" ? "call" : "put"}` : sym;
+}
+// The price a paper order fills at: the ask to buy, the bid to sell, from the loaded chain.
+function chainFill(sym, side) {
+  const c = parseContract(sym);
+  const ch = c && chainOf(c.underlying);
+  const q = ch?.quotes.find((x) => x.symbol === sym);
+  if (!q || !(q.ask > 0) || !(q.bid >= 0) || q.ask < q.bid) return null;
+  const price = side === "buy" ? q.ask : q.bid;
+  return price > 0 ? { price, source: `${ch.synthetic ? "demo chain" : "Alpaca indicative"} ${side === "buy" ? "ask" : "bid"}` } : null;
+}
+// Current value per share of each open option: the chain mid when loaded,
+// otherwise Black–Scholes at the IV recorded with the order (said so).
+function optionMarks() {
+  const out = {};
+  const ac = account();
+  for (const [sym, p] of Object.entries(book(ac).holdings)) {
+    if (p.instrument !== "option" || !p.qty) continue;
+    const ch = chainOf(p.underlying);
+    const q = ch?.quotes.find((x) => x.symbol === sym);
+    if (q && q.ask > 0 && q.bid >= 0 && q.ask >= q.bid) {
+      out[sym] = { price: (q.bid + q.ask) / 2, source: ch.synthetic ? "demo chain mid" : "Alpaca indicative mid", iv: q.iv ?? q.vendor_iv };
+      continue;
+    }
+    const a = activeMap()[p.underlying];
+    const s = a?.bars?.at(-1)?.close;
+    if (!s) continue;
+    const days = Math.max(0, (Date.parse(p.expiry + "T21:00:00Z") - marketNow()) / DAY_MS);
+    const iv = [...ac.trades].reverse().find((t) => t.symbol === sym && t.iv)?.iv ?? modelVol(a);
+    const price = days <= 0 ? Math.max(0, (p.kind === "call" ? 1 : -1) * (s - p.strike)) : bsm({ kind: p.kind, s, k: p.strike, t: days / 365, r: 0.04, sigma: iv }).price;
+    out[sym] = { price, source: `model at ${ivPct(iv)} IV`, iv };
+  }
+  return out;
+}
+// Validates every order together, then records them (through the desktop
+// ledger in the app, which checks them again).
+// Prices the simulated-margin check uses: underlying closes and option
+// premiums (current marks, and each order's own price).
+function tradeMarks(orders = []) {
+  const spot = Object.fromEntries(assets().filter((a) => a.bars?.length).map((a) => [a.symbol, a.bars.at(-1).close]));
+  const premium = Object.fromEntries(Object.entries(optionMarks()).map(([k, v]) => [k, v.price]));
+  for (const o of orders) if (o.instrument === "option") premium[o.symbol] = o.price;
+  return { spot, premium };
+}
+async function applyOrders(orders) {
+  const marks = tradeMarks(orders);
+  let next = account();
+  for (const o of orders) next = execute(next, o, marks);
+  const added = next.trades.slice(account().trades.length);
+  if (native) {
+    await persist();
+    try {
+      for (const o of added) state = await nativeTrade(state.mode, o, marks);
+    } catch (e) {
+      state = migrate(await load());
+      throw e;
+    }
+  } else {
+    state.accounts[state.mode] = next;
+    await persist();
+  }
+  return added;
+}
+let settling = false;
+// Options past expiry settle at intrinsic value against that day's close.
+async function settleOptions() {
+  if (settling) return;
+  const ac = account();
+  if (!ac.trades.some((t) => t.instrument === "option")) return;
+  const today = new Date(marketNow()).toISOString().slice(0, 10);
+  const closeOn = (u, d) => {
+    const bars = activeMap()[u]?.bars || [];
+    const exact = bars.find((b) => b.date === d);
+    if (exact) return exact.close;
+    // No bar for expiry day: after four days, the last close before it.
+    const late = Date.parse(today) - Date.parse(d) > 4 * DAY_MS;
+    const prior = [...bars].reverse().find((b) => b.date <= d);
+    return late && prior ? prior.close : null;
+  };
+  let next;
+  try {
+    next = settleExpiries(ac, closeOn, today);
+  } catch {
+    return;
+  }
+  const orders = next.trades.slice(ac.trades.length);
+  if (!orders.length) return;
+  settling = true;
+  try {
+    await applyOrders(orders);
+    notify(`${orders.length} expired option position${orders.length > 1 ? "s" : ""} settled at intrinsic value.`);
+  } catch (e) {
+    notify(message(e), true);
+  } finally {
+    settling = false;
+    refresh();
+  }
+}
+// The open book grouped by underlying, as strategy legs valued from now.
+function bookGroups(p, marks) {
+  const groups = {};
+  for (const x of p.positions) {
+    const u = x.instrument === "option" ? x.underlying : x.symbol;
+    const spot = activeMap()[u]?.bars?.at(-1)?.close;
+    if (!spot) continue;
+    const g = (groups[u] ||= { underlying: u, spot, legs: [] });
+    if (x.instrument === "option") {
+      const days = Math.max(0, (Date.parse(x.expiry + "T21:00:00Z") - marketNow()) / DAY_MS);
+      g.legs.push({ kind: x.kind, strike: x.strike, days, qty: x.qty, entry: marks[x.symbol]?.price ?? 0, iv: marks[x.symbol]?.iv ?? modelVol(activeMap()[u]) });
+    } else g.legs.push({ kind: "stock", qty: x.qty, entry: spot });
+  }
+  return Object.values(groups).filter((g) => g.legs.some((l) => l.kind !== "stock") || true);
+}
+function scenTable(grid, rowLabel) {
+  const maxAbs = Math.max(1, ...grid.flatMap((r) => r.cells.map((c) => Math.abs(c.pnl))));
+  return `<div class="table-wrap"><table class="scen"><thead><tr><th>Move</th>${grid[0].cells.map((c) => `<th>IV ${c.shift > 0 ? "+" : ""}${(c.shift * 100).toFixed(0)} pts</th>`).join("")}</tr></thead><tbody>${grid
+    .map((r) => `<tr><td>${rowLabel(r.move)}</td>${r.cells.map((c) => `<td class="${c.pnl >= 0 ? "up" : "down"}" style="background:rgba(${c.pnl >= 0 ? "58,149,216" : "208,122,36"},${(0.06 + (0.3 * Math.abs(c.pnl)) / maxAbs).toFixed(2)})">${(c.pnl < 0 ? "−$" : "$") + compact(Math.abs(c.pnl))}</td>`).join("")}</tr>`)
+    .join("")}</tbody></table></div>`;
+}
+function optionRiskPanel(p, marks) {
+  if (!p.positions.some((x) => x.instrument === "option"))
+    return `<section class="panel"><div class="panel-head"><h2>Option risk</h2>${button(account().margin ? "Turn off simulated margin" : "Turn on simulated margin", "margin-toggle")}</div><p class="muted">No option positions. Build one in a stock's Strategy lab (<kbd>OSA</kbd>). ${account().margin ? "Simulated margin is on: naked short options are allowed against the margin formula." : "Short calls must be covered or spread and short puts cash-secured or spread, unless you turn on simulated margin."}</p></section>`;
+  const groups = bookGroups(p, marks);
+  const rows = groups.map((g) => ({ g, k: positionGreeks(g.legs, g.spot, { r: 0.04 }) }));
+  const tot = rows.reduce((a, { g, k }) => ({ dd: a.dd + k.delta * g.spot, gamma: a.gamma + (k.gamma * g.spot * g.spot) / 100, theta: a.theta + k.theta, vega: a.vega + k.vega }), { dd: 0, gamma: 0, theta: 0, vega: 0 });
+  const grid = bookScenario(groups, { r: 0.04 });
+  const req = requirements(book(account()).holdings, { margin: !!account().margin, ...tradeMarks() });
+  const excess = p.cash - req.required;
+  const marginLine = `<p>${account().margin ? "<b>Simulated margin is on</b>: naked short options are allowed against the standard strategy-based formula (premium + 20% of the stock's value minus the out-of-the-money amount, at least premium + 10%). Brokers require more." : "Simulated margin is off: short calls must be covered or spread, short puts cash-secured or spread."} Held against short options: <b>${money(req.required)}</b> · cash ${money(p.cash)} · ${excess >= 0 ? `excess ${money(excess)}` : `<span class="down">margin call: ${money(-excess)} short. Close or reduce short options.</span>`}</p>`;
+  return `<section class="panel"><div class="panel-head"><h2>Option risk</h2>${button(account().margin ? "Turn off simulated margin" : "Turn on simulated margin", "margin-toggle")}</div>${marginLine}<p class="muted">Greeks and scenarios for everything you hold, options valued at their current marks (chain mids when loaded, otherwise Black–Scholes at the IV recorded with each order). A model, not a forecast: it holds volatility shifts equal across strikes and ignores costs.</p><div class="stats risk-kpis">${kpi("Dollar delta", money(tot.dd), "value change for a 1-unit move, as $ of stock")}${kpi("Gamma", money(tot.gamma), "change in dollar delta for a 1% move")}${kpi("Theta", money(tot.theta) + "/day", "time decay at today's prices")}${kpi("Vega", money(tot.vega) + "/pt", "per volatility point")}</div>${table(
+    ["Underlying", "Spot", "Delta (shares)", "Gamma (shares per $1)", "Theta $/day", "Vega $/pt"],
+    rows.map(({ g, k }) => `<tr><td>${esc(g.underlying)}</td><td>${money(g.spot)}</td><td>${fmt(k.delta, 1)}</td><td>${fmt(k.gamma, 2)}</td><td>${money(k.theta)}</td><td>${money(k.vega)}</td></tr>`),
+  )}<h3>Scenarios · every underlying moves together</h3>${scenTable(grid, (m) => `${m > 0 ? "+" : ""}${(m * 100).toFixed(0)}%`)}</section>`;
+}
+// ---- Delta-hedge simulator (strategy lab) ----------------------------------------
+const hedgeIn = { realizedVol: null, rebalance: 1, costBps: 2, jumps: false };
+let hedgeOut = null; // { key, main, frontier }
+function hedgePanel(legs, P) {
+  if (!legs.some((l) => l.kind !== "stock")) return "";
+  const rv = hedgeIn.realizedVol ?? P.vol;
+  const key = JSON.stringify([symbol, legs, rv, hedgeIn]);
+  const r = hedgeOut?.key === key ? hedgeOut : null;
+  const field = (name, label, input) => `<label>${label}${input}</label>`;
+  const inputs = `<div class="hedge-inputs">${field("rv", "Realized volatility (%)", `<input type="number" data-hedge="realizedVol" step="1" min="1" max="200" value="${(rv * 100).toFixed(0)}">`)}${field("rb", "Re-hedge every", `<select data-hedge="rebalance">${[1, 2, 5, 10, 21].map((d) => `<option value="${d}" ${hedgeIn.rebalance === d ? "selected" : ""}>${d} trading day${d > 1 ? "s" : ""}</option>`).join("")}</select>`)}${field("c", "Cost per share trade (bps)", `<input type="number" data-hedge="costBps" step="1" min="0" max="100" value="${hedgeIn.costBps}">`)}${field("j", "Crash jumps", `<select data-hedge="jumps"><option value="0" ${hedgeIn.jumps ? "" : "selected"}>None (smooth)</option><option value="1" ${hedgeIn.jumps ? "selected" : ""}>About 1.5 a year, −8% or worse</option></select>`)}</div>`;
+  const fmtD = (v) => (v < 0 ? "−$" : "$") + compact(Math.abs(v));
+  const result = r
+    ? `<div class="stats risk-kpis">${kpi("Hedged P&L · average", fmtD(r.main.hedged.mean), `5–95%: ${fmtD(r.main.hedged.p5)} to ${fmtD(r.main.hedged.p95)}`)}${kpi("Unhedged P&L · average", fmtD(r.main.unhedged.mean), `5–95%: ${fmtD(r.main.unhedged.p5)} to ${fmtD(r.main.unhedged.p95)}`)}${kpi("Theory (continuous hedging)", fmtD(r.main.theory), "½ Γ S² (σ realized² − σ implied²) T, at today's gamma")}${kpi("Hedging costs · average", fmtD(r.main.cost), `${r.main.rebalances.toFixed(1)} re-hedges over ${r.main.horizon} days`)}</div>${table(
+        ["Re-hedge every", "Hedged P&L, average", "Spread (std dev)", "Costs, average"],
+        r.frontier.map((f) => `<tr><td>${f.days} day${f.days > 1 ? "s" : ""}</td><td>${fmtD(f.res.hedged.mean)}</td><td>${fmtD(f.res.hedged.sd)}</td><td>${fmtD(f.res.cost)}</td></tr>`),
+      )}<small>${r.main.hedged.sd < r.main.unhedged.sd ? "Hedging narrows the outcomes; what's left is the gap between realized and implied volatility, discrete re-hedging error and costs. " : ""}Re-hedging more often shrinks the spread but costs more. With crash jumps on, no re-hedging frequency removes gap risk. 1,000 simulated paths, seeded: a simulation, not a forecast.</small>`
+    : `<p class="muted">Press Run to simulate.</p>`;
+  return `<section class="panel"><div class="panel-head"><h2>Delta-hedge simulator</h2>${button("Run", "hedge-run", "primary")}</div><p class="muted">Holds the option legs to the nearest expiry (${lastExpiry(legs.filter((l) => l.kind !== "stock"))} days), trading ${esc(symbol)} shares to stay delta-neutral at each leg's implied volatility. A hedged option earns roughly the gap between the volatility the stock then shows and the volatility you paid for. Try realized above and below the legs' IV.</p>${inputs}${result}</section>`;
+}
+function runHedge() {
+  const st = osaState();
+  const P = osaPricer();
+  const rv = hedgeIn.realizedVol ?? P.vol;
+  const base = { realizedVol: rv, costBps: hedgeIn.costBps, jumps: hedgeIn.jumps, r: P.r, seed: 7 };
+  const main = hedgeSim(st.legs, P.spot, { ...base, rebalanceDays: hedgeIn.rebalance, paths: 1000 });
+  if (!main) throw Error("Add at least one option leg to simulate hedging.");
+  const frontier = [1, 2, 5, 10].map((d) => ({ days: d, res: d === hedgeIn.rebalance ? main : hedgeSim(st.legs, P.spot, { ...base, rebalanceDays: d, paths: 500 }) }));
+  hedgeOut = { key: JSON.stringify([symbol, st.legs, rv, hedgeIn]), main, frontier };
+}
+
+// ---- Gamma exposure and earnings (option monitor) ---------------------------------
+function gexPanel(c) {
+  const g = memo(`gex:${c.underlying}:${c.as_of}:${c.quotes.length}`, () => gammaExposure(c));
+  if (!g.contracts) return "";
+  const near = g.byStrike.filter((r) => Math.abs(r.strike / g.spot - 1) <= 0.15);
+  const conv = g.conventions;
+  const fmtG = (v) => (v < 0 ? "−$" : "$") + compact(Math.abs(v));
+  const oi = g.oiDates.length ? `open interest as of ${esc(g.oiDates.at(-1))}` : "open interest date not reported";
+  const flips = Object.entries(GEX_CONVENTIONS).map(([k, x]) => `${esc(x.label)}: ${conv[k].flip == null ? "no flip within ±15%" : money(conv[k].flip)}`).join(" · ");
+  return `<section class="panel"><div class="panel-head"><h2>Estimated gamma exposure <span class="pill">model</span></h2></div><p class="muted"><b>Estimated, not observed.</b> Open interest says how many contracts are open, not who is long or short them, and dealers' actual positions and hedges aren't public. These figures assume a side for every contract, shown under two conventions so you can see how much the answer depends on that assumption. Dollar gamma for a 1% move, from ${int(g.contracts)} contracts with an IV and open interest (${oi}).</p><div class="stats risk-kpis">${Object.entries(GEX_CONVENTIONS).map(([k, x]) => kpi(esc(x.label), fmtG(conv[k].total), "at today's price")).join("")}${kpi("Where the sign flips", "", flips)}</div><div class="grid halves"><div><h3>By strike · dealers long calls, short puts</h3>${vc("gex-strike", 200, "Estimated gamma exposure by strike", (W) => signedBars(near.map((r) => "$" + fmt(r.strike, r.strike % 1 ? 2 : 0)), near.map((r) => r.call - r.put), { fmt: fmtG, label: "Calls minus puts ($ gamma per 1%)" }, W))}</div><div><h3>If the price moved · both conventions</h3>${vc("gex-profile", 200, "Estimated gamma exposure across prices", (W) => multiLine(conv.lcsp.profile.map((p) => "$" + fmt(p.spot)), Object.entries(GEX_CONVENTIONS).map(([k, x], i) => ({ label: x.label, values: conv[k].profile.map((p) => p.gex), color: i ? SERIES_COLORS.muted : SERIES_COLORS.ink, dash: !!i })), { fmt: fmtG, ref: 0 }, W))}</div></div><small>Each contract's gamma is recomputed at every price with its own IV held fixed. Open interest is published once a day, so intraday changes aren't reflected.</small></section>`;
+}
+function earningsPanel(c) {
+  const cal = fh("earnings")?.earningsCalendar;
+  if (!Array.isArray(cal) || !cal.length) return "";
+  const today = new Date(marketNow()).toISOString().slice(0, 10);
+  const next = cal.filter((e) => e.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+  const a = stockAsset();
+  const past = a ? earningsMoves(a.bars, cal.filter((e) => e.date < today).map((e) => ({ date: e.date, hour: e.hour === "bmo" ? "bmo" : "amc" }))) : [];
+  const avg = past.length ? past.reduce((s, x) => s + Math.abs(x.move), 0) / past.length : null;
+  const im = next ? impliedMove(c, next.date, next.hour === "bmo" ? "bmo" : "amc") : null;
+  const pctS = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
+  return `<section class="panel"><div class="panel-head"><h2>Earnings</h2></div><div class="stats risk-kpis">${kpi("Next report", next ? esc(next.date) : "—", next ? (next.hour === "bmo" ? "before the open" : next.hour === "amc" ? "after the close" : "time not given") + " · Finnhub" : "none in Finnhub's window")}${kpi("Implied move", im?.move == null ? "—" : "±" + pctS(im.move), im ? `${shortDate(im.expiry)} straddle at ${money(im.strike)} ÷ spot` : "needs a later expiry")}${kpi("Event-only move", im?.eventOnly == null ? "—" : "±" + pctS(im.eventOnly), im?.secondExpiry ? `from the ${shortDate(im.expiry)} and ${shortDate(im.secondExpiry)} term structure` : "needs two expiries after the report")}${kpi("Past realized · average", avg == null ? "—" : "±" + pctS(avg), `${past.length} report${past.length === 1 ? "" : "s"} in this price history`)}</div>${past.length ? `<p class="muted">Past moves: ${past.slice(-8).map((x) => `${esc(x.date)} ${x.move >= 0 ? "+" : ""}${pctS(x.move)}`).join(" · ")}</p>` : ""}<small>The straddle's price is what options charge for the move to its expiry, including ordinary days; the event-only figure separates the report's own variance using two expiries (σ²T = σ²<sub>base</sub>·T + E). Both are expected absolute moves, not forecasts of direction. After the report, implied volatility usually falls (IV crush); a long straddle still profits if the move beats what was priced in.</small></section>`;
+}
 function quantPanel() {
   const e = quantEnv;
   const status = !e ? '<span class="pill">Checking…</span>' : e.gsQuant ? `<span class="pill on">GS Quant ${esc(e.gsQuant)}</span>` : '<span class="pill">Not installed</span>';
@@ -3477,8 +4171,23 @@ async function loadMacro(id) {
     throw e;
   }
 }
+// About ten years of a volatility index, kept apart from the shorter
+// Economy series of the same provider.
+const volKey = (id) => id + "@long";
+async function loadVolSeries(id) {
+  const key = volKey(id);
+  try {
+    state.macro[key] = await fetchData("fred", "observations_long", id);
+    delete loadErrors["fred:" + key];
+    delete lastError.fred;
+  } catch (e) {
+    loadErrors["fred:" + key] = lastError.fred = message(e);
+    throw e;
+  }
+}
 // Pull whatever the current page needs and doesn't have yet.
 function autoLoad() {
+  settleOptions();
   const v = page === "Stock" ? stockView || "GRID" : "";
   if (["GRID", "HDS", "OWN"].includes(v) && native && symbol) {
     loadHolders(symbol);
@@ -3495,6 +4204,14 @@ function autoLoad() {
     else runQuant();
   }
   if (native && page === "Settings" && !quantEnv) checkQuant();
+  if (page === "Stock" && symbol && ["OMON", "OSA", "GRID"].includes(v) && !chains[symbol] && (v !== "GRID" || state.mode === "sample")) loadChain(symbol);
+  if (page === "Stock" && symbol && ["VOL", "GRID"].includes(v) && native && state.mode === "market" && (!ivHist[symbol] || Date.now() - ivHist[symbol].at > 600000) && !ivHist[symbol]?.loading) loadIvHistory(symbol);
+  if (page === "Volatility" && native && state.mode === "market")
+    for (const a of assets().filter((x) => x.bars?.length > 64 && isUSKey(x.symbol)).slice(0, 30)) if (!ivHist[a.symbol]) loadIvHistory(a.symbol);
+  if (page === "Settings" && native && (!optStatus || Date.now() - optStatusAt > 15000)) {
+    optStatusAt = Date.now();
+    loadOptStatus();
+  }
   if (native && !analyst && ((page === "Stock" && ["GRID", "ASK"].includes(v)) || page === "Settings")) loadAnalystStatus();
   if (!live()) return;
   const once = (key, job) => {
@@ -3534,7 +4251,7 @@ function autoLoad() {
   }
   if (hasKey("finnhub") && isUSKey(symbol) && page === "Stock") {
     const s = symbol;
-    const want = { "company-news": ["GRID", "CN"], metric: ["GRID", "DES", "FA"], profile2: ["GRID", "DES"], earnings: ["DES", "CN"] };
+    const want = { "company-news": ["GRID", "CN"], metric: ["GRID", "DES", "FA"], profile2: ["GRID", "DES"], earnings: ["DES", "CN", "OMON"] };
     for (const [kind, views] of Object.entries(want))
       if (views.includes(v) && stale(state.datasets[`${s}:FH_${kind}`], 1800)) now_(`${s}:FH_${kind}`, () => loadFinnhub(kind, s));
   }
@@ -3558,6 +4275,9 @@ function autoLoad() {
   if (page === "Commodities" && hasKey("fred"))
     for (const id of Object.keys(commoditySeries))
       if (stale(state.macro[id], 43200)) once("fred:" + id, () => loadMacro(id));
+  if (page === "Volatility" && hasKey("fred"))
+    for (const id of Object.keys(VOL_SERIES))
+      if (stale(state.macro[volKey(id)], 43200)) once("fred:" + volKey(id), () => loadVolSeries(id));
 }
 let syncing = null;
 async function syncWatchlist() {
@@ -3616,6 +4336,9 @@ function watchFresh() {
     }
     if (hasKey("fred"))
       for (const id of [...Object.keys(macroSeries), ...Object.keys(commoditySeries)]) if (stale(state.macro[id], 43200)) await enqueue("fred:" + id, () => loadMacro(id)).catch(() => {});
+    // Volatility series only once the Volatility page has loaded them.
+    if (hasKey("fred"))
+      for (const id of Object.keys(VOL_SERIES)) if (state.macro[volKey(id)] && stale(state.macro[volKey(id)], 43200)) await enqueue("fred:" + volKey(id), () => loadVolSeries(id)).catch(() => {});
     await persist();
     if (updates.length) notify(updates.join(" · "));
     refresh();
@@ -3651,6 +4374,30 @@ async function addTicker(s, openIt, meta = null) {
   render();
 }
 function bind() {
+  // Strategy lab: leg fields and the horizon / volatility sliders.
+  document.querySelectorAll("[data-osa]").forEach((el) => {
+    el.onchange = async () => {
+      osaUpdate(+el.dataset.osa, el.dataset.field, el.value);
+      await persist();
+      render();
+    };
+  });
+  document.querySelectorAll("[data-hedge]").forEach((el) => {
+    el.onchange = () => {
+      const f = el.dataset.hedge;
+      hedgeIn[f] = f === "realizedVol" ? Math.max(0.01, +el.value / 100) : f === "jumps" ? el.value === "1" : +el.value;
+      render();
+    };
+  });
+  document.querySelectorAll("[data-osa-ctl]").forEach((el) => {
+    el.onchange = async () => {
+      const st = osaState();
+      if (el.dataset.osaCtl === "horizon") st.horizon = +el.value;
+      else st.ivShift = +el.value / 100;
+      await persist();
+      render();
+    };
+  });
   const recenter = (id) => {
     goToEntity(id);
     render();
@@ -4245,10 +4992,149 @@ async function action(act, value) {
       riskHorizon = +value || 252;
       render();
       break;
+    case "vol-range":
+      volRange = value;
+      render();
+      break;
+    case "vol-estimator":
+      volEstimator = value;
+      render();
+      break;
+    case "goto-volatility":
+      page = "Volatility";
+      render();
+      break;
+    case "omon-expiry":
+      omon.expiry[symbol] = value;
+      render();
+      break;
+    case "omon-range":
+      omon.range = +value;
+      render();
+      break;
+    case "omon-mode":
+      omon.mode = value;
+      render();
+      break;
+    case "omon-refresh":
+      await loadChain(symbol, true);
+      render();
+      break;
+    case "osa-add": {
+      const [kind, strike, expiry] = value.split("|");
+      osaState().legs.push({ kind, qty: 1, ...osaPricer().priced({ kind, strike: +strike, expiry }) });
+      await persist();
+      openStock(symbol, "OSA");
+      break;
+    }
+    case "osa-new": {
+      const P = osaPricer();
+      if (!P.spot) throw Error(`No price for ${symbol} yet.`);
+      osaState().legs.push(value === "stock" ? { kind: "stock", qty: 100, entry: P.spot, basis: "spot" } : { kind: value, qty: 1, ...P.pick(value, P.spot) });
+      await persist();
+      render();
+      break;
+    }
+    case "osa-template": {
+      const P = osaPricer();
+      if (!P.spot) throw Error(`No price for ${symbol} yet.`);
+      Object.assign(osaState(), { legs: buildTemplate(value, P.spot, P.pick).map((l) => (l.kind === "stock" ? { ...l, basis: "spot" } : l)), horizon: 0, ivShift: 0 });
+      await persist();
+      render();
+      break;
+    }
+    case "osa-trade": {
+      const st = osaState();
+      const P = osaPricer();
+      const date = new Date().toISOString();
+      const orders = [...st.legs]
+        .sort((a, b) => (a.qty > 0 ? 0 : 1) - (b.qty > 0 ? 0 : 1))
+        .map((l) => {
+          const side = l.qty > 0 ? "buy" : "sell";
+          if (l.kind === "stock") return { symbol, side, qty: Math.abs(l.qty), price: +P.spot.toFixed(4), fee: 0, note: "Strategy lab", date, source: "options" };
+          const sym = occFor(symbol, l.expiry, l.kind, l.strike);
+          const f = chainFill(sym, side);
+          return { symbol: sym, side, qty: Math.abs(l.qty), price: +(f?.price ?? Math.max(0.01, l.entry)).toFixed(2), fee: +(OPTION_FEE * Math.abs(l.qty)).toFixed(2), note: `Strategy lab · filled at ${f ? f.source : "the leg's entry price (model)"}`, date, source: "options", instrument: "option", multiplier: 100, iv: l.iv };
+        });
+      const lines = orders.map((o) => `${o.side === "buy" ? "Buy" : "Sell"} ${o.qty} ${o.instrument ? contractLabel(o.symbol) : o.symbol + " shares"} at ${money(o.price)}${o.fee ? ` + ${money(o.fee)} fee` : ""}`);
+      if (!confirm(`Place these paper orders together?\n\n${lines.join("\n")}\n\nPaper trading only: no real orders. Fills use the chain's bid and ask where available.`)) break;
+      await applyOrders(orders);
+      notify(`Paper orders recorded: ${orders.length}.`);
+      page = "Portfolio";
+      render();
+      break;
+    }
+    case "opt-close": {
+      const pos = book(account()).holdings[value];
+      if (!pos?.qty) break;
+      const side = pos.qty > 0 ? "sell" : "buy";
+      const f = chainFill(value, side);
+      const mark = optionMarks()[value];
+      const price = f?.price ?? mark?.price;
+      if (price == null) throw Error("No price for this contract. Load its option chain first.");
+      const qty = Math.abs(pos.qty);
+      if (!confirm(`${side === "buy" ? "Buy" : "Sell"} ${qty} ${contractLabel(value)} at ${money(price)} to close (${f ? f.source : mark.source})?`)) break;
+      await applyOrders([{ symbol: value, side, qty, price: +Math.max(0.01, price).toFixed(2), fee: +(OPTION_FEE * qty).toFixed(2), note: `Closed from Portfolio · ${f ? f.source : mark.source}`, date: new Date().toISOString(), source: "options", instrument: "option", multiplier: pos.multiplier || 100 }]);
+      render();
+      break;
+    }
+    case "hedge-run":
+      runHedge();
+      render();
+      break;
+    case "margin-toggle": {
+      const ac = account();
+      if (!ac.margin && !confirm("Turn on simulated margin for this paper account? Naked short calls and puts become possible, held against a margin formula. Losses on naked short calls are unlimited. Paper only.")) break;
+      ac.margin = !ac.margin;
+      await persist();
+      render();
+      break;
+    }
+    case "osa-remove":
+      osaState().legs.splice(+value, 1);
+      await persist();
+      render();
+      break;
+    case "osa-clear":
+      Object.assign(osaState(), { legs: [], horizon: 0, ivShift: 0 });
+      await persist();
+      render();
+      break;
+    case "backfill-start":
+      optStatus = await backfillStart();
+      render();
+      break;
+    case "backfill-pause":
+      optStatus = await backfillPause(true);
+      render();
+      break;
+    case "options-purge":
+      if (!confirm("Delete every option and stock record downloaded from Massive, including the implied-volatility history worked out from it? This can't be undone.")) break;
+      notify(`Deleted ${await optionsPurge(value)} Massive records.`);
+      for (const k of Object.keys(ivHist)) delete ivHist[k];
+      optStatus = await backfillStatus();
+      render();
+      break;
+    case "agent-install":
+      agentInfo = await agentInstall();
+      notify("Background recorder installed. It runs every 30 minutes, even when Aperture is closed.");
+      render();
+      break;
+    case "agent-remove":
+      agentInfo = await agentRemove();
+      render();
+      break;
+    case "vol-open":
+      openStock(value, "VOL");
+      break;
+    case "vol-add-spy":
+      await ensureAsset(BENCHMARK);
+      render();
+      break;
     case "setup-connect":
     case "keys-save": {
       const entered = Object.fromEntries(
-        ["twelve", "finnhub", "alpha", "alpaca", "alpacasecret", "fred", "ais", "sec"].map((p) => [p, $("#key-" + p)?.value.trim() || ""]),
+        ["twelve", "finnhub", "alpha", "alpaca", "alpacasecret", "massive", "fred", "ais", "sec"].map((p) => [p, $("#key-" + p)?.value.trim() || ""]),
       );
       if (act === "setup-connect" && !Object.values(entered).some(Boolean))
         throw Error("Paste at least one API key, or explore the demo data.");

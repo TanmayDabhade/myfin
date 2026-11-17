@@ -1,0 +1,244 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { loadMath, bsm, black76, impliedVol, treePrice, realizedRolling, realizedCone, splitSuspects } from "../src/options/math.js";
+import { fredSeries, rankPercentile, vrpSeries, termRatio, regime, volProfile } from "../src/vol.js";
+
+await loadMath(readFileSync(new URL("../src/options/options.wasm", import.meta.url)));
+
+// The same scipy/numpy reference values the Rust crate is tested against,
+// now through the WebAssembly build the interface uses.
+const oracle = readFileSync(new URL("../src-tauri/crates/options-math/tests/oracle.txt", import.meta.url), "utf8")
+  .split("\n")
+  .filter((l) => l && !l.startsWith("#"))
+  .map((l) => l.split(" "))
+  .map(([tag, ...v]) => ({ tag, v: v.map(Number) }));
+const rel = (a, b) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-300);
+
+test("WebAssembly prices and Greeks match scipy", () => {
+  const rows = oracle.filter((r) => r.tag === "bsm");
+  assert.equal(rows.length, 400);
+  for (const { v } of rows) {
+    const g = bsm({ kind: v[0] === 1 ? "call" : "put", s: v[1], k: v[2], t: v[3], r: v[4], q: v[5], sigma: v[6] });
+    ["price", "delta", "gamma", "vega", "theta", "rho"].forEach((name, i) => {
+      const want = v[7 + i];
+      assert.ok(Math.abs(g[name] - want) <= 1e-10 * Math.max(1, Math.abs(want)) || rel(g[name], want) < 1e-10, `${name} ${g[name]} vs ${want}`);
+    });
+  }
+});
+
+test("WebAssembly implied volatility matches scipy's Brent solve", () => {
+  for (const { v } of oracle.filter((r) => r.tag === "iv")) {
+    const [kind, price, s, k, t, r, q, want] = v;
+    const out = impliedVol({ kind: kind === 1 ? "call" : "put", price, f: s * Math.exp((r - q) * t), k, t, df: Math.exp(-r * t) });
+    assert.ok(Math.abs(out.iv - want) < 1e-9, `${out.iv} vs ${want}`);
+  }
+  assert.deepEqual(impliedVol({ kind: "call", price: 1, f: 100, k: 50, t: 1, df: 1 }), { error: "below intrinsic value" });
+  assert.deepEqual(impliedVol({ kind: "call", price: 120, f: 100, k: 50, t: 1, df: 1 }), { error: "above the no-arbitrage maximum" });
+  assert.throws(() => impliedVol({ kind: "straddle", price: 1, f: 1, k: 1, t: 1, df: 1 }));
+});
+
+test("WebAssembly realized volatility matches numpy", () => {
+  const bars = oracle.filter((r) => r.tag === "bar").map(({ v }, i) => ({ date: String(i), open: v[0], high: v[1], low: v[2], close: v[3] }));
+  const ids = ["c2c", "park", "gk", "rs", "yz"];
+  for (const { v } of oracle.filter((r) => r.tag === "rv")) {
+    const got = realizedRolling(bars, { estimator: ids[v[0]], window: v[1] }).at(-1);
+    assert.ok(rel(got, v[2]) < 1e-12, `${ids[v[0]]} ${v[1]}: ${got} vs ${v[2]}`);
+  }
+});
+
+test("Black-76, the binomial tree and parity behave", () => {
+  const c = black76({ kind: "call", f: 19, k: 19, t: 0.75, r: 0.1, sigma: 0.28 });
+  assert.ok(Math.abs(c.price - 1.7011) < 5e-5, "Haug's futures option example");
+  const am = treePrice({ kind: "put", s: 50, k: 50, t: 5 / 12, r: 0.1, sigma: 0.4, steps: 501 });
+  assert.ok(Math.abs(am - 4.28) < 0.01, `Hull's American put ${am}`);
+  const eu = treePrice({ kind: "call", s: 100, k: 95, t: 0.5, r: 0.05, q: 0.02, sigma: 0.25, early: false, steps: 201 });
+  assert.ok(Math.abs(eu - bsm({ kind: "call", s: 100, k: 95, t: 0.5, r: 0.05, q: 0.02, sigma: 0.25 }).price) < 2e-4);
+  const div = treePrice({ kind: "call", s: 100, k: 80, t: 0.5, r: 0.05, sigma: 0.2, dividends: [{ t: 0.25, amount: 5 }] });
+  assert.ok(div < treePrice({ kind: "call", s: 100, k: 80, t: 0.5, r: 0.05, sigma: 0.2 }));
+});
+
+// A year and a half of synthetic daily bars, with an unadjusted 2-for-1 split.
+function synthetic(n = 400, split = 300) {
+  let seed = 9;
+  const rnd = () => ((seed = (1103515245 * seed + 12345) >>> 0) / 2 ** 32) - 0.5;
+  const bars = [];
+  let c = 100;
+  for (let i = 0; i < n; i++) {
+    const o = c * Math.exp(rnd() * 0.01);
+    c = o * Math.exp(rnd() * 0.03);
+    const f = i >= split ? 0.5 : 1;
+    const day = new Date(Date.UTC(2025, 0, 1) + i * 864e5).toISOString().slice(0, 10);
+    bars.push({ date: day, open: o * f, high: Math.max(o, c) * 1.004 * f, low: Math.min(o, c) * 0.996 * f, close: c * f });
+  }
+  return bars;
+}
+
+test("split days are found and left out of realized volatility", () => {
+  const bars = synthetic();
+  const s = splitSuspects(bars);
+  assert.equal(s.count, 1);
+  assert.equal(s.flags.indexOf(true), 300);
+  // A 126-day window ending at the last bar contains the split day (bar 300).
+  const raw = realizedRolling(bars, { estimator: "c2c", window: 126 }).at(-1);
+  const clean = realizedRolling(bars, { estimator: "c2c", window: 126, exclude: s.flags }).at(-1);
+  assert.ok(raw > 2 * clean, `${raw} vs ${clean}`);
+  const cone = realizedCone(bars, { windows: [21, 63], exclude: s.flags });
+  assert.equal(cone[0].window, 21);
+  assert.ok(cone[0].min <= cone[0].median && cone[0].median <= cone[0].max);
+  assert.deepEqual(realizedRolling([], {}), []);
+});
+
+test("reads FRED observations and ranks the latest value", () => {
+  const s = fredSeries({ data: { observations: [{ date: "2026-11-03", value: "20" }, { date: "2026-11-02", value: "." }, { date: "2026-11-01", value: "10" }, { date: "bad", value: "1" }] } });
+  assert.deepEqual(s, [{ date: "2026-11-01", value: 10 }, { date: "2026-11-03", value: 20 }]);
+  const series = [10, 30, 20, 15, 25].map((value, i) => ({ date: `2026-01-0${i + 1}`, value }));
+  const r = rankPercentile(series, 252);
+  assert.equal(r.current, 25);
+  assert.equal(r.rank, 0.75);
+  assert.equal(r.percentile, 0.75, "3 of the 4 earlier values are lower");
+  assert.equal(r.full, false);
+  assert.equal(rankPercentile(series.slice(0, 1)), null);
+});
+
+test("the volatility risk premium never uses future data at a past date", () => {
+  const bars = synthetic(260, 1e9);
+  const vix = bars.map((b, i) => ({ date: b.date, value: 15 + (i % 10) }));
+  const full = vrpSeries(vix, bars, { window: 21 });
+  // Cut the price history short: every VRP value that is still defined must
+  // be identical, and the last 21 dates must have none.
+  const cut = vrpSeries(vix, bars.slice(0, 200), { window: 21 });
+  const known = cut.rows.filter((r) => r.vrp != null);
+  assert.equal(known.length, 200 - 21, "defined only where the next 21 sessions exist");
+  for (const r of known) assert.equal(r.vrp, full.rows.find((x) => x.date === r.date).vrp);
+  assert.ok(cut.rows.slice(-21).every((r) => r.vrp == null));
+  assert.equal(cut.stats.knownThrough, bars[178].date);
+  const r0 = full.rows.find((r) => r.vrp != null);
+  assert.ok(Math.abs(r0.vrp - (r0.vix - r0.rvForward)) < 1e-12);
+});
+
+test("term ratio and the stated regime rules", () => {
+  const t = termRatio([{ date: "a", value: 20 }, { date: "b", value: 30 }], [{ date: "a", value: 25 }, { date: "b", value: 25 }]);
+  assert.deepEqual(t.map((x) => x.value), [0.8, 1.2]);
+  assert.equal(regime(0.2, 0.9).label, "Calm");
+  assert.equal(regime(0.8, 0.9).level, "Elevated");
+  assert.equal(regime(0.95, 1.1).label, "Stressed · inverted");
+  assert.equal(regime(null, 1), null);
+});
+
+test("a stock's volatility profile", () => {
+  const p = volProfile(synthetic());
+  assert.equal(p.excluded, 1);
+  assert.equal(p.excludedDates.length, 1);
+  assert.deepEqual(p.cone.map((r) => r.window), [10, 21, 63, 126, 252]);
+  assert.ok(p.rank.percentile >= 0 && p.rank.percentile <= 1);
+  assert.ok(Object.values(p.byEstimator).every((v) => v > 0 && v < 1));
+  assert.equal(volProfile([]), null);
+});
+
+import { pnl, extremes, positionGreeks, scenarioGrid, curves, breakEvens, buildTemplate, netPremium } from "../src/options/strategy.js";
+import { syntheticChain, strikeRows, nearMoney, smile, termPoints } from "../src/options/chain.js";
+
+test("strategy payoffs match their textbook shapes", () => {
+  // Bull call spread 100/110 bought for a 4.00 debit.
+  const spread = [
+    { kind: "call", strike: 100, days: 30, qty: 1, entry: 6, iv: 0.3 },
+    { kind: "call", strike: 110, days: 30, qty: -1, entry: 2, iv: 0.3 },
+  ];
+  const x = extremes(spread, 100);
+  assert.ok(Math.abs(x.maxGain - 600) < 1e-6 && Math.abs(x.maxLoss + 400) < 1e-6);
+  assert.equal(x.breakEvens.length, 1);
+  assert.ok(Math.abs(x.breakEvens[0] - 104) < 0.05);
+  assert.equal(netPremium(spread), 400);
+  // A long straddle's gain is unbounded; a covered call's loss is bounded by the stock.
+  assert.equal(extremes([{ kind: "call", strike: 100, days: 30, qty: 1, entry: 4 }, { kind: "put", strike: 100, days: 30, qty: 1, entry: 4 }], 100).maxGain, Infinity);
+  const cc = extremes([{ kind: "stock", qty: 100, entry: 100 }, { kind: "call", strike: 105, days: 30, qty: -1, entry: 2 }], 100);
+  assert.ok(Number.isFinite(cc.maxLoss) && Math.abs(cc.maxGain - 700) < 1e-6);
+  // At expiry and today.
+  assert.equal(pnl(spread, 120, { daysForward: 30 }), 600);
+  const today = pnl(spread, 100);
+  assert.ok(today > -400 && today < 600);
+  const { prices, atExpiry } = curves(spread, 100);
+  assert.ok(Math.abs(breakEvens(prices, atExpiry)[0] - 104) < 0.05);
+});
+
+test("position Greeks and the scenario grid", () => {
+  const call = [{ kind: "call", strike: 100, days: 365, qty: 2, entry: 10, iv: 0.2 }];
+  const g = positionGreeks(call, 100, { r: 0.05, q: 0 });
+  const one = bsm({ kind: "call", s: 100, k: 100, t: 1, r: 0.05, sigma: 0.2 });
+  assert.ok(Math.abs(g.delta - 200 * one.delta) < 1e-9);
+  assert.ok(Math.abs(g.vega - (200 * one.vega) / 100) < 1e-9);
+  assert.equal(positionGreeks([{ kind: "stock", qty: 50 }], 100).delta, 50);
+  const grid = scenarioGrid(call, 100, { days: 0 });
+  assert.equal(grid.length, 7);
+  assert.equal(grid[3].cells.length, 5);
+  assert.ok(grid[6].cells[2].pnl > grid[0].cells[2].pnl, "calls gain when the stock rises");
+  assert.ok(grid[3].cells[4].pnl > grid[3].cells[0].pnl, "and when volatility rises");
+  const legs = buildTemplate("iron-condor", 100, (kind, k) => ({ strike: k, days: 30, iv: 0.25, entry: 1 }));
+  assert.equal(legs.length, 4);
+});
+
+test("the synthetic demo chain is consistent", () => {
+  const c = syntheticChain("AAPL", 200, "2026-01-15");
+  assert.ok(c.synthetic && c.expiries.length === 8);
+  const e = c.expiries[3];
+  const rows = strikeRows(c, e.expiry);
+  assert.ok(rows.length > 20 && rows.every((r) => r.call && r.put));
+  assert.equal(nearMoney(rows, e.forward, 5).length, 10);
+  const s = smile(c, e.expiry);
+  assert.ok(s.length > 10);
+  // Our IV, solved from the mid of a bid/ask around the model price, is close to the model's.
+  const close = s.filter((p) => p.iv && Math.abs(p.strike / e.forward - 1) < 0.1);
+  assert.ok(close.every((p) => Math.abs(p.iv - p.vendor) < 0.02), JSON.stringify(close.slice(0, 3)));
+  assert.equal(termPoints(c).length, 8);
+});
+
+import { bookScenario } from "../src/options/strategy.js";
+test("book scenarios add up across underlyings", () => {
+  const a = { spot: 100, legs: [{ kind: "stock", qty: 100, entry: 100 }] };
+  const b = { spot: 50, legs: [{ kind: "stock", qty: 200, entry: 50 }] };
+  const g = bookScenario([a, b], { moves: [-0.1, 0, 0.1], shifts: [0] });
+  assert.deepEqual(g.map((r) => Math.round(r.cells[0].pnl)), [-2000, 0, 2000]);
+});
+
+import { hedgeSim } from "../src/options/strategy.js";
+test("delta hedging: gamma pays when realized beats implied, and hedging shrinks the spread", () => {
+  const legs = [{ kind: "call", strike: 100, days: 30, qty: 1, iv: 0.2 }];
+  legs[0].entry = bsm({ kind: "call", s: 100, k: 100, t: 30 / 365, r: 0.04, sigma: 0.2 }).price;
+  const fair = hedgeSim(legs, 100, { realizedVol: 0.2, paths: 600, seed: 3 });
+  const rich = hedgeSim(legs, 100, { realizedVol: 0.35, paths: 600, seed: 3 });
+  const cheap = hedgeSim(legs, 100, { realizedVol: 0.1, paths: 600, seed: 3 });
+  assert.ok(Math.abs(fair.hedged.mean) < 15, `fair vol: hedged P&L near zero, got ${fair.hedged.mean}`);
+  assert.ok(rich.hedged.mean > 30 && cheap.hedged.mean < -30, `${rich.hedged.mean} / ${cheap.hedged.mean}`);
+  assert.ok(Math.sign(rich.theory) === 1 && Math.sign(cheap.theory) === -1);
+  assert.ok(fair.hedged.sd < fair.unhedged.sd / 3, "hedging removes most of the spread");
+  const slow = hedgeSim(legs, 100, { realizedVol: 0.2, rebalanceDays: 5, paths: 600, seed: 3 });
+  assert.ok(slow.hedged.sd > fair.hedged.sd, "less frequent hedging leaves more error");
+  const costly = hedgeSim(legs, 100, { realizedVol: 0.2, costBps: 10, paths: 300, seed: 3 });
+  assert.ok(costly.cost > 0 && costly.hedged.mean < fair.hedged.mean);
+  assert.equal(hedgeSim([{ kind: "stock", qty: 100 }], 100), null);
+});
+
+import { gammaExposure, impliedMove, earningsMoves, GEX_CONVENTIONS } from "../src/options/chain.js";
+test("gamma exposure, implied moves and earnings moves", () => {
+  const c = syntheticChain("XYZ", 100, "2026-01-15");
+  const g = gammaExposure(c);
+  assert.ok(g.contracts > 100 && g.byStrike.length >= 15, `${g.contracts} contracts, ${g.byStrike.length} strikes`);
+  assert.ok(g.conventions.short.total < 0, "dealers short everything are short gamma");
+  assert.equal(Object.keys(g.conventions).length, Object.keys(GEX_CONVENTIONS).length);
+  const near = g.byStrike.reduce((a, b) => (Math.abs(b.strike - 100) < Math.abs(a.strike - 100) ? b : a));
+  assert.ok(near.call > 0 && near.put > 0);
+  const m = impliedMove(c, c.expiries[2].expiry, "amc");
+  assert.equal(m.expiry, c.expiries[3].expiry);
+  assert.ok(m.move > 0.01 && m.move < 0.2, `${m.move}`);
+  const bars = [100, 100, 110, 110, 99].map((close, i) => ({ date: `2026-01-0${i + 1}`, close }));
+  assert.deepEqual(earningsMoves(bars, [{ date: "2026-01-02", hour: "amc" }, { date: "2026-01-05", hour: "bmo" }]).map((x) => +x.move.toFixed(3)), [0.1, -0.1]);
+});
+
+import { buildBriefing } from "../src/analyst.js";
+test("the on-device analyst briefing carries volatility figures, labelled as estimates", () => {
+  const base = { symbol: "AAPL", bars: [], news: [], filings: [], ownership: [], stats: {}, earnings: [], today: "2026-11-17" };
+  const withOpts = buildBriefing({ ...base, options: { rv21: 0.21, atm30: 0.25, atm30Source: "recorded quotes", atm30Date: "2026-11-16", ivRank: 0.4, ivDays: 252, skew30: 0.05, impliedMove: 0.052, impliedMoveExpiry: "2026-11-20" } });
+  assert.match(withOpts.text, /\[V\] VOLATILITY: realized volatility 21d .*implied volatility 30d .*IV rank 40% over 252 days.*not a forecast/);
+  assert.doesNotMatch(buildBriefing({ ...base, options: null }).text, /\[V\]/);
+});

@@ -42,8 +42,8 @@ export async function fetchSEC(kind, cik = "", accession = "", doc = "", force =
 export const aisStart = (area, lat, lon) => invoke("ais_start", { area, lat, lon });
 export const aisStop = () => (native ? invoke("ais_stop") : Promise.resolve());
 export const aisSnapshot = () => invoke("ais_snapshot");
-export async function nativeTrade(mode, order) {
-  return invoke("paper_trade", { mode, order });
+export async function nativeTrade(mode, order, marks = null) {
+  return invoke("paper_trade", { mode, order, marks });
 }
 export const quotesStart = (symbols) => invoke("quotes_start", { symbols });
 export const quotesStop = () => (native ? invoke("quotes_stop") : Promise.resolve());
@@ -91,3 +91,14 @@ export const analystNews = (query) => call("analyst_news", { query });
 export const analystRead = (url) => call("analyst_read", { url });
 // Streamed reply text: fn({ id, text?, stage? }).
 export const onAnalystDelta = (fn) => window.__TAURI__?.event?.listen?.("analyst-delta", (e) => fn(e.payload));
+// Option chains (Alpaca's free feed), implied-volatility history, the Massive
+// backfill and the background recorder (desktop only).
+export const optionsChain = (symbol, spot = null, force = false) => call("options_chain", { symbol, spot, force });
+export const optionsHistory = (symbol) => call("options_history", { symbol });
+export const backfillStatus = () => call("backfill_status");
+export const backfillStart = (symbols = null) => call("backfill_start", { symbols });
+export const backfillPause = (paused) => call("backfill_pause", { paused });
+export const optionsPurge = (source) => call("options_purge", { source });
+export const agentStatus = () => call("agent_status");
+export const agentInstall = () => call("agent_install");
+export const agentRemove = () => call("agent_remove");

@@ -208,6 +208,22 @@ export function buildBriefing(d) {
       out.push(`[R] RISK: ${parts.join(", ")}.`);
     }
   }
+  // Volatility and option figures (only present for the on-device model:
+  // option data is licensed for personal use and isn't sent to online models).
+  const v = d.options;
+  if (v) {
+    const parts = [
+      v.rv21 != null && `realized volatility 21d ${pc(v.rv21)}`,
+      v.atm30 != null && `implied volatility 30d ${pc(v.atm30)} (${v.atm30Source}, ${v.atm30Date})`,
+      v.ivRank != null && `IV rank ${Math.round(v.ivRank * 100)}% over ${v.ivDays} days`,
+      v.skew30 != null && `90–110% skew ${(v.skew30 * 100).toFixed(1)} vol points`,
+      v.impliedMove != null && `options imply an expected ±${pc(v.impliedMove)} move through ${v.impliedMoveExpiry} (an estimate from the straddle price, not a forecast)`,
+    ].filter(Boolean);
+    if (parts.length) {
+      add("V", "Volatility and options", { view: "VOL" });
+      out.push(`[V] VOLATILITY: ${parts.join(", ")}.`);
+    }
+  }
   const earn = (d.earnings || []).filter((e) => e.date).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   if (earn.length) {
     const today = (d.today || new Date().toISOString()).slice(0, 10);

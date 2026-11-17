@@ -104,6 +104,7 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 | Suppliers & customers | `SPLC` (or `RELS`) | The relationship explorer, centred on the stock |
 | Valuation | `DCF` | Five-year DCF pre-filled from the company's SEC filings (cash flow − capital spending, debt − cash, shares outstanding, recent revenue growth), each input labelled with its source; your edits are saved per stock |
 | Risk analytics | `RSK` | Monte Carlo price ranges, market scenarios, daily-move distribution, rolling volatility, drawdown and beta, and momentum gauges, using Goldman Sachs' GS Quant, which ships with the app. See [Risk analytics (GS Quant)](#risk-analytics-gs-quant) |
+| Volatility | `VOL` | Realized volatility by five estimators (Yang–Zhang by default), the volatility cone, 1-month volatility history and where today sits in the past year. Calculated by Aperture's Rust options maths. See [Volatility](#volatility) |
 | Time & sales | `TAS` (or `QR`) | Order flow from trade prints: buying vs selling volume at each price (with the busiest price and VWAP marked), the trade list grouped by order, buy/sell pressure and cumulative delta, for the whole session or the last 30, 5 or 1 minutes. Live from the Finnhub stream, or the last session's when the market is closed |
 | Filings | `CF` | Recent 10-K, 10-Q, 8-K and similar filings |
 
@@ -132,6 +133,37 @@ The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldma
 - **Cash rate**: the Sharpe ratio uses the latest FRED fed funds rate once Economy has loaded it, and 0% until then.
 - **Offline only**: only `gs_quant.timeseries` functions that work on local data are used. Nothing is sent to Goldman Sachs and no Marquee account is needed. gs-quant's Marquee features (GS datasets, derivatives pricing, Sortino and drawdown-length reports) need institutional GS credentials and are not used.
 - **How it runs**: the desktop app runs a fixed script (`src-tauri/src/quant.py`) with `python -I -B`, passes the prices on stdin and validates the result. The page can't choose which program runs: it's the built-in Python, `APERTURE_PYTHON`, or one you pick in a file dialog.
+
+## Volatility
+
+**Volatility** in the sidebar (Markets) compares what options expect with what the market then did. **`VOL`** on each stock page shows that stock's realized volatility.
+
+- **VIX and VIX3M** load from FRED (series `VIXCLS`, `VXVCLS`; about ten years) with your FRED key. Cboe holds the copyright on both indices; they're cited on the page and shown for your own research.
+- **Implied vs realized:** VIX against SPY's realized volatility over the previous 21 trading days.
+- **Volatility risk premium:** VIX on each day minus SPY's realized volatility over the *next* 21 trading days. A day's value is only known 21 sessions later, so the chart stops there; nothing uses a future value at an earlier date.
+- **Term structure:** VIX ÷ VIX3M, with days above 1 (near-term stress) shaded. A stated regime label (Calm, Normal, Elevated, Stressed, plus Inverted) comes from VIX's 1-year percentile; the rule is printed beside it.
+- **Every stock in the workspace:** realized volatility over 21 days, 63 days and a year, and where the 21-day figure sits in its own past year.
+- **`VOL` view:** close-to-close, Parkinson, Garman–Klass, Rogers–Satchell and Yang–Zhang estimators (log returns, 252 days a year), a volatility cone across 10–252-day windows, and rolling 1-month volatility. A day whose open is more than 40% from the prior close (most likely a split the price source didn't adjust for) contributes no overnight return; the page lists those days.
+- **Implied volatility per stock:** 30-day at-the-money IV history (recorded and backfilled), IV rank and percentile, implied minus realized, and 90–110% skew with its history. The Volatility page's workspace table adds each stock's implied volatility.
+- **Aperture Analyst:** when it runs on this computer, its briefing includes realized and implied volatility, IV rank, skew and the earnings implied move, labelled as estimates. Option data isn't sent to online model accounts, because the providers license it for personal use. See [Options](#options).
+
+**How it's calculated:** one Rust crate, `src-tauri/crates/options-math`, holds the option pricing (Black–Scholes–Merton, Black-76, Leisen–Reimer American trees with discrete dividends), implied-volatility solving, Greeks, the parity forward, the Treasury-bill rate curve and the realized-volatility estimators. It has no dependencies, so the same code builds for the desktop app and, through `src-tauri/crates/options-wasm`, as a 54 KB WebAssembly module the interface loads (`src/options/math.js`). `scripts/build-wasm.cjs` builds it before `npm run dev`, `build`, `test` and `test:e2e`, adding Rust's `wasm32-unknown-unknown` target the first time. It's tested against textbook values (Hull, Haug), Greek identities and the Black–Scholes PDE, and against independent scipy/numpy reference values (`scripts/options-oracle.py` writes `tests/oracle.txt`): normal distribution to 1e-13, prices and Greeks to 1e-10, implied volatility to 1e-9, realized volatility to 1e-12, in Rust and again through WebAssembly.
+
+## Options
+
+All option data is for your own research, and all trading is paper only.
+
+- **Option monitor (`OMON`):** the chain from Alpaca's free indicative feed (your Alpaca key ID and secret; paper-account keys are enough, and Aperture only reads data). It shows bid/ask, volume, open interest and Aperture's own IV and Greeks. IV uses Black's formula on the put–call-parity forward, from the out-of-the-money option at each strike. The view also has the smile, term structure, an earnings panel (straddle and event-only implied move against past realized moves) and **estimated** gamma exposure under two stated dealer conventions. Each expiry's smile is fitted with SVI (Rust), and the fit error and a butterfly-arbitrage check are shown. Indicative quotes are derived from, but are not, exchange (OPRA) quotes. Demo data uses a synthetic chain.
+- **Strategy lab (`OSA`):** legs or templates (spreads, straddles, collars, condors, covered calls). It shows the payoff at expiry, today and any later date; max gain and loss; break-evens; position Greeks; and a price × volatility scenario grid. A **delta-hedge simulator** tests hedging against realized volatility, re-hedge frequency, costs and crash jumps, next to the continuous-hedging theory.
+- **Paper trading:** "Paper trade this" places all legs together, filling at the chain's ask for buys and bid for sells, with a $0.65-per-contract fee. Rules, enforced in both the interface and the desktop ledger:
+  - long options are allowed;
+  - short calls must be covered by 100 shares each or by a long call (a spread);
+  - short puts must be cash-secured or part of a spread;
+  - with **simulated margin** turned on (Portfolio → Option risk), naked shorts are held against the standard strategy-based margin formula.
+  - Expired options settle at intrinsic value against the expiry-day close. Portfolio shows option marks, book Greeks, margin status and scenarios.
+- **History:** a free Massive account (key in Settings → Data sources) backfills about two years of option and stock data in priority order. That covers reference data and contract lists first, then at-the-money contracts (IV history and IV rank), then skew strikes. IV comes from trade prints between 15:30 and 16:00 New York, matched to the stock's price in the same minute. Requests go only to `api.massive.com`, one every 13 seconds. Everything is stored in `options.sqlite` tagged with its source, and **Delete all Massive data** removes it. After each close, Alpaca chains for SPY, QQQ and the watchlist (up to 30) are recorded.
+- **Background recorder:** Settings → Option data installs `aperture --agent`, run every 30 minutes by launchd (macOS), Task Scheduler (Windows) or a systemd user timer (Linux). It does the captures and backfill while the app is closed, then exits. Without it, the open app does the same work.
+- **Maths:** `src-tauri/crates/options-math` (Rust), also compiled to WebAssembly for the interface. See [Volatility](#volatility).
 
 ## Quant Lab (strategy research)
 
@@ -207,6 +239,7 @@ The **Universe** page and the sidebar search cover every stock and ETF in Twelve
 | Screener | S&P 500 market map (treemap by sector, tiles sized by market cap, coloured by 1-day to 1-year change, top gainers/losers; click a company to open its stock page) and the workspace screener: P/E, growth and sector filters, saved screens, result export |
 | Valuation (on the stock page) | Inputs pre-filled from SEC XBRL filings with sources, five-year unlevered DCF, bear/base/bull cases, terminal growth, net debt, diluted shares, discount/growth sensitivity, model export |
 | Economy | FRED CPI, unemployment, policy rate, 2Y/10Y Treasury yields and real GDP, loaded automatically, with source links and history charts |
+| Volatility | VIX and VIX3M from FRED, VIX vs SPY realized volatility, volatility risk premium without look-ahead, VIX term structure and regime, realized volatility of every workspace stock |
 | Alerts | Persistent above/below price conditions; latching status; reevaluated on workspace load and stored-data changes |
 | Settings | Saved provider keys, price-source choice, sync status and last errors, starting cash, JSON backup (restore under Advanced) |
 
@@ -248,6 +281,7 @@ npm test                       # calculation/import tests
 npx playwright install chromium
 npm run test:e2e               # standalone browser workflow smoke test
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+cargo test --manifest-path src-tauri/Cargo.toml -p options-math   # options maths + scipy reference values
 npm run build
 npm run tauri build
 ```
@@ -287,6 +321,8 @@ An AI research assistant that runs on your computer. It isn't a cloud service: i
 - `src/pricechart.js`, `src/candles.js`: price charts (Lightweight Charts), timeframes and live candles
 - `src/analyst.js`, `src-tauri/src/analyst.rs`, `src-tauri/src/analyst_host.rs`: Aperture Analyst (instructions, briefing, tools; model download, local server, news search and page reading)
 - `src/orderflow.js`: volume at price, grouped trades and delta from trade prints
+- `src-tauri/crates/options-math`: option pricing, implied volatility, Greeks, rates and realized volatility (Rust, no dependencies); `src-tauri/crates/options-wasm` exports it to WebAssembly; `src/options/math.js` loads it in the interface
+- `src/vol.js`, `src/volcharts.js`: the Volatility page and `VOL` view (FRED parsing, IV rank, volatility risk premium, regimes, charts)
 - `src/engine.js`: pure analytics, validation, imports and preview accounting
 - `src/sample.js`: deterministic synthetic demonstration data
 - `src/bridge.js`: native/browser storage and provider boundary

@@ -10,3 +10,7 @@ pub mod legacy;
 pub mod quant;
 pub mod analyst;
 pub mod lab;
+pub mod options;
+pub mod massive;
+pub mod recorder;
+pub mod scheduler;

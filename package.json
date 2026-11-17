@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
-    "build": "vite build",
-    "test": "node --test tests/*.test.js",
+    "wasm": "node scripts/build-wasm.cjs",
+    "dev": "node scripts/build-wasm.cjs && vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "node scripts/build-wasm.cjs && vite build",
+    "test": "node scripts/build-wasm.cjs && node --test tests/*.test.js",
     "tauri": "tauri",
-    "test:e2e": "node scripts/smoke.cjs",
+    "test:e2e": "node scripts/build-wasm.cjs && node scripts/smoke.cjs",
     "format": "prettier --write src tests e2e *.json *.js",
     "demo:capture": "node scripts/capture-demo.cjs"
   },
