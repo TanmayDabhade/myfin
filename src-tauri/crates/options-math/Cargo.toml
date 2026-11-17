@@ -1,0 +1,8 @@
+[package]
+name = "options-math"
+version = "0.1.0"
+edition = "2021"
+description = "Aperture's option pricing, implied volatility, Greeks and realized volatility. No dependencies, so it builds for the desktop, the background agent and WebAssembly alike."
+publish = false
+
+[dependencies]

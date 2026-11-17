@@ -104,6 +104,7 @@ Load a stock once and every view follows it. Type a ticker in the sidebar search
 | Suppliers & customers | `SPLC` (or `RELS`) | The relationship explorer, centred on the stock |
 | Valuation | `DCF` | Five-year DCF pre-filled from the company's SEC filings (cash flow − capital spending, debt − cash, shares outstanding, recent revenue growth), each input labelled with its source; your edits are saved per stock |
 | Risk analytics | `RSK` | Monte Carlo price ranges, market scenarios, daily-move distribution, rolling volatility, drawdown and beta, and momentum gauges, using Goldman Sachs' GS Quant, which ships with the app. See [Risk analytics (GS Quant)](#risk-analytics-gs-quant) |
+| Volatility | `VOL` | Realized volatility by five estimators (Yang–Zhang by default), the volatility cone, 1-month volatility history and where today sits in the past year. Calculated by Aperture's Rust options maths. See [Volatility](#volatility) |
 | Time & sales | `TAS` (or `QR`) | Order flow from trade prints: buying vs selling volume at each price (with the busiest price and VWAP marked), the trade list grouped by order, buy/sell pressure and cumulative delta, for the whole session or the last 30, 5 or 1 minutes. Live from the Finnhub stream, or the last session's when the market is closed |
 | Filings | `CF` | Recent 10-K, 10-Q, 8-K and similar filings |
 
@@ -132,6 +133,20 @@ The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldma
 - **Cash rate**: the Sharpe ratio uses the latest FRED fed funds rate once Economy has loaded it, and 0% until then.
 - **Offline only**: only `gs_quant.timeseries` functions that work on local data are used. Nothing is sent to Goldman Sachs and no Marquee account is needed. gs-quant's Marquee features (GS datasets, derivatives pricing, Sortino and drawdown-length reports) need institutional GS credentials and are not used.
 - **How it runs**: the desktop app runs a fixed script (`src-tauri/src/quant.py`) with `python -I -B`, passes the prices on stdin and validates the result. The page can't choose which program runs: it's the built-in Python, `APERTURE_PYTHON`, or one you pick in a file dialog.
+
+## Volatility
+
+**Volatility** in the sidebar (Markets) compares what options expect with what the market then did. **`VOL`** on each stock page shows that stock's realized volatility.
+
+- **VIX and VIX3M** load from FRED (series `VIXCLS`, `VXVCLS`; about ten years) with your FRED key. Cboe holds the copyright on both indices; they're cited on the page and shown for your own research.
+- **Implied vs realized:** VIX against SPY's realized volatility over the previous 21 trading days.
+- **Volatility risk premium:** VIX on each day minus SPY's realized volatility over the *next* 21 trading days. A day's value is only known 21 sessions later, so the chart stops there; nothing uses a future value at an earlier date.
+- **Term structure:** VIX ÷ VIX3M, with days above 1 (near-term stress) shaded. A stated regime label (Calm, Normal, Elevated, Stressed, plus Inverted) comes from VIX's 1-year percentile; the rule is printed beside it.
+- **Every stock in the workspace:** realized volatility over 21 days, 63 days and a year, and where the 21-day figure sits in its own past year.
+- **`VOL` view:** close-to-close, Parkinson, Garman–Klass, Rogers–Satchell and Yang–Zhang estimators (log returns, 252 days a year), a volatility cone across 10–252-day windows, and rolling 1-month volatility. A day whose open is more than 40% from the prior close (most likely a split the price source didn't adjust for) contributes no overnight return; the page lists those days.
+- **Not yet:** implied volatility for single stocks, skew and option chains. Option chains aren't connected.
+
+**How it's calculated:** one Rust crate, `src-tauri/crates/options-math`, holds the option pricing (Black–Scholes–Merton, Black-76, Leisen–Reimer American trees with discrete dividends), implied-volatility solving, Greeks, the parity forward, the Treasury-bill rate curve and the realized-volatility estimators. It has no dependencies, so the same code builds for the desktop app and, through `src-tauri/crates/options-wasm`, as a 54 KB WebAssembly module the interface loads (`src/options/math.js`). `scripts/build-wasm.cjs` builds it before `npm run dev`, `build`, `test` and `test:e2e`, adding Rust's `wasm32-unknown-unknown` target the first time. It's tested against textbook values (Hull, Haug), Greek identities and the Black–Scholes PDE, and against independent scipy/numpy reference values (`scripts/options-oracle.py` writes `tests/oracle.txt`): normal distribution to 1e-13, prices and Greeks to 1e-10, implied volatility to 1e-9, realized volatility to 1e-12, in Rust and again through WebAssembly.
 
 ## Quant Lab (strategy research)
 
@@ -207,6 +222,7 @@ The **Universe** page and the sidebar search cover every stock and ETF in Twelve
 | Screener | S&P 500 market map (treemap by sector, tiles sized by market cap, coloured by 1-day to 1-year change, top gainers/losers; click a company to open its stock page) and the workspace screener: P/E, growth and sector filters, saved screens, result export |
 | Valuation (on the stock page) | Inputs pre-filled from SEC XBRL filings with sources, five-year unlevered DCF, bear/base/bull cases, terminal growth, net debt, diluted shares, discount/growth sensitivity, model export |
 | Economy | FRED CPI, unemployment, policy rate, 2Y/10Y Treasury yields and real GDP, loaded automatically, with source links and history charts |
+| Volatility | VIX and VIX3M from FRED, VIX vs SPY realized volatility, volatility risk premium without look-ahead, VIX term structure and regime, realized volatility of every workspace stock |
 | Alerts | Persistent above/below price conditions; latching status; reevaluated on workspace load and stored-data changes |
 | Settings | Saved provider keys, price-source choice, sync status and last errors, starting cash, JSON backup (restore under Advanced) |
 
@@ -248,6 +264,7 @@ npm test                       # calculation/import tests
 npx playwright install chromium
 npm run test:e2e               # standalone browser workflow smoke test
 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib
+cargo test --manifest-path src-tauri/Cargo.toml -p options-math   # options maths + scipy reference values
 npm run build
 npm run tauri build
 ```
@@ -287,6 +304,8 @@ An AI research assistant that runs on your computer. It isn't a cloud service: i
 - `src/pricechart.js`, `src/candles.js`: price charts (Lightweight Charts), timeframes and live candles
 - `src/analyst.js`, `src-tauri/src/analyst.rs`, `src-tauri/src/analyst_host.rs`: Aperture Analyst (instructions, briefing, tools; model download, local server, news search and page reading)
 - `src/orderflow.js`: volume at price, grouped trades and delta from trade prints
+- `src-tauri/crates/options-math`: option pricing, implied volatility, Greeks, rates and realized volatility (Rust, no dependencies); `src-tauri/crates/options-wasm` exports it to WebAssembly; `src/options/math.js` loads it in the interface
+- `src/vol.js`, `src/volcharts.js`: the Volatility page and `VOL` view (FRED parsing, IV rank, volatility risk premium, regimes, charts)
 - `src/engine.js`: pure analytics, validation, imports and preview accounting
 - `src/sample.js`: deterministic synthetic demonstration data
 - `src/bridge.js`: native/browser storage and provider boundary

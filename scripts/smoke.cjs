@@ -599,6 +599,9 @@ async function liveFlow(browser, errors) {
     throw Error("Scanned candidate treated as reviewed");
   await page.click('[data-page="Economy"]');
   await page.waitForFunction(() => [...document.querySelectorAll(".macro-card strong")].every((x) => x.textContent === "4.10"));
+  // VIX and VIX3M load from FRED on the Volatility page.
+  await page.click('[data-page="Volatility"]');
+  await page.waitForFunction(() => /VIX\s+4\.10/.test(document.querySelector(".risk-kpis")?.innerText || ""));
   await page.click('[data-page="Commodities"]');
   await page.waitForSelector("#vessel-panel .leaflet-container");
   await page.waitForFunction(() => document.querySelectorAll(".commodity-grid .macro-card strong").length === 5 && [...document.querySelectorAll(".commodity-grid .macro-card strong")].every((x) => x.textContent === "4.10"));
@@ -725,6 +728,7 @@ const server = spawn(
     "Portfolio",
     "Screener",
     "Economy",
+    "Volatility",
     "Alerts",
     "Settings",
     "Commodities",
@@ -736,7 +740,14 @@ const server = spawn(
     )
       throw Error("Overflow on " + name);
   }
+  // Realized volatility from the Rust options maths (WebAssembly) on demo prices.
+  await page.click('[data-page="Volatility"]');
+  await page.waitForSelector('[data-vc="spy-rv"] svg');
   await page.click('[data-page="Stock"]');
+  await page.click('.fn-strip [data-value="VOL"]');
+  await page.waitForSelector('[data-vc="cone"] svg');
+  await page.waitForSelector('[data-vc="rv21"] svg');
+  if (!/Realized · 1 month\s+\d+\.\d%/.test(await page.locator(".risk-kpis").innerText())) throw Error("VOL view shows no realized volatility");
   await page.click('.fn-strip [data-value="SPLC"]');
   if ((await page.locator(".evidence-card").count()) !== 3)
     throw Error("Apple neighborhood absent");

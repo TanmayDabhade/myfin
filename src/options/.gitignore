@@ -1,0 +1,2 @@
+# Built from src-tauri/crates/options-wasm by scripts/build-wasm.cjs
+options.wasm

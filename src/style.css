@@ -1115,6 +1115,11 @@ table.tape tr.big td { font-weight: 650; color: #fff; }
 .rc-legend i.k-thin { border-top: 1px solid #6b6b6b; }
 .rc-legend i.k-band { height: 10px; border: 0; background: rgba(237, 237, 237, 0.24); border-radius: 2px; }
 .rc-legend i.k-band.light { background: rgba(237, 237, 237, 0.08); }
+.vol-notes { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 14px 0 10px; font-size: 12px; }
+.vol-notes dt { color: #d6d6d6; }
+.vol-notes dd { margin: 0; color: #9a9a9a; }
+@media (max-width: 640px) { .vol-notes { grid-template-columns: 1fr; } .vol-notes dd { margin-bottom: 6px; } }
+.rc-legend i.k-dot { width: 10px; height: 10px; border: 0; background: #3a95d8; border-radius: 50%; }
 .rc-legend i.k-bar { width: 10px; height: 10px; border: 0; background: #6b6b6b; border-radius: 2px; }
 .seg { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .seg button { padding: 5px 10px; font-size: 12px; }

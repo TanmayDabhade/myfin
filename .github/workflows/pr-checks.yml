@@ -19,3 +19,5 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
       - run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked
+      # Options maths: unit tests plus the scipy/numpy reference values (tests/oracle.txt).
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -p options-math --locked

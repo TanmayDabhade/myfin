@@ -56,6 +56,10 @@ import {
   TX_CODES,
 } from "./holders.js";
 import "./style.css";
+import wasmUrl from "./options/options.wasm?url";
+import { loadMath, ESTIMATORS } from "./options/math.js";
+import { VOL_SERIES, VOL_CITATION, RV_WINDOWS, fredSeries, rankPercentile, vrpSeries, termRatio, regime, REGIME_RULES, volProfile, realized } from "./vol.js";
+import { multiLine, signedBars, coneChart, SERIES_COLORS } from "./volcharts.js";
 import { labInit, labPage, labAction, labPaint, labOpen } from "./quantlab/ui.js";
 import {
   load,
@@ -154,6 +158,10 @@ const pct = (x) => (x == null ? "—" : fmt(x * 100) + "%"),
           notation: "compact",
           maximumFractionDigits: 2,
         }).format(x);
+// The options and volatility maths (Rust, compiled to WebAssembly). The rest
+// of the app works without it, so a failure only disables those views.
+let mathError = "";
+await loadMath(fetch(wasmUrl)).catch((e) => (mathError = String(e?.message || e)));
 let state = migrate(await load()),
   page = "Overview",
   keyInfo = await keyStatus().catch(() => null),
@@ -216,11 +224,11 @@ if (state.relationshipGraph) validateGraph(state.relationshipGraph);
 // Market-wide and personal pages. Everything about one company lives on the
 // stock page, which the sidebar lists by ticker.
 const navGroups = [
-  ["Markets", ["Overview", "Universe", "Screener", "Economy", "Commodities"]],
+  ["Markets", ["Overview", "Universe", "Screener", "Economy", "Volatility", "Commodities"]],
   ["Research", ["Quant Lab"]],
   ["Your account", ["Portfolio", "Trade", "Alerts"]],
 ];
-const navIcons = { Overview: "◫", Universe: "◍", Screener: "☷", Economy: "◎", Commodities: "≋", Portfolio: "◉", Trade: "⇄", Alerts: "◇", "Quant Lab": "∿", Settings: "⚙" };
+const navIcons = { Volatility: "σ", Overview: "◫", Universe: "◍", Screener: "☷", Economy: "◎", Commodities: "≋", Portfolio: "◉", Trade: "⇄", Alerts: "◇", "Quant Lab": "∿", Settings: "⚙" };
 // Dover Strait by default: AISStream's coverage is strong there and thin in
 // some Middle East and open-ocean areas. The last pick is remembered.
 let maritimeSelected = locations.some((x) => x.id === state.vesselLocation)
@@ -483,6 +491,7 @@ window.addEventListener("resize", () => {
     else {
       drawCharts();
       drawRiskCharts();
+      drawVolCharts();
     }
   }, 150);
 });
@@ -498,18 +507,21 @@ function render() {
     Portfolio: portfolioPage,
     Screener: screener,
     Economy: economy,
+    Volatility: volatilityPage,
     Alerts: alerts,
     Commodities: commodities,
     Settings: settings,
     "Quant Lab": labPage,
   };
   const demo = page !== "Setup" && state.mode === "sample";
+  volBuilds = {};
   document.getElementById("app").innerHTML =
     `<aside><div class="brand"><i>◈</i> APERTURE</div><div class="side-search"><input id="search" placeholder="Ticker or AAPL HDS" aria-label="Search any listing or type a function like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${sideNav()}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content">${page === "Stock" ? "" : `<div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>`}${views[page]()}</section><footer>Aperture 0.3 · USD equity workspace · Daily and intraday prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
   bind();
   bindVessel();
   drawCharts();
   drawRiskCharts();
+  drawVolCharts();
   drawDelta();
   // One corrective pass at most (a scrollbar appearing could otherwise loop).
   const g = document.querySelector(".relationship-graph");
@@ -1362,7 +1374,7 @@ function stockPage() {
 function stockGrid() {
   const tile = (code, body, cls = "") =>
     `<section class="panel tile ${cls}" data-tile="${code}"><div class="panel-head"><h2><button class="tile-title" data-action="stock-view" data-value="${code}">${viewLabel(code)}</button><kbd>${code}</kbd></h2><button class="icon" data-action="stock-view" data-value="${code}" title="Open ${viewLabel(code)}" aria-label="Open ${viewLabel(code)}">⤢</button></div>${body}</section>`;
-  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("ASK", analystTile())}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("RSK", riskTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
+  return `<div class="stock-grid">${tile("GP", chartBody(), "t-chart")}${tile("CN", newsList(5))}${tile("TAS", `<div id="tape-slot">${tapeBody(12)}</div>`)}${tile("ASK", analystTile())}${tile("HDS", holdersTile())}${tile("OWN", ownershipBody(false))}${tile("DCF", valuationTile())}${tile("RSK", riskTile())}${tile("VOL", volTile())}${tile("DES", profileTile())}${tile("FA", financialsTile())}${tile("SPLC", relationsTile())}${tile("CF", filingsTile(), "t-wide")}</div>`;
 }
 function stockBody() {
   const views = {
@@ -1376,6 +1388,7 @@ function stockBody() {
     SPLC: relationsView,
     DCF: valuation,
     RSK: riskView,
+    VOL: volView,
     TAS: tapeView,
     CF: secPanel,
   };
@@ -3135,7 +3148,7 @@ function setup() {
 function settings() {
   if (!native)
     return `<section class="panel"><div class="panel-head"><h2>Data sources</h2></div>${empty("Live data connects in the desktop app (npm run tauri dev or the installed app). This browser preview only has demo data.")}</section>${workspacePanel()}`;
-  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${quantPanel()}${analystPanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Data sources</h2>${button("Save keys", "keys-save", "primary")}${button("Sync now", "sync")}</div>${["twelve", "finnhub", "alpha", "alpaca", "fred", "ais", "sec"].map((p) => keyRow(p, false)).join("")}${priceSelect()}<small>Keys are saved in credentials.json in your app-data folder (owner-only permissions), never in backups or the workspace. Environment variables ALPHA_VANTAGE_API_KEY, TWELVE_DATA_API_KEY, FINNHUB_API_KEY, ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY, FRED_API_KEY, AISSTREAM_API_KEY and SEC_CONTACT_EMAIL override saved values. Requests stay inside each free plan: saved data is reused for 1 hour (Twelve Data), 6 hours (Alpha Vantage) or 12 hours (FRED).</small></section>${referencePanel()}${quantPanel()}${analystPanel()}${workspacePanel()}<section class="panel"><div class="panel-head"><h2>Source policy & coverage</h2></div><p>Data comes only from your own provider accounts and public sources. No scraping, paywall bypass, shared credentials or quota evasion. Free access is not a redistribution license.</p><p>Coverage: USD stock/ETF daily prices, company fundamentals, news, earnings calendar, FRED macro series, FRED commodity prices, VIX and VIX3M (Cboe, via FRED) and live AIS vessel positions (AISStream). Not included: tick data, options chains, corporate-action processing, live brokerage execution or tax accounting.</p>${link("https://twelvedata.com/terms", "Twelve Data terms")} · ${link("https://www.alphavantage.co/terms_of_service/", "Alpha Vantage terms")} · ${link("https://fred.stlouisfed.org/docs/api/terms_of_use.html", "FRED terms")}</section>`;
 }
 function workspacePanel() {
   return `<section class="panel"><div class="panel-head"><h2>Workspace</h2>${button("Export full backup", "backup")}${button("Export selected prices", "prices-export")}</div><label>Paper account starting cash<input id="initial-cash" type="number" min="1" value="${account().initial}" ${account().trades.length ? "disabled" : ""}></label>${button("Set starting cash", "cash")}<small>Starting cash is editable only before the first trade. Native data lives in aperture.sqlite in your OS app-data folder.</small><details class="advanced"><summary>Advanced</summary><label>Restore a backup file (replaces the workspace)<input id="restore" type="file" accept=".json"></label></details></section>`;
@@ -3379,6 +3392,160 @@ function drawRiskCharts() {
     hover(el, chart);
   });
 }
+// ---- Volatility (market page and the stock page's VOL view) ---------------
+// Realized volatility comes from the Rust options maths (WebAssembly);
+// VIX and VIX3M from FRED. Every figure says what it is and where it came from.
+let volRange = "2Y",
+  volEstimator = "yz";
+const VOL_RANGES = [
+  ["1Y", 252],
+  ["2Y", 504],
+  ["5Y", 1260],
+  ["Max", Infinity],
+];
+// Chart slots for the volatility views: id → builder(width). Reset on every render.
+let volBuilds = {};
+const vc = (id, h, label, build) => {
+  volBuilds[id] = build;
+  return `<div class="rc" data-vc="${id}" style="min-height:${h}px" aria-label="${esc(label)}"><div class="rc-tip" hidden></div></div>`;
+};
+function drawVolCharts() {
+  document.querySelectorAll("[data-vc]").forEach((el) => {
+    const W = Math.max(240, Math.round(el.clientWidth));
+    const chart = volBuilds[el.dataset.vc]?.(W);
+    el.querySelector("svg")?.remove();
+    if (!chart) return;
+    el.insertAdjacentHTML("afterbegin", chart.svg);
+    el.style.minHeight = "";
+    hover(el, chart);
+  });
+}
+// The calculations are cheap but render runs often; reuse results for unchanged inputs.
+const volMemo = new Map();
+function memo(key, fn) {
+  if (!volMemo.has(key)) {
+    if (volMemo.size > 60) volMemo.clear();
+    volMemo.set(key, fn());
+  }
+  return volMemo.get(key);
+}
+const barsKey = (a) => `${a.symbol}:${a.bars.length}:${a.bars.at(-1)?.date}:${a.bars.at(-1)?.close}`;
+const volPct = (v, d = 1) => (v == null || !Number.isFinite(v) ? "—" : (v * 100).toFixed(d) + "%");
+const ordinal = (p) => {
+  if (p == null) return "—";
+  const n = Math.round(p * 100);
+  const s = n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th";
+  return n + s;
+};
+const volSeriesData = (id) => (state.mode === "market" ? fredSeries(state.macro[volKey(id)]) : []);
+const rangeCut = (rows) => {
+  const n = VOL_RANGES.find(([k]) => k === volRange)?.[1] ?? 504;
+  return n === Infinity ? rows : rows.slice(-n);
+};
+const rangePick = () => `<div class="seg" role="group" aria-label="Chart range">${VOL_RANGES.map(([k]) => button(k, "vol-range", volRange === k ? "active" : "", `data-value="${k}" aria-pressed="${volRange === k}"`)).join("")}</div>`;
+const fredLink = (id) => link("https://fred.stlouisfed.org/series/" + id, id);
+
+function volatilityPage() {
+  if (mathError) return `<section class="panel">${empty("The volatility calculations didn't load: " + esc(mathError))}</section>`;
+  const vix = volSeriesData("VIXCLS"),
+    v3 = volSeriesData("VXVCLS");
+  const spy = activeMap()[BENCHMARK];
+  const fredNote = !native
+    ? "VIX and VIX3M load from FRED in the desktop app."
+    : state.mode !== "market"
+      ? "VIX and VIX3M load from FRED with Live data. Demo data shows realized volatility only, from synthetic prices."
+      : !hasKey("fred")
+        ? "Add a free FRED key in Settings → Data sources to load VIX and VIX3M."
+        : loadErrors["fred:" + volKey("VIXCLS")] || (vix.length ? "" : "Loading VIX and VIX3M from FRED…");
+  const rank = vix.length > 1 ? rankPercentile(vix, 252) : null;
+  const ratios = vix.length && v3.length ? termRatio(vix, v3) : [];
+  const ratio = ratios.at(-1) || null;
+  const reg = rank ? regime(rank.percentile, ratio && ratio.date === rank.date ? ratio.value : null) : null;
+  const spyRv = spy ? memo("rv21:" + barsKey(spy), () => realized(spy.bars, { window: 21 })) : null;
+  const vrp = spy && vix.length ? memo(`vrp:${barsKey(spy)}:${vix.length}:${vix.at(-1).date}`, () => vrpSeries(vix, spy.bars, { window: 21 })) : null;
+  const v3last = v3.at(-1);
+  const spyNow = spyRv ? spyRv.values.at(-1) : null;
+  const spyTile = kpi(`${BENCHMARK} realized · 21 days`, volPct(spyNow), spy ? `Yang–Zhang, daily OHLC through ${esc(spy.bars.at(-1).date)}` : `add ${BENCHMARK} to compare`);
+  const kpis = rank
+    ? `<div class="stats risk-kpis">${kpi("VIX", rank.current.toFixed(2), `${esc(rank.date)} · 30-day implied volatility of the S&P 500`)}${kpi("VIX ÷ VIX3M", ratio ? ratio.value.toFixed(2) : "—", ratio ? `VIX3M ${v3last.value.toFixed(2)} · ${ratio.value > 1 ? "above 1: near-term stress (backwardation)" : "below 1: the usual upward slope (contango)"}` : "VIX3M not loaded")}${kpi("VIX percentile · 1 year", ordinal(rank.percentile), `rank ${rank.rank == null ? "—" : (rank.rank * 100).toFixed(0) + "%"} of its range ${rank.min.toFixed(1)}–${rank.max.toFixed(1)} · ${rank.n} days${rank.full ? "" : " (less than a year)"}`)}${spyTile}${kpi("Volatility risk premium", vrp?.stats ? `${vrp.stats.mean >= 0 ? "+" : ""}${vrp.stats.mean.toFixed(1)} pts` : "—", vrp?.stats ? `average over ${vrp.stats.n} days to ${esc(vrp.stats.knownThrough)}; positive on ${(vrp.stats.positive * 100).toFixed(0)}% of them` : `VIX minus the realized volatility that followed; needs ${BENCHMARK}`)}</div>`
+    : spy
+      ? (() => {
+          const p = memo(`prof:yz:${barsKey(spy)}`, () => volProfile(spy.bars, "yz"));
+          return `<div class="stats risk-kpis">${spyTile}${kpi(`${BENCHMARK} realized · 1 year`, volPct(p?.cone.find((r) => r.window === 252)?.current), "252 trading days, annualized")}${kpi("21-day vs its past year", p?.rank ? ordinal(p.rank.percentile) : "—", p?.rank ? `percentile over ${p.rank.n} days` : "")}</div>`;
+        })()
+      : "";
+  const regimeLine = reg ? `<p><span class="pill">${esc(reg.label)}</span> <small class="muted">${esc(REGIME_RULES)}</small></p>` : "";
+  const head = `<section class="panel"><div class="panel-head"><h2>Market volatility</h2>${rangePick()}</div><p class="muted">Implied volatility is what option prices expect; realized volatility is what the market then did. VIX is the 30-day implied volatility of the S&P 500 from its option prices; ${BENCHMARK}'s realized volatility here uses daily open, high, low and close (Yang–Zhang).${fredNote ? ` <b>${esc(fredNote)}</b>` : ""}</p>${kpis}${regimeLine}</section>`;
+
+  let charts = "";
+  if (vrp?.rows.length) {
+    const rows = rangeCut(vrp.rows);
+    const dates = rows.map((r) => r.date);
+    charts += `<section class="panel"><div class="panel-head"><h2>Implied vs realized</h2></div><p class="muted">VIX against ${BENCHMARK}'s realized volatility over the previous 21 trading days, both in volatility points.</p>${vc("vix-rv", 230, "VIX and realized volatility", (W) => multiLine(dates, [{ label: "VIX", values: rows.map((r) => r.vix), color: SERIES_COLORS.ink }, { label: `${BENCHMARK} realized, past 21 days`, values: rows.map((r) => r.rvTrailing), color: SERIES_COLORS.blue }], { fmt: (v) => v.toFixed(0) }, W))}<div class="rc-legend"><span><i class="k-line"></i>VIX (implied)</span><span><i style="border-color:${SERIES_COLORS.blue}"></i>${BENCHMARK} realized, past 21 days</span></div></section>`;
+    charts += `<section class="panel"><div class="panel-head"><h2>Volatility risk premium</h2></div><p class="muted">VIX on each day minus ${BENCHMARK}'s realized volatility over the <b>next</b> 21 trading days: how much more movement options priced in than then happened. Blue: options priced more than the market moved. Orange: less. A day's value is only known 21 sessions later, so the chart stops ${vrp.stats ? `at ${esc(vrp.stats.knownThrough)}` : "21 sessions ago"}. ${BENCHMARK} stands in for the S&P 500; VIX's 30 calendar days are about 21 trading days.${vrp.excluded ? ` ${vrp.excluded} likely split day${vrp.excluded > 1 ? "s" : ""} left out.` : ""}</p>${vc("vrp", 180, "Volatility risk premium", (W) => signedBars(dates, rows.map((r) => r.vrp), { fmt: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(0)}`, label: "VIX minus next-21-day realized (pts)" }, W))}</section>`;
+  } else if (vix.length) {
+    const rows = rangeCut(vix);
+    charts += `<section class="panel"><div class="panel-head"><h2>VIX</h2>${native && state.mode === "market" ? button(`Add ${BENCHMARK} to compare`, "vol-add-spy") : ""}</div><p class="muted">Add ${BENCHMARK}'s prices to compare VIX with the volatility that actually followed.</p>${vc("vix", 220, "VIX", (W) => multiLine(rows.map((r) => r.date), [{ label: "VIX", values: rows.map((r) => r.value) }], { fmt: (v) => v.toFixed(0) }, W))}</section>`;
+  } else if (spyRv) {
+    const rows = rangeCut(spy.bars.map((b, i) => ({ date: b.date, value: spyRv.values[i] })).filter((r) => r.value != null));
+    charts += `<section class="panel"><div class="panel-head"><h2>${BENCHMARK} realized volatility</h2></div><p class="muted">21-day Yang–Zhang realized volatility${state.mode === "sample" ? " of the synthetic demo prices" : ""}.</p>${vc("spy-rv", 200, "Realized volatility", (W) => multiLine(rows.map((r) => r.date), [{ label: "21-day realized", values: rows.map((r) => r.value * 100) }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section>`;
+  }
+  if (ratios.length > 1) {
+    const rows = rangeCut(ratios);
+    charts += `<section class="panel"><div class="panel-head"><h2>VIX term structure</h2></div><p class="muted">VIX divided by VIX3M. Usually below 1, because longer-dated options carry more uncertainty. Above 1 (shaded) when the market prices more turbulence in the next month than over the next three; historically that has happened mostly during selloffs.</p>${vc("term", 170, "VIX over VIX3M", (W) => multiLine(rows.map((r) => r.date), [{ label: "VIX ÷ VIX3M", values: rows.map((r) => r.value) }], { fmt: (v) => v.toFixed(2), ref: 1, shade: rows.map((r) => r.value > 1) }, W))}</section>`;
+  }
+  // Realized volatility of every stock in the workspace.
+  const list = assets()
+    .filter((a) => a.bars?.length > 64)
+    .map((a) => {
+      const p = memo(`prof:yz:${barsKey(a)}`, () => volProfile(a.bars, "yz"));
+      const at = (w) => p?.cone.find((r) => r.window === w)?.current;
+      return { a, p, rv21: at(21), rv63: at(63), rv252: at(252) };
+    })
+    .sort((x, y) => (y.rv21 ?? -1) - (x.rv21 ?? -1));
+  const table_ = list.length
+    ? `<section class="panel"><div class="panel-head"><h2>Realized volatility in your workspace</h2></div>${table(
+        ["Stock", "21 days", "63 days", "1 year", "21-day vs its past year"],
+        list.map((x) => `<tr><td><button class="link" data-action="vol-open" data-value="${esc(x.a.symbol)}">${esc(x.a.symbol)}</button></td><td>${volPct(x.rv21)}</td><td>${volPct(x.rv63)}</td><td>${volPct(x.rv252)}</td><td>${x.p?.rank ? `${ordinal(x.p.rank.percentile)} percentile${x.p.rank.full ? "" : ` · ${x.p.rank.n} days`}` : "—"}</td></tr>`),
+      )}<small>Yang–Zhang estimator on daily bars, annualized with 252 trading days. Implied volatility for single stocks needs option chains, which aren't connected.</small></section>`
+    : "";
+  const sources = `<section class="panel"><small>VIX (${fredLink("VIXCLS")}) and VIX3M (${fredLink("VXVCLS")}): ${esc(VOL_CITATION)}. Cboe holds the copyright; shown for your own research.${state.macro[volKey("VIXCLS")] ? " " + datasetStamp({ ...state.macro[volKey("VIXCLS")], provider: "fred" }) : ""}</small></section>`;
+  return head + charts + table_ + sources;
+}
+
+function volTile() {
+  if (mathError) return empty("Volatility calculations unavailable.");
+  const a = stockAsset();
+  if (!a) return noStock();
+  const p = memo(`prof:yz:${barsKey(a)}`, () => volProfile(a.bars, "yz"));
+  if (!p) return empty("Needs at least 12 daily bars.");
+  const at = (w) => p.cone.find((r) => r.window === w)?.current;
+  return `<div class="scenarios compact risk-cells"><div class="scenario"><span>Realized · 21 days</span><strong>${volPct(at(21))}</strong></div><div class="scenario"><span>vs its past year</span><strong>${p.rank ? ordinal(p.rank.percentile) : "—"}</strong></div><div class="scenario"><span>Realized · 1 year</span><strong>${volPct(at(252))}</strong></div></div>`;
+}
+
+function volView() {
+  const a = stockAsset();
+  const head = (extra = "") => `<div class="panel-head"><h2>Volatility · ${esc(symbol)}</h2>${extra}</div>`;
+  if (mathError) return `<section class="panel">${head()}${empty("The volatility calculations didn't load: " + esc(mathError))}</section>`;
+  if (!a) return `<section class="panel">${head()}${noStock()}</section>`;
+  const est = ESTIMATORS.find((e) => e.id === volEstimator) || ESTIMATORS[0];
+  const p = memo(`prof:${est.id}:${barsKey(a)}`, () => volProfile(a.bars, est.id));
+  if (!p) return `<section class="panel">${head()}${empty("Realized volatility needs at least 12 daily bars.")}</section>`;
+  const pick = `<div class="seg" role="group" aria-label="Estimator">${ESTIMATORS.map((e) => button(e.label, "vol-estimator", e.id === est.id ? "active" : "", `data-value="${e.id}" aria-pressed="${e.id === est.id}" title="${esc(e.note)}"`)).join("")}</div>`;
+  const label = { 10: "2 weeks", 21: "1 month", 63: "3 months", 126: "6 months", 252: "1 year" };
+  const kpis = `<div class="stats risk-kpis">${p.cone.filter((r) => r.window >= 21).map((r) => kpi(`Realized · ${label[r.window] || r.window + " days"}`, volPct(r.current), `${r.window} trading days, annualized`)).join("")}${kpi("1-month vs its past year", p.rank ? ordinal(p.rank.percentile) : "—", p.rank ? `percentile of the 21-day figure over ${p.rank.n} days` : "")}</div>`;
+  const excluded = p.excluded ? `<p class="muted">Left out ${p.excluded} day${p.excluded > 1 ? "s" : ""} whose open was more than 40% from the prior close (${p.excludedDates.slice(-3).map(esc).join(", ")}): most likely a stock split the price source didn't adjust for. That day's own range still counts.</p>` : "";
+  const intro = `<section class="panel">${head(pick)}<p class="muted">How much ${esc(symbol)} has actually moved, as an annualized standard deviation (one year's typical move). ${esc(est.label)}: ${esc(est.note)} Calculated on this computer from the ${p.bars} daily bars in this workspace, through ${esc(p.asOf)}.</p>${kpis}${excluded}</section>`;
+  const series = rangeCut(p.series);
+  const median = p.cone.find((r) => r.window === 21)?.median;
+  const charts = `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Volatility cone</h2></div><p class="muted">For each window length, the range of every realized-volatility reading in this history. The dot is today. Short windows swing more; where today's dot sits says whether ${esc(symbol)} is calm or turbulent by its own standards.</p>${vc("cone", 230, "Volatility cone", (W) => coneChart(p.cone, { fmt: (v) => (v * 100).toFixed(0) + "%" }, W))}<div class="rc-legend"><span><i class="k-band light"></i>Lowest to highest</span><span><i class="k-band"></i>Middle half</span><span><i class="k-line"></i>Median</span><span><i class="k-dot"></i>Today</span></div></section><section class="panel"><div class="panel-head"><h2>1-month realized volatility</h2>${rangePick()}</div><p class="muted">Rolling 21-trading-day ${esc(est.label)} volatility${median != null ? `; gray line: its median over this history, ${volPct(median)}` : ""}.</p>${vc("rv21", 230, "Rolling realized volatility", (W) => multiLine(series.map((r) => r.date), [{ label: `21-day ${est.label}`, values: series.map((r) => r.value * 100) }], { fmt: (v) => v.toFixed(0) + "%", ref: median != null ? median * 100 : null }, W))}</section></div>`;
+  const compare = `<section class="panel"><div class="panel-head"><h2>Estimators compared · 1 month</h2></div>${table(
+    ["Estimator", "21 days"],
+    ESTIMATORS.map((e) => `<tr><td>${e.id === est.id ? "<b>" + esc(e.label) + "</b>" : esc(e.label)}</td><td>${volPct(p.byEstimator[e.id])}</td></tr>`),
+  )}<dl class="vol-notes">${ESTIMATORS.map((e) => `<dt>${esc(e.label)}</dt><dd>${esc(e.note)}</dd>`).join("")}</dl><small>All use log returns and 252 trading days a year. Range-based estimators are more precise than close-to-close on the same data, but the ones that ignore overnight gaps read low for stocks that gap.</small></section>`;
+  const implied = `<section class="panel"><div class="panel-head"><h2>Implied volatility</h2></div>${empty("Option chains aren't connected, so implied volatility, skew and the volatility risk premium for this stock aren't shown. The Volatility page compares VIX with the S&P 500's realized volatility.")}<div class="quant-actions">${button("Open Volatility", "goto-volatility")}</div></section>`;
+  return intro + charts + compare + implied;
+}
 function quantPanel() {
   const e = quantEnv;
   const status = !e ? '<span class="pill">Checking…</span>' : e.gsQuant ? `<span class="pill on">GS Quant ${esc(e.gsQuant)}</span>` : '<span class="pill">Not installed</span>';
@@ -3477,6 +3644,20 @@ async function loadMacro(id) {
     throw e;
   }
 }
+// About ten years of a volatility index, kept apart from the shorter
+// Economy series of the same provider.
+const volKey = (id) => id + "@long";
+async function loadVolSeries(id) {
+  const key = volKey(id);
+  try {
+    state.macro[key] = await fetchData("fred", "observations_long", id);
+    delete loadErrors["fred:" + key];
+    delete lastError.fred;
+  } catch (e) {
+    loadErrors["fred:" + key] = lastError.fred = message(e);
+    throw e;
+  }
+}
 // Pull whatever the current page needs and doesn't have yet.
 function autoLoad() {
   const v = page === "Stock" ? stockView || "GRID" : "";
@@ -3558,6 +3739,9 @@ function autoLoad() {
   if (page === "Commodities" && hasKey("fred"))
     for (const id of Object.keys(commoditySeries))
       if (stale(state.macro[id], 43200)) once("fred:" + id, () => loadMacro(id));
+  if (page === "Volatility" && hasKey("fred"))
+    for (const id of Object.keys(VOL_SERIES))
+      if (stale(state.macro[volKey(id)], 43200)) once("fred:" + volKey(id), () => loadVolSeries(id));
 }
 let syncing = null;
 async function syncWatchlist() {
@@ -3616,6 +3800,9 @@ function watchFresh() {
     }
     if (hasKey("fred"))
       for (const id of [...Object.keys(macroSeries), ...Object.keys(commoditySeries)]) if (stale(state.macro[id], 43200)) await enqueue("fred:" + id, () => loadMacro(id)).catch(() => {});
+    // Volatility series only once the Volatility page has loaded them.
+    if (hasKey("fred"))
+      for (const id of Object.keys(VOL_SERIES)) if (state.macro[volKey(id)] && stale(state.macro[volKey(id)], 43200)) await enqueue("fred:" + volKey(id), () => loadVolSeries(id)).catch(() => {});
     await persist();
     if (updates.length) notify(updates.join(" · "));
     refresh();
@@ -4243,6 +4430,25 @@ async function action(act, value) {
       break;
     case "risk-horizon":
       riskHorizon = +value || 252;
+      render();
+      break;
+    case "vol-range":
+      volRange = value;
+      render();
+      break;
+    case "vol-estimator":
+      volEstimator = value;
+      render();
+      break;
+    case "goto-volatility":
+      page = "Volatility";
+      render();
+      break;
+    case "vol-open":
+      openStock(value, "VOL");
+      break;
+    case "vol-add-spy":
+      await ensureAsset(BENCHMARK);
       render();
       break;
     case "setup-connect":

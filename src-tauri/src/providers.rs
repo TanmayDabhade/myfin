@@ -212,7 +212,8 @@ pub fn validate(provider: &str, kind: &str, symbol: &str) -> Result<(), String> 
     let ok = match provider {
         "alpha" => ALPHA_KINDS.contains(&kind),
         "twelve" => kind == "TIME_SERIES" || kind == "TIME_SERIES_1MIN" || INTRADAY_KINDS.contains(&kind),
-        "fred" => kind == "observations",
+        // "observations_long": about ten years of daily values, for volatility history.
+        "fred" => kind == "observations" || kind == "observations_long",
         "finnhub" => FINNHUB_KINDS.contains(&kind),
         "alpaca" => kind == "trades",
         _ => false,
@@ -262,7 +263,7 @@ pub fn request(provider: &str, kind: &str, symbol: &str, key: &str, now: i64) ->
     match provider {
         "fred" => plain(
             "https://api.stlouisfed.org/fred/series/observations",
-            q(&[("series_id", symbol), ("api_key", key), ("file_type", "json"), ("sort_order", "desc"), ("limit", "500")]),
+            q(&[("series_id", symbol), ("api_key", key), ("file_type", "json"), ("sort_order", "desc"), ("limit", if kind == "observations_long" { "2600" } else { "500" })]),
         ),
         // Listings outside the US are keyed SYMBOL:MIC (VOD:XLON).
         "twelve" => {
@@ -401,6 +402,11 @@ mod tests {
         assert!(validate("twelve", "TIME_SERIES_1MIN", "AAPL").is_ok());
         assert!(validate("alpha", "OVERVIEW", "BRK.B").is_ok());
         assert!(validate("fred", "observations", "DGS10").is_ok());
+        assert!(validate("fred", "observations_long", "VIXCLS").is_ok());
+        assert!(validate("fred", "observations_all", "VIXCLS").is_err());
+        let long = request("fred", "observations_long", "VIXCLS", "k", 0);
+        assert!(long.query.contains(&("limit".into(), "2600".into())));
+        assert!(request("fred", "observations", "DGS10", "k", 0).query.contains(&("limit".into(), "500".into())));
         assert!(validate("alpha", "OVERVIEW", "AAPL&apikey=x").is_err());
         assert!(validate("other", "x", "AAPL").is_err());
     }

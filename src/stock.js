@@ -15,6 +15,7 @@ export const VIEWS = [
   { code: "SPLC", label: "Suppliers & customers" },
   { code: "DCF", label: "Valuation" },
   { code: "RSK", label: "Risk analytics" },
+  { code: "VOL", label: "Volatility" },
   { code: "TAS", label: "Time & sales" },
   { code: "CF", label: "Filings" },
 ];

@@ -1,0 +1,12 @@
+[package]
+name = "options-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly exports of options-math for Aperture's interface. Plain numeric ABI: no bindings generator needed."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+options-math = { path = "../options-math" }
