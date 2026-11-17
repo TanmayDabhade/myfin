@@ -234,3 +234,11 @@ test("gamma exposure, implied moves and earnings moves", () => {
   const bars = [100, 100, 110, 110, 99].map((close, i) => ({ date: `2026-01-0${i + 1}`, close }));
   assert.deepEqual(earningsMoves(bars, [{ date: "2026-01-02", hour: "amc" }, { date: "2026-01-05", hour: "bmo" }]).map((x) => +x.move.toFixed(3)), [0.1, -0.1]);
 });
+
+import { buildBriefing } from "../src/analyst.js";
+test("the on-device analyst briefing carries volatility figures, labelled as estimates", () => {
+  const base = { symbol: "AAPL", bars: [], news: [], filings: [], ownership: [], stats: {}, earnings: [], today: "2026-11-17" };
+  const withOpts = buildBriefing({ ...base, options: { rv21: 0.21, atm30: 0.25, atm30Source: "recorded quotes", atm30Date: "2026-11-16", ivRank: 0.4, ivDays: 252, skew30: 0.05, impliedMove: 0.052, impliedMoveExpiry: "2026-11-20" } });
+  assert.match(withOpts.text, /\[V\] VOLATILITY: realized volatility 21d .*implied volatility 30d .*IV rank 40% over 252 days.*not a forecast/);
+  assert.doesNotMatch(buildBriefing({ ...base, options: null }).text, /\[V\]/);
+});

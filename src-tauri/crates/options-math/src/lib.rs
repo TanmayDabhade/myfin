@@ -18,3 +18,4 @@ pub mod rates;
 pub mod realized;
 
 pub use black::{Greeks, Kind};
+pub mod svi;

@@ -119,3 +119,15 @@ export function realizedCone(bars, { estimator = "yz", windows = [10, 21, 63, 12
   const keys = ["window", "min", "p25", "median", "p75", "max", "current", "count"];
   return windows.map((_, i) => Object.fromEntries(keys.map((k, j) => [k, Number.isFinite(result[8 * i + j]) ? result[8 * i + j] : null])));
 }
+
+// SVI smile fit for one expiry: points [{ k: ln(K/F), iv }], t in years.
+// Returns { a, b, rho, m, sigma, rmse, minG, points, iv(k) } or null.
+export function sviFit(points, t) {
+  const ks = Float64Array.from(points, (p) => p.k),
+    vs = Float64Array.from(points, (p) => p.iv);
+  const { ret, result } = withArrays([ks, vs], 8, ([pk, pv], out) => need().svi_fit(pk, pv, points.length, t, out));
+  if (!ret) return null;
+  const [a, b, rho, m, sigma, rmse, minG, n] = result;
+  const w = (k) => a + b * (rho * (k - m) + Math.sqrt((k - m) ** 2 + sigma * sigma));
+  return { a, b, rho, m, sigma, rmse, minG, points: n, arbitrageFree: minG >= 0, iv: (k) => Math.sqrt(Math.max(0, w(k)) / t) };
+}

@@ -60,7 +60,7 @@ import wasmUrl from "./options/options.wasm?url";
 import { loadMath, ESTIMATORS } from "./options/math.js";
 import { VOL_SERIES, VOL_CITATION, RV_WINDOWS, fredSeries, rankPercentile, vrpSeries, termRatio, regime, REGIME_RULES, volProfile, realized } from "./vol.js";
 import { multiLine, signedBars, coneChart, SERIES_COLORS } from "./volcharts.js";
-import { bsm } from "./options/math.js";
+import { bsm, sviFit } from "./options/math.js";
 import { syntheticChain, strikeRows, nearMoney, smile, termPoints, strikeStep, DAY_MS, gammaExposure, GEX_CONVENTIONS, impliedMove, earningsMoves } from "./options/chain.js";
 import { TEMPLATES, buildTemplate, curves, extremes, positionGreeks, scenarioGrid, netPremium, lastExpiry, bookScenario, hedgeSim } from "./options/strategy.js";
 import { optionsChain, optionsHistory, backfillStatus, backfillStart, backfillPause, optionsPurge, agentStatus, agentInstall, agentRemove } from "./bridge.js";
@@ -1965,6 +1965,34 @@ function analystFacts() {
     risk: quantRuns[symbol]?.data?.metrics || null,
     earnings: fh("earnings")?.earningsCalendar || [],
     today: nyDate(Date.now()),
+    options: analyst?.choice === "online" ? null : optionFacts(a),
+  };
+}
+// Volatility and option figures for the on-device Analyst only.
+function optionFacts(a) {
+  if (!a || mathError) return null;
+  const rv = memo(`rv21:${barsKey(a)}`, () => realized(a.bars, { window: 21 })).values.at(-1);
+  const rows = (ivHist[symbol]?.rows || []).filter((r) => r.atm30 != null);
+  const byDate = new Map();
+  for (const r of rows) if (!byDate.has(r.date) || r.source === "alpaca") byDate.set(r.date, r);
+  const merged = [...byDate.values()].sort((x, y) => (x.date < y.date ? -1 : 1));
+  const last = merged.at(-1);
+  const rank = merged.length > 20 ? rankPercentile(merged.map((r) => ({ date: r.date, value: r.atm30 })), 252) : null;
+  const c = chainOf();
+  const cal = fh("earnings")?.earningsCalendar || [];
+  const today = new Date(marketNow()).toISOString().slice(0, 10);
+  const next = cal.filter((e) => e.date >= today).sort((x, y) => (x.date < y.date ? -1 : 1))[0];
+  const im = c && next ? impliedMove(c, next.date, next.hour === "bmo" ? "bmo" : "amc") : null;
+  return {
+    rv21: rv ?? null,
+    atm30: last?.atm30 ?? c?.summary?.atm30 ?? null,
+    atm30Source: last ? (last.source === "alpaca" ? "recorded quotes" : "backfilled trade prints") : "today's chain",
+    atm30Date: last?.date ?? today,
+    ivRank: rank?.rank ?? null,
+    ivDays: rank?.n ?? 0,
+    skew30: last?.skew30 ?? null,
+    impliedMove: im?.move ?? null,
+    impliedMoveExpiry: im?.expiry ?? null,
   };
 }
 // `label` is what the conversation shows (a quick question's short name);
@@ -3519,13 +3547,14 @@ function volatilityPage() {
     .map((a) => {
       const p = memo(`prof:yz:${barsKey(a)}`, () => volProfile(a.bars, "yz"));
       const at = (w) => p?.cone.find((r) => r.window === w)?.current;
-      return { a, p, rv21: at(21), rv63: at(63), rv252: at(252) };
+      const iv = (ivHist[a.symbol]?.rows || []).filter((r) => r.atm30 != null).at(-1);
+      return { a, p, rv21: at(21), rv63: at(63), rv252: at(252), iv: iv?.atm30 ?? null, ivDate: iv?.date };
     })
     .sort((x, y) => (y.rv21 ?? -1) - (x.rv21 ?? -1));
   const table_ = list.length
     ? `<section class="panel"><div class="panel-head"><h2>Realized volatility in your workspace</h2></div>${table(
-        ["Stock", "21 days", "63 days", "1 year", "21-day vs its past year"],
-        list.map((x) => `<tr><td><button class="link" data-action="vol-open" data-value="${esc(x.a.symbol)}">${esc(x.a.symbol)}</button></td><td>${volPct(x.rv21)}</td><td>${volPct(x.rv63)}</td><td>${volPct(x.rv252)}</td><td>${x.p?.rank ? `${ordinal(x.p.rank.percentile)} percentile${x.p.rank.full ? "" : ` · ${x.p.rank.n} days`}` : "—"}</td></tr>`),
+        ["Stock", "Realized · 21 days", "63 days", "1 year", "21-day vs its past year", "Implied · 30 days", "Implied − realized"],
+        list.map((x) => `<tr><td><button class="link" data-action="vol-open" data-value="${esc(x.a.symbol)}">${esc(x.a.symbol)}</button></td><td>${volPct(x.rv21)}</td><td>${volPct(x.rv63)}</td><td>${volPct(x.rv252)}</td><td>${x.p?.rank ? `${ordinal(x.p.rank.percentile)} percentile${x.p.rank.full ? "" : ` · ${x.p.rank.n} days`}` : "—"}</td><td title="${esc(x.ivDate || "")}">${volPct(x.iv)}</td><td>${x.iv != null && x.rv21 != null ? `${((x.iv - x.rv21) * 100).toFixed(1)} pts` : "—"}</td></tr>`),
       )}<small>Yang–Zhang estimator on daily bars, annualized with 252 trading days. Each stock's implied volatility, from its option chain and recorded history, is on its Volatility (<kbd>VOL</kbd>) and Options (<kbd>OMON</kbd>) views.</small></section>`
     : "";
   const sources = `<section class="panel"><small>VIX (${fredLink("VIXCLS")}) and VIX3M (${fredLink("VXVCLS")}): ${esc(VOL_CITATION)}. Cboe holds the copyright; shown for your own research.${state.macro[volKey("VIXCLS")] ? " " + datasetStamp({ ...state.macro[volKey("VIXCLS")], provider: "fred" }) : ""}</small></section>`;
@@ -3670,7 +3699,8 @@ function omonView() {
   const kpis = `<div class="stats risk-kpis">${kpi("Spot", money(c.spot), c.synthetic ? "last demo close" : "IEX last trade, Alpaca")}${kpi("Forward", money(f), esc(e.forward_source) + (e.forward_range != null ? ` · spread ${fmt(e.forward_range)}` : ""))}${kpi("ATM implied", ivPct(e.atm_iv), `${shortDate(exp)} · ${e.days} days`)}${kpi("Skew 90–110%", e.skew == null ? "—" : (e.skew * 100).toFixed(1) + " pts", "IV of the 90% strike minus the 110% strike")}${kpi("ATM implied · 30 days", ivPct(c.summary.atm30), "constant maturity, variance-interpolated")}</div>`;
   const sm = smile(c, exp);
   const tp = termPoints(c);
-  const charts = `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Smile · ${shortDate(exp)}</h2></div><p class="muted">Implied volatility of the out-of-the-money option at each strike. Dashed: the feed's own figure, for comparison.</p>${vc("smile", 220, "Volatility smile", (W) => multiLine(sm.map((p) => "$" + fmt(p.strike, p.strike % 1 ? 2 : 0)), [{ label: "Our IV", values: sm.map((p) => (p.iv == null ? null : p.iv * 100)) }, { label: c.synthetic ? "Model" : "Alpaca's IV", values: sm.map((p) => (p.vendor == null ? null : p.vendor * 100)), color: SERIES_COLORS.muted, dash: true }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section><section class="panel"><div class="panel-head"><h2>Term structure</h2></div><p class="muted">At-the-money implied volatility by expiry. A hump usually marks an event, such as earnings, inside that expiry.</p>${vc("term-iv", 220, "ATM implied volatility by expiry", (W) => multiLine(tp.map((p) => `${shortDate(p.expiry)} · ${p.days}d`), [{ label: "ATM IV", values: tp.map((p) => p.iv * 100) }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section></div>`;
+  const fit = memo(`svi:${c.underlying}:${c.as_of}:${exp}`, () => sviFit(sm.filter((p) => p.iv != null).map((p) => ({ k: Math.log(p.strike / f), iv: p.iv })), e.t));
+  const charts = `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Smile · ${shortDate(exp)}</h2></div><p class="muted">Implied volatility of the out-of-the-money option at each strike. Blue: the SVI curve fitted to it${fit ? ` (error ${(fit.rmse * 100).toFixed(2)} vol points over ${fit.points} strikes; ${fit.arbitrageFree ? "no butterfly arbitrage" : "<span class=\"down\">the fit implies butterfly arbitrage: quotes are inconsistent</span>"})` : ""}. Dashed: the feed's own figure, for comparison.</p>${vc("smile", 220, "Volatility smile", (W) => multiLine(sm.map((p) => "$" + fmt(p.strike, p.strike % 1 ? 2 : 0)), [{ label: "Our IV", values: sm.map((p) => (p.iv == null ? null : p.iv * 100)) }, ...(fit ? [{ label: "SVI fit", values: sm.map((p) => fit.iv(Math.log(p.strike / f)) * 100), color: SERIES_COLORS.blue }] : []), { label: c.synthetic ? "Model" : "Alpaca's IV", values: sm.map((p) => (p.vendor == null ? null : p.vendor * 100)), color: SERIES_COLORS.muted, dash: true }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section><section class="panel"><div class="panel-head"><h2>Term structure</h2></div><p class="muted">At-the-money implied volatility by expiry. A hump usually marks an event, such as earnings, inside that expiry.</p>${vc("term-iv", 220, "ATM implied volatility by expiry", (W) => multiLine(tp.map((p) => `${shortDate(p.expiry)} · ${p.days}d`), [{ label: "ATM IV", values: tp.map((p) => p.iv * 100) }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section></div>`;
   const note = `<small>IV is Aperture's own: Black's formula on the put–call-parity forward, solved from the mid of the out-of-the-money option at each strike; the in-the-money option at that strike uses the same IV, which keeps American early-exercise value out of the solve. Rate: ${esc(c.rate_source)} (${ivPct(c.rate)}). Greeks per share: Θ per calendar day, ν per volatility point. ⚠ marks a quote problem (hover the IV). ${c.synthetic ? "Demo data: the whole chain is synthetic." : "Indicative quotes aren't exchange quotes; spreads and fills based on them aren't realistic."}</small>`;
   return `<section class="panel">${head(`${chainSource(c)}${native && state.mode === "market" ? button(chains[symbol]?.loading ? "Loading…" : "Refresh", "omon-refresh") : ""}${button("Strategy lab", "stock-view", "", 'data-value="OSA"')}`)}${kpis}<div class="omon-controls">${expPick}${rangePick_}${modePick}</div>${table_}${note}</section>${charts}${earningsPanel(c)}${gexPanel(c)}`;
 }
@@ -3805,7 +3835,9 @@ function impliedSection() {
   const how = !rows.length
     ? empty(`No implied-volatility history for ${esc(symbol)} yet. It builds from two sources: the daily recorder (Alpaca chains after each close) and the Massive backfill (about two years, from Settings → Option data). Add ${esc(symbol)} to the watchlist to include it.`)
     : "";
-  return `<section class="panel"><div class="panel-head"><h2>Implied volatility</h2>${rangePick()}</div><p class="muted">At-the-money implied volatility at a constant 30 days, interpolated in variance between expiries. Recorded days come from Alpaca's quotes after the close; backfilled days come from Massive's last trade prints between 15:30 and 16:00, matched to the stock's price in the same minute, so they are noisier.</p>${kp}${chart}${how}</section>`;
+  const sk = cut.filter((r) => r.skew30 != null);
+  const skewChart = sk.length > 5 ? `<h3>Skew · 90% strike minus 110% strike, about 30 days</h3>${vc("skew-hist", 170, "Skew history", (W) => multiLine(sk.map((r) => r.date), [{ label: "Skew (vol points)", values: sk.map((r) => r.skew30 * 100) }], { fmt: (v) => v.toFixed(1), ref: 0 }, W))}<small>Positive: downside puts cost more volatility than upside calls, the usual shape for stocks. A rising line means protection is getting dearer.</small>` : "";
+  return `<section class="panel"><div class="panel-head"><h2>Implied volatility</h2>${rangePick()}</div><p class="muted">At-the-money implied volatility at a constant 30 days, interpolated in variance between expiries. Recorded days come from Alpaca's quotes after the close; backfilled days come from Massive's last trade prints between 15:30 and 16:00, matched to the stock's price in the same minute, so they are noisier.</p>${kp}${chart}${skewChart}${how}</section>`;
 }
 
 // ---- Settings: option data --------------------------------------------------------
@@ -4174,6 +4206,8 @@ function autoLoad() {
   if (native && page === "Settings" && !quantEnv) checkQuant();
   if (page === "Stock" && symbol && ["OMON", "OSA", "GRID"].includes(v) && !chains[symbol] && (v !== "GRID" || state.mode === "sample")) loadChain(symbol);
   if (page === "Stock" && symbol && ["VOL", "GRID"].includes(v) && native && state.mode === "market" && (!ivHist[symbol] || Date.now() - ivHist[symbol].at > 600000) && !ivHist[symbol]?.loading) loadIvHistory(symbol);
+  if (page === "Volatility" && native && state.mode === "market")
+    for (const a of assets().filter((x) => x.bars?.length > 64 && isUSKey(x.symbol)).slice(0, 30)) if (!ivHist[a.symbol]) loadIvHistory(a.symbol);
   if (page === "Settings" && native && (!optStatus || Date.now() - optStatusAt > 15000)) {
     optStatusAt = Date.now();
     loadOptStatus();

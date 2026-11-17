@@ -152,3 +152,21 @@ pub unsafe extern "C" fn realized_cone(estimator: i32, open: *const f64, high: *
     write(out, &flat);
     1
 }
+
+/// SVI fit of one expiry's smile: `k` log-moneyness, `vol` implied volatility
+/// (n points), `t` years. Writes 8 values: a, b, rho, m, sigma, rmse, min g, points.
+/// Returns 0 when there are too few points.
+/// # Safety
+/// `k` and `vol` reference `n` f64s, `out` 8 writable f64s.
+#[no_mangle]
+pub unsafe extern "C" fn svi_fit(k: *const f64, vol: *const f64, n: usize, t: f64, out: *mut f64) -> i32 {
+    let pts: Vec<(f64, f64)> = slice(k, n).iter().copied().zip(slice(vol, n).iter().copied()).collect();
+    match options_math::svi::fit(&pts, t) {
+        Some(f) => {
+            let p = f.params;
+            write(out, &[p.a, p.b, p.rho, p.m, p.sigma, f.rmse, f.min_g, f.points as f64]);
+            1
+        }
+        None => 0,
+    }
+}
