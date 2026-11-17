@@ -71,7 +71,7 @@ Cargo becomes a small workspace (`src-tauri`, `crates/options-math`, `crates/opt
 | Summaries (ATM IV by constant maturity, RR/BF, term, GEX by convention) | After each capture | None (Rust maths) |
 | SVI fits | After capture, batched | None (bundled Python `vol.py`, one start) |
 | FRED vol and rate series | Every 12 h (as the app does today) | FRED |
-| Optional Massive Basic backfill | Only when the user starts it; 5 calls/minute; resumable | Massive (free tier, second account) |
+| **Massive backfill** (tiers 0–4, Feasibility §3.1a) | Until done, then gap-filling for missed recorder days and a weekly corporate-actions refresh | Massive free tier (one account), ≥ 13 s between calls, shared across Options and Stocks endpoints; resumable queue in `options.sqlite` |
 | Retention pruning | Weekly | None |
 
 - **Trading calendar:** a bundled NYSE holiday list (maintained yearly, sourced) cross-checked against Alpaca's market calendar endpoint. That endpoint is part of Alpaca's trading API, read-only (*endpoint not verified this session*).
@@ -184,9 +184,27 @@ The strategy lab sliders and scenario grids call the WebAssembly build of `optio
 
 §3.2. Each capture writes one write-once snapshot, its quotes and a `daily_summary` row; missed days stay gaps.
 
-### 5.4 Optional free backfill
+### 5.4 Massive backfill (decided 2026-11-17)
 
-User-started from Settings. The agent works through the Massive Basic contract-bars queue at 5/minute, resumable across runs, and writes `kind: "backfill"` snapshots whose IVs come from EOD closes against the underlying close. These are flagged `backfill-last-trade` and drawn as dashed series.
+```
+Tier queue (breadth-first across symbols: all Tier 0, then all Tier 1, …)
+ ├ T0  splits, dividends, adjusted daily bars, stock minute bars, contract lists (expired=true)
+ ├ T1  monthly expiries × ~6 near-money strikes × call+put   → ATM IV 30/60/90, term, IV rank
+ ├ T2  ~±10–15% OTM strikes                                  → skew history
+ ├ T3  weekly expiries around each earnings date             → implied vs realized moves, crush
+ └ T4  remaining traded strikes, idle time only
+Per contract: one options minute-aggregates request for its life
+  → keep, per day, the last minute bar in 15:30–16:00 ET + the underlying's bar in the same minute
+  → Rust maths: parity forward (call+put pairs), IV, Greeks → snapshot kind "backfill"
+  → daily_summary rows with quality.source = "backfill"
+```
+
+- **Queue table:** `backfill_queue(id, underlying, tier, request, status, attempts, done_at)`. Each request is a documented Massive URL plus parameters. Progress survives restarts and is shown in Settings.
+- **Pacing:** one request at a time, ≥ 13 s apart, 429 → exponential backoff. The agent's wake-ups are 30 minutes apart, so a backfill run keeps working until shortly before the next wake-up. A lock file prevents overlap.
+- **Before the agent exists (M1):** the same queue runs as an in-app background job, like the 13F download in `main.rs` (`holdings_update` with job status).
+- **Storage:** raw minute bars are reduced to the per-day closing-window pair at once and then discarded. Only that pair, the corporate actions, the adjusted daily bars and the derived rows are kept. That is a few MB per symbol rather than hundreds.
+- **Source tagging and purge:** every row has `source` (`alpaca` | `massive` | `fred` | …). `options_purge(source)` deletes all rows from one source, including derived IVs and summaries, and is exposed in Settings (Feasibility §10, rule 11).
+- **Gap filler:** after the recorder misses a day, enqueue T1 requests for currently listed expiries only, for that week.
 
 ### 5.5 Volatility indices and rates
 
@@ -248,7 +266,7 @@ Outputs: P&L path, terminal distribution, Σ costs, rebalance count, tracking er
 
 | File | Role |
 |---|---|
-| `src-tauri/src/providers.rs` | Alpaca option kinds, optional Massive Basic provider, FRED history params, budgets |
+| `src-tauri/src/providers.rs` | Alpaca option kinds; **Massive provider** (`massive`: contracts reference, options/stocks minute and daily aggregates, splits, dividends) with a 13 s gap and a shared budget; FRED history params |
 | `src-tauri/src/main.rs` | New commands; open `options.sqlite` like `open_reference` |
 | `src-tauri/src/lib.rs` | Export `options`, `agent` modules for the agent binary and tests |
 | `src-tauri/Cargo.toml` | Workspace membership; `[[bin]] aperture-agent` without the `desktop` feature |
@@ -268,5 +286,5 @@ Outputs: P&L path, terminal distribution, Σ costs, rebalance count, tracking er
 - A resident daemon, a server, or a cloud service.
 - Rewriting existing JS analytics (`engine.js`, Quant Lab) in Rust. Only the new options maths is Rust.
 - Real-time OPRA streaming, order routing, or any real-money execution.
-- Paid data, scraping, or undocumented endpoints (Feasibility §10).
+- Paid data, scraping, undocumented endpoints, or a second Massive account or key (Feasibility §10).
 - Indian markets, until that work is resumed.

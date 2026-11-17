@@ -7,7 +7,7 @@ Efforts assume one developer in the existing codebase: **Low** ≈ ≤ 3 days, *
 
 | # | Decision |
 |---|---|
-| 1 | **Data budget $0.** No paid feeds. Free sources: Alpaca's indicative options feed (existing key), FRED, existing providers. Optional: Massive's free Options Basic tier for a slow EOD backfill and corporate actions |
+| 1 | **Data budget $0.** No paid feeds. Free sources: Alpaca's indicative options feed (existing key), FRED, existing providers, and **one free Massive account** (Options Basic + Stocks Basic), used to backfill as much history as possible (Feasibility §3.1a) |
 | 2 | **India deferred.** Nothing Indian is scheduled |
 | 3 | **Covered and spread-only shorts** are planned. **Naked shorts with a margin model are a stretch goal** |
 | 4 | **A background agent is the primary recorder.** It runs headless on an OS schedule; the in-app recorder is the fallback |
@@ -25,7 +25,7 @@ Efforts assume one developer in the existing codebase: **Low** ≈ ≤ 3 days, *
 | GEX in Phase 5 | Kept | Weakest assumptions; needs mature quality checks and OI history |
 | India | Deferred | Decision 2 |
 
-**Time-gated:** single-name IV rank needs 252 recorded trading days. If the agent starts at Milestone 2, IV rank arrives around **M2 + 12 months**, or sooner and approximate with the optional Massive Basic backfill. VIX IV rank is available at M1 from FRED history.
+**Time-gated, now mostly solved by the backfill:** single-name IV rank needs 252 trading days. The Massive backfill supplies about 2 years of approximate (trade-print-based) history within days of starting, so IV rank, skew history and earnings implied-move history become usable **in M2** rather than a year later. Recorded quote-based history then takes over going forward. Massive's free window covers only the last 2 years and moves forward daily, so **the backfill starts in M1.** VIX IV rank is available at M1 from FRED.
 
 ## 2. Phases and features
 
@@ -41,6 +41,7 @@ Efforts assume one developer in the existing codebase: **Low** ≈ ≤ 3 days, *
 | VOL view, realized half | Vol profile of any workspace stock | `VIEWS` in `stock.js`; grid tile | OHLC | **Existing** | Cone, RV history, estimator switch | **Low** | Realized vol | High | **P1** |
 | OSA, theoretical mode | Payoffs, Greeks curves, scenario grid with model prices; the main learning tool | New stock view | Spot, user IV or RV, rates | **Existing** | Full revaluation; sticky strike vs sticky moneyness | **Medium** | WebAssembly | High as a model; labelled "Model price" | **P1** |
 | Synthetic demo chain | Demo mode and E2E without keys | `sample.js`, `scripts/smoke.cjs` | — | — | Seeded SVI smile + term + noise | **Low** | Maths crate | n/a (badged synthetic) | **P1** |
+| **Massive provider + backfill downloader** (in-app background job; tiers 0–3; resumable queue; purge by source) | Start capturing the rolling 2-year window now; split-adjusted bars and corporate actions for correct RV | `providers.rs` new `massive` provider; 13F-style job in `main.rs`; Settings key row + progress | Contract lists, option and stock minute aggregates, adjusted daily bars, splits, dividends | **Free** (one account, 5/min, individual use) | Raw storage only in M1; IV computed when `options.rs` lands in M2 | **Medium** | `options.sqlite` schema (pulled forward from M2) | High as raw data; IV from trade prints is approximate (flagged) | **P0** |
 
 **M1 exit criteria:** the maths crate passes reference, identity, oracle and WebAssembly-parity tests in CI. The Volatility page shows VIX/VIX3M with "Cboe, retrieved from FRED" attribution and a VRP chart that never uses future data at a past date. OSA prices a vertical spread and a collar with a scenario grid. The demo chain renders in browser preview.
 
@@ -56,7 +57,7 @@ Efforts assume one developer in the existing codebase: **Low** ≈ ≤ 3 days, *
 | In-app recorder fallback | Recording without the agent | `watchFresh` loop | Same | Free | Same | **Low** | Agent job logic (shared) | Same | **P1** |
 | VOL implied half: smile, term, IV vs RV | Core equity-vol facts | VOL view | Chain + OHLC | Free | Display smile; forward variance | **Medium** | Recorder | Medium–High | **P1** |
 | OSA market mode | Strategies on real mids with optional spread cost | OSA | Chain | Free | Same | **Low** | OMON | Medium (indicative) | **P1** |
-| Massive Basic backfill + corporate actions (optional) | Approximate 2-year IV history; split data for RV | Agent job, resumable, 5 calls/minute | Free second account | **Free**, individual use | IV from EOD closes | **Medium** | Agent | Medium–Low (stale last trades) | **P2** |
+| Backfill → IV history: parity forward + IV on time-matched closing-window prints; `daily_summary` backfill rows; the queue moves into the agent; gap filler | 2 years of ATM IV, term, skew and earnings implied moves, available in M2 | Agent; VOL/EVT charts draw backfill dashed | Downloaded M1 data | **Free** (Massive) | Rust maths on minute-matched pairs | **Medium** | M1 downloader, normalizer, maths | Medium (trade prints, no bid/ask; flagged) | **P0** |
 
 **M2 exit criteria:**
 - OMON loads AAPL and SPY with our IV; every excluded contract shows a reason; vendor IV disagreements are viewable.
@@ -128,9 +129,11 @@ FRED rates/VIX ──────┤
 2. `crates/options-wasm` + `scripts/build-wasm.cjs`; WebAssembly-parity tests in `node --test`; CI target.
 3. `vol.py --oracle` in CI.
 4. FRED VIX/VIX3M/T-bill/SOFR; `observation_start` in `providers.rs` with tests.
+4a. **Massive provider and backfill downloader** (tiers 0–3, in-app job, resumable, ≥ 13 s pacing, purge by source); `options.sqlite` raw tables pulled forward from M2. Start it in week 1 of M1, because the free window rolls.
 5. Volatility page; VOL realized half + tile.
 6. OSA theoretical mode + synthetic demo chain + smoke test.
-**Not in M1:** any options provider, ledger changes, the agent.
+**Not in M1:** Alpaca options, IV from backfilled data (raw download only), ledger changes, the agent.
+**M1 estimate grows to ≈ 5–6 weeks** with the Massive downloader.
 
 ### M2: Chains, OMON and the background agent (≈ 6–7 weeks)
 1. Alpaca read-only option kinds, budgets, `#[ignore]` live contract test.
@@ -138,7 +141,8 @@ FRED rates/VIX ──────┤
 3. Quality checks and used/excluded counts.
 4. OMON + tile; VOL implied half; OSA market mode.
 5. `aperture-agent` sidecar: due-work logic, OS scheduling for all three platforms, Settings install/status/remove, log, lock file, shared budget; cask and Scoop uninstall hooks; in-app fallback.
-**Not in M2:** paper options trading, GEX, backfill (it can follow as an M2.5 if you want it).
+6. Backfill → IV history (forward, IV, summaries from the M1 download); queue moves into the agent; gap filler; IV rank, skew and earnings implied-move history usable.
+**Not in M2:** paper options trading, GEX.
 
 ### M3: Options paper trading and portfolio risk (≈ 4–6 weeks)
 1. Schema 3 migration; multiplier-aware ledger in Rust and JS with mirrored tests.
@@ -161,7 +165,8 @@ FRED rates/VIX ──────┤
 | WebAssembly toolchain friction | IPC fallback (Architecture §2); decide by the end of M1 week 2 |
 | Agent and app writing the same database | WAL + `busy_timeout` + agent lock file; one shared `requests` log |
 | Silent numerical errors | Oracle, identity, WebAssembly-parity and golden-fixture tests |
-| History gaps (machine asleep or off) | Gaps shown, never filled; optional backfill |
+| History gaps (machine asleep or off) | Gaps shown; filled only from Massive minute prints, flagged as backfill |
+| Massive terms or limits change, or the free tier ends | Weekly `source-health.yml` check; source-tagged rows and one-click purge; recorded Alpaca history unaffected |
 | Storage growth | Quote retention; summaries kept; size shown in Settings |
 | GEX or N(d2) read as forecasts | Labelling rules (Product Design §14); Analyst keeps class labels |
 | Unadjusted splits | Split filter in M1; Massive Basic corporate actions if enabled |
@@ -170,5 +175,5 @@ FRED rates/VIX ──────┤
 
 ## 7. Still open (small)
 
-1. **A second free account (Massive Options Basic):** OK for the optional backfill and corporate-actions data, or keep to the providers you already use?
-2. **Recorder list:** default to the watchlist (≤ 30 symbols)? SPY and QQQ are always included for index vol.
+1. ~~Massive free account~~: decided yes (2026-11-17).
+2. **Recorder and backfill list:** default to the watchlist (≤ 30 symbols)? SPY and QQQ are always included for index vol.

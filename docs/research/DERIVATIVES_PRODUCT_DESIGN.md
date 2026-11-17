@@ -227,7 +227,7 @@ Multi-leg orders come from OSA's leg list as one atomic paper order. Short legs 
 | Screener | New columns (only for symbols with recorded chains): ATM IV, IV−RV, IV rank, 25Δ skew; workspace screener only |
 | Watchlist | Optional IV column; the watchlist is also the default recorder list |
 | Alerts | New conditions: ATM IV above/below, IV rank above/below, VIX/VIX3M > 1 |
-| Aperture Analyst | Briefing facts with ids: `vol.atm30`, `vol.ivrank (n days)`, `evt.impliedMove`, `vol.vix`. The Analyst must quote the label class, e.g. "estimated" for GEX |
+| Aperture Analyst | Briefing facts with ids: `vol.atm30`, `vol.ivrank (n days)`, `evt.impliedMove`, `vol.vix`. The Analyst must quote the label class, e.g. "estimated" for GEX. Options figures go **only to the local model**. With an online account, the briefing omits Massive/Alpaca-derived figures and says why (Feasibility §10, rule 13) |
 | Quant Lab | Vol-selling, event-study and hedging experiment types (Architecture §6) |
 | HDS options tab | Rename the 13F statistic "13F put/call ratio (disclosed notional)" and link to OMON's exchange volume/OI put/call ratio to make the difference explicit |
 
@@ -259,7 +259,12 @@ Multi-leg orders come from OSA's leg list as one atomic paper order. Short legs 
 │ Background agent  ● Installed · runs every 30 min · captures after 16:15 ET on trading days     │
 │ Last capture  Nov 17, 16:22 ET · 30 symbols · 71,840 contracts · 6.8 MB   Next: Nov 18          │
 │ History  SPY 41 days · AAPL 41 days · NVDA 12 days … (gaps: Nov 3 — computer asleep)           │
-│ Calls today  Alpaca 212 (shared with the app's budget)                                          │
+│ Calls today  Alpaca 212 · Massive 1,860 (≤ 5/min, shared with the app's budget)                 │
+├────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Massive history backfill (free plan · 2-year window, moving daily)                              │
+│ Tier 0 reference ██████████ 30/30   Tier 1 ATM ██████░░░░ 18/30   Tier 2 skew ░░░░ 0/30         │
+│ Tier 3 earnings ░░░░ 0/30   About 31 h left at 4.6 calls/min · resumes after restarts           │
+│ [Pause] [Delete all Massive data]   Backfilled values are trade prints, not quotes: shown dashed│
 │ [View log]  [Remove background agent]   Keep full chains for [90 days ▾]  Summaries: forever    │
 │ What it does: reads option quotes from your Alpaca account (read-only, never places orders),    │
 │ computes IV and Greeks on this computer, and saves them here. Nothing is uploaded or shared.    │

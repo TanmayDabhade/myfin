@@ -7,7 +7,7 @@ Companion documents: [Architecture](DERIVATIVES_ARCHITECTURE.md) · [Product des
 
 | Question | Decision | Effect on this document |
 |---|---|---|
-| Data budget | **$0** | Paid sources stay in the tables for reference only. The plan uses Alpaca's free indicative feed, FRED, existing providers and Massive's **free** Options Basic tier for an optional, slow end-of-day backfill (§3.1) |
+| Data budget | **$0** | Paid sources stay in the tables for reference only. The plan uses Alpaca's free indicative feed, FRED, existing providers, and **one free Massive account** (Options Basic + Stocks Basic) to backfill as much history as possible (§3.1a) |
 | India | **Deferred** | §3.3 stays as background research. Nothing Indian is scheduled |
 | Short options on paper | Covered and spread-only first; **naked shorts with a margin model as a stretch goal** | See Architecture §6 |
 | Snapshot recorder | **A background agent is the primary path** | The recorder runs headless, without the app window. Option maths must therefore run in Rust. See Architecture §2–§4 |
@@ -112,9 +112,46 @@ Every figure shown must carry one of these classes, in the UI and in exports:
 
 **Conclusion:** a credible US options workspace can be built at **$0** with Alpaca indicative data, our own IV computation and our own EOD snapshot recorder. Paid tiers (Massive Starter at $29/month and up) are **out of plan** under the $0 budget. They are listed only so the trade-off stays visible. No tier gives historical IV older than what we record or recompute ourselves.
 
-**Optional free backfill (Massive Options Basic, $0, individual use).** Basic includes end-of-day contract aggregates for 2 years (*verified (web)*, custom-bars endpoint: "Options Basic · End-of-day · 2 years"). One request returns the daily bars of **one contract** for a date range. At 5 calls/minute, a constant-maturity ATM IV history needs roughly 10 strikes near the money × ~24 monthly expiries ≈ 240 contracts per symbol, about **50 minutes per symbol**. Over a weekend the background agent could backfill a 20–30 symbol watchlist. The result is approximate: closes are last trades, sometimes hours stale, and there is no bid/ask. It is stored as `quality.source = "backfill"` and drawn differently from recorded data. It needs a second free account (Massive). If the user doesn't want one, recording from day one is the only path.
+**Optional free backfill (Massive Options Basic, $0, individual use).** Basic includes end-of-day contract aggregates for 2 years (*verified (web)*, custom-bars endpoint: "Options Basic · End-of-day · 2 years"). One request returns the daily bars of **one contract** for a date range. At 5 calls/minute, a constant-maturity ATM IV history needs roughly 10 strikes near the money × ~24 monthly expiries ≈ 240 contracts per symbol, about **50 minutes per symbol**. Over a weekend the background agent could backfill a 20–30 symbol watchlist. The result is approximate: closes are last trades, sometimes hours stale, and there is no bid/ask. It is stored as `quality.source = "backfill"` and drawn differently from recorded data. **Decided 2026-11-17: the user is opening one free Massive account.** The full plan is in §3.1a; the minute-bar method there replaces the daily-close estimate above.
 
 Alpha Vantage `HISTORICAL_OPTIONS` stays unverified. Alpha Vantage's own documentation page didn't load its options section in this session. Even if it is free, the 25/day budget belongs to financial statements, so it isn't in the plan.
+
+### 3.1a Massive free tier: what it provides and the backfill plan (decided 2026-11-17)
+
+The user will open **one** free Massive account and use it to fill as much history as possible. What Options Basic and Stocks Basic include ($0, individual use, end-of-day, 2 years of history, **5 calls/minute**; *verified (web)* on massive.com plan and endpoint pages):
+
+| Need | Massive endpoint (Basic) | Calls | Gives |
+|---|---|---|---|
+| Which contracts existed, including expired ones | `/v3/reference/options/contracts` with `underlying_ticker`, `expired=true`, `expiration_date`/`strike_price` ranges, `limit ≤ 1000` | ~1 per 1,000 contracts | Type, strike, expiry, `exercise_style`, `shares_per_contract`, `additional_underlyings` (adjusted contracts) |
+| Option prices with a time | Options **minute** aggregates for one contract over a date range (base aggregates per request ≤ 50,000) | ~1 per contract (whole life) | OHLC, volume, VWAP and trade count per minute with trades |
+| Underlying prices at the same minutes | Stocks minute aggregates | ~4–5 per symbol for 2 years | Time-matched spot for each option print |
+| Split-adjusted daily bars | Stocks daily aggregates (`adjusted=true`) | 1 per symbol | Fixes the unadjusted-split problem in today's bars |
+| Splits | `/stocks/…/splits` (Corporate Actions) | 1 per symbol | Execution date, ratio, adjustment factor |
+| Dividends | Corporate Actions (dividends endpoint) | 1 per symbol | Ex-dates and amounts for American pricing and forwards. *Endpoint name and fields not verified this session* |
+
+Not in Basic: snapshots, quotes (bid/ask), trades, open interest, Greeks/IV, flat files, websockets. **Backfilled IV is therefore computed from trade prints, not quotes**, and is flagged approximate.
+
+**Why minute bars rather than daily bars:** a daily option close is the last trade, which can be hours before the 16:00 underlying close, and that mismatch distorts IV. For each contract and day, Aperture takes the **last minute bar in 15:30–16:00 ET** and pairs it with the underlying's price in the **same minute**. The call cost is the same (one request per contract), and the time-matching is far better. Days with no print in that window are marked stale for that contract, never filled.
+
+**What to download, in priority order.** Each tier runs across **all** symbols before the next tier starts, so every symbol gets usable history early:
+
+| Tier | Contracts per symbol | Purpose | Calls/symbol | Time/symbol at ~4.6 calls/min |
+|---|---|---|---|---|
+| 0. Reference | Splits, dividends, adjusted daily bars, stock minute bars, contract lists | Inputs for everything | ~30 | ~7 min |
+| 1. ATM core | Monthly expiries in the 2-year window plus currently listed ones (~27); the ~6 strikes that were nearest the money 20–100 days before expiry; calls **and** puts (both are needed for the parity forward) | Constant-maturity ATM IV 30/60/90, term structure, **IV rank** | ~300 | ~65 min |
+| 2. Skew | ~4 more strikes per expiry at ~10–15% OTM (puts below, calls above) | 25Δ risk reversal and skew history | ~110 | ~25 min |
+| 3. Events | Weekly expiries straddling each earnings date in the window (~8 events × 2 expiries × ~6 contracts) | **Implied vs realized earnings moves, IV crush** | ~100 | ~22 min |
+| 4. Wider chain | Remaining strikes with any volume, nearest-the-money first | Smile shape, GEX history inputs | open-ended | runs only when idle |
+
+For a 30-symbol recorder list (SPY and QQQ first), tiers 0–3 come to about **540 calls per symbol, roughly 16,000 calls, about 60 hours of running at 4.6 calls/min.** The work is resumable and runs from the background agent. In practice that is 3–5 days on a computer that is usually on. Tier 1 for all 30 symbols finishes first, in about 36 hours. SPY's daily expiries make its contract lists much longer; restricting tiers to monthly and event expiries keeps it in line.
+
+**The 2-year window rolls forward daily.** Data older than 2 years drops out of the free tier, so the backfill should start as early as possible (Roadmap: M1). Data already downloaded may be kept while the account stays active (see §10).
+
+**After the backfill:**
+- **Gap filler:** when the Alpaca recorder missed a day (computer asleep), the agent re-pulls minute bars for the Tier 1 contracts of currently listed expiries only (~70 calls per symbol), and only for weeks that contain a gap.
+- **Corporate actions:** a weekly refresh, 2 calls per symbol.
+
+**Quality flags on backfilled data:** `backfill-trade-print` (no bid/ask), `stale` (no print in the closing window), `adjusted-contract`, `low-volume` (fewer than N trades that day). Backfilled series are drawn dashed and never mixed silently with recorded quote-based IV. Charts that combine them show where the source changes.
 
 ### 3.2 Volatility indices
 
@@ -377,7 +414,7 @@ Analytic closed forms for BSM/Black-76 (Δ, Γ, ν, Θ, ρ, vanna, charm, vomma,
 |---|---|
 | **Supportable immediately (existing providers)** | VIX/VIX3M levels, term-structure ratio, VIX IV rank/percentile; realized-vol estimators and vol cones on every stock; T-bill rate curve; earnings calendars for event timing; an options **math and payoff lab** using user-entered or model prices (clearly labelled theoretical) |
 | **Free with one new adapter (Alpaca, credentials already stored)** | Delayed/indicative chains with vendor and own IV/Greeks, daily OI, smile and term structure, payoff with market mids, an EOD snapshot recorder that builds Aperture's own IV history from day one |
-| **Free with a second account (Massive Options Basic, optional)** | Slow EOD backfill of approximate IV history (2 years), corporate actions, contract reference data |
+| **Free with the Massive account (decided)** | 2 years of approximate IV history from time-matched minute prints, earnings implied-move history, split-adjusted bars, splits and dividends, expired-contract reference (§3.1a) |
 | **Excluded by the $0 budget** | Real (non-indicative) delayed quotes from Massive Starter ($29/mo) and above |
 | **Needs significant paid infrastructure** | Historical IV surfaces older than our own recording, intraday OPRA quotes and trades, aggressor-signed volume for GEX, real-time Indian F&O |
 | **Not possible from public data** | Actual dealer positions or inventory; true direction of open interest |
@@ -407,5 +444,20 @@ These rules apply to every feature in this plan, including the background agent.
 8. **Not investment advice.** No buy/sell signals presented as recommendations. Estimates (GEX, risk-neutral probabilities, implied moves) keep their class labels everywhere, including in Aperture Analyst answers. This matches the Analyst rules already in `src/analyst.js`.
 9. **A visible background agent.** It is opt-in, listed in Settings with its last run and log, removable with one click, and removed on uninstall. Nothing hidden or self-reinstalling.
 
+**Massive-specific rules** (from Massive's Individuals Terms of Service and Market Data Terms, read 2026-11-17; a summary, not legal advice)
+10. **One account, one key, and the rate limit enforced locally.** The terms prohibit "creating multiple accounts or rotating Credentials" and circumventing "rate limits, usage quotas". Aperture spaces Massive calls at least 13 s apart (≈ 4.6/min, under the 5/min limit). It treats the limit as **shared across Options and Stocks endpoints**, because the plan pages don't say otherwise. It backs off on any 429 and never retries in parallel.
+11. **Storage is allowed while the licence is active, and deletable on demand.** The terms allow you to "access, download, store and use the Information" for personal use. When the licence ends you must delete it "within thirty (30) days", including "stored copies and caches".
+    - Every row in `options.sqlite` carries its **source**. That includes our derived IVs and Greeks, because data that "can reasonably be used to recreate" the original counts as Information.
+    - Settings has **Delete all Massive data**, and the agent also deletes it if the Massive key is removed and the user confirms the account has ended.
+    - `options.sqlite` stays out of the JSON backup.
+12. **No sharing, no publishing, no index products.** Nothing Massive-derived leaves the computer. Aperture's constant-maturity ATM IV series are personal research measures ("your own research, analysis"). They are never published, and never presented as an index or benchmark (§5(d) prohibits creating or publishing an index or reference price without a licence).
+13. **No AI training, and care with online models.** The terms prohibit using the data to "train, fine-tune or distill" models, and prohibit letting an AI tool use it "for its own purposes".
+    - Aperture trains nothing.
+    - The **local** Aperture Analyst (llama.cpp on this computer) may use options figures in its briefing.
+    - When the Analyst is set to an **online account** (OpenRouter or Hugging Face), the briefing leaves out Massive- and Alpaca-derived figures and says so. Sending licensed data to a third-party model service is the kind of "make it available to others" use the terms forbid.
+    - *Follow-up outside this plan:* review whether the existing online-Analyst briefing sends other providers' licensed data (Finnhub news text, Twelve Data prices) off the computer.
+14. **Attribution.** Views that use Massive data name it as the source, as every Aperture panel does.
+15. **Non-professional status.** The free plans assume you're a non-professional: a natural person using data only for personal, non-business use, not registered with the SEC or similar. If that changes, these plans stop being the right licence.
+
 **Deferred work**
-10. **India stays deferred.** When it returns, the only routes are the user's own broker API under that broker's terms, or files the user downloads and imports manually.
+16. **India stays deferred.** When it returns, the only routes are the user's own broker API under that broker's terms, or files the user downloads and imports manually.
