@@ -110,3 +110,67 @@ export function bookScenario(groups, { days = 0, moves = [-0.2, -0.1, -0.05, 0, 
     cells: shifts.map((v) => ({ shift: v, pnl: groups.reduce((sum, g) => sum + pnl(g.legs, g.spot * (1 + m), { daysForward: days, ivShift: v, r }), 0) })),
   }));
 }
+
+// Delta-hedging simulation. Holds the option legs, trades shares every
+// `rebalanceDays` trading days to stay delta-neutral (at each leg's implied
+// volatility), and pays `costBps` of every share trade's value. Paths are
+// geometric Brownian motion at `realizedVol` (plus optional crash jumps),
+// seeded, so the same inputs give the same result. Horizon: the nearest
+// expiry. Returns hedged and unhedged P&L distributions and costs.
+export function hedgeSim(legs, spot, { realizedVol = 0.25, rebalanceDays = 1, costBps = 0, jumps = false, paths = 1000, seed = 1, r = 0.04 } = {}) {
+  const opts = legs.filter((l) => l.kind !== "stock");
+  const horizon = lastExpiry(opts);
+  if (!opts.length || !Number.isFinite(horizon) || horizon < 1) return null;
+  const steps = Math.max(1, Math.round((horizon * 252) / 365));
+  const dtYears = horizon / 365 / steps;
+  let s_ = seed >>> 0 || 1;
+  const u = () => ((s_ = (1664525 * s_ + 1013904223) >>> 0) + 0.5) / 2 ** 32;
+  const normal = () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u());
+  const lambda = jumps ? 1.5 : 0; // crashes a year
+  const value = (s, elapsed) => opts.reduce((v, l) => v + l.qty * MULTIPLIER * legValue(l, s, { daysForward: elapsed, r }), 0);
+  const delta = (s, elapsed) => positionGreeks(opts, s, { r, daysForward: elapsed }).delta;
+  const entry = opts.reduce((v, l) => v + l.qty * MULTIPLIER * (l.entry ?? 0), 0);
+  const hedged = [], unhedged = [], costs = [];
+  let trades = 0;
+  for (let p = 0; p < paths; p++) {
+    let s = spot, hedge = -delta(s, 0), cash = -entry - hedge * s, cost = Math.abs(hedge * s) * costBps / 1e4;
+    for (let i = 1; i <= steps; i++) {
+      let z = (r - 0.5 * realizedVol ** 2) * dtYears + realizedVol * Math.sqrt(dtYears) * normal();
+      if (lambda && u() < lambda * dtYears) z += Math.log(1 - 0.08 - 0.05 * Math.abs(normal()));
+      s *= Math.exp(z);
+      cash *= Math.exp(r * dtYears);
+      const elapsed = (i * horizon) / steps;
+      if (i < steps && i % rebalanceDays === 0) {
+        const target = -delta(s, elapsed);
+        const trade = target - hedge;
+        cash -= trade * s;
+        cost += (Math.abs(trade * s) * costBps) / 1e4;
+        hedge = target;
+        trades++;
+      }
+    }
+    const end = value(s, horizon);
+    hedged.push(end + cash + hedge * s - cost);
+    unhedged.push(end - entry);
+    costs.push(cost);
+  }
+  const stats = (a) => {
+    const v = [...a].sort((x, y) => x - y);
+    const mean = v.reduce((x, y) => x + y, 0) / v.length;
+    const sd = Math.sqrt(v.reduce((x, y) => x + (y - mean) ** 2, 0) / (v.length - 1));
+    const q = (p) => v[Math.min(v.length - 1, Math.floor(p * v.length))];
+    return { mean, sd, p5: q(0.05), p50: q(0.5), p95: q(0.95) };
+  };
+  // Continuous-hedging theory at the start: ½ Γ S² (σ_realized² − σ_implied²) T.
+  const g = positionGreeks(opts, spot, { r });
+  const ivAvg = opts.reduce((a, l) => a + (l.iv ?? 0.25), 0) / opts.length;
+  return {
+    horizon,
+    steps,
+    hedged: stats(hedged),
+    unhedged: stats(unhedged),
+    cost: stats(costs).mean,
+    rebalances: trades / paths,
+    theory: 0.5 * g.gamma * spot * spot * (realizedVol ** 2 - ivAvg ** 2) * (horizon / 365),
+  };
+}

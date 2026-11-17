@@ -1427,3 +1427,5 @@ table.osa-legs small { display: block; }
 table.scen td { text-align: center; }
 table.scen td:first-child { text-align: left; }
 .run-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: #9a9a9a; }
+.hedge-inputs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 10px 0 16px; }
+.hedge-inputs label { display: grid; gap: 6px; font-size: 12px; color: #a8a8a8; }

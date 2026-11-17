@@ -36,6 +36,13 @@ function fakeBackend() {
         .filter((r) => r.kind === kind && (parent == null || r.parent === parent))
         .sort((x, y) => x.created - y.created)
         .map((r) => r.body),
+    // Option data: no Alpaca key in this stand-in, an empty history and an idle backfill.
+    options_chain: () => {
+      throw "Option chains need your Alpaca key ID and secret (Settings → Data sources).";
+    },
+    options_history: () => [],
+    backfill_status: () => ({ configured: false, pending: 0, tiers: [], symbols: {}, summaryDays: 0 }),
+    agent_status: () => ({ installed: false, runs: [], log: "/tmp/agent.log" }),
     load_state: () => store("native-state"),
     save_state: ({ state }) => store("native-state", state),
     key_status: () => {
@@ -748,6 +755,32 @@ const server = spawn(
   await page.waitForSelector('[data-vc="cone"] svg');
   await page.waitForSelector('[data-vc="rv21"] svg');
   if (!/Realized · 1 month\s+\d+\.\d%/.test(await page.locator(".risk-kpis").innerText())) throw Error("VOL view shows no realized volatility");
+  // Options on demo data: synthetic chain, a strategy, a paper trade, and the
+  // ledger refusing an uncovered short call.
+  await page.click('.fn-strip [data-value="OMON"]');
+  await page.waitForSelector("table.chain");
+  await page.waitForSelector('[data-vc="gex-profile"] svg');
+  await page.click('.fn-strip [data-value="OSA"]');
+  await page.click('[data-action="osa-template"][data-value="covered-call"]');
+  await page.waitForSelector('[data-vc="osa-pnl"] svg');
+  await page.click('[data-action="hedge-run"]');
+  await page.waitForSelector("text=Hedged P&L · average");
+  page.once("dialog", (d) => d.accept());
+  await page.click('[data-action="osa-trade"]');
+  await page.waitForSelector("h1:has-text('Portfolio')");
+  await page.waitForSelector("text=Option risk");
+  if (!/AAPL \w+ \d+ \d+ call/.test(await page.locator("table").first().innerText())) throw Error("Option position missing from Portfolio");
+  await page.click('[data-page="Stock"]');
+  await page.click('.fn-strip [data-value="OSA"]');
+  await page.click('[data-action="osa-clear"]');
+  await page.click('[data-action="osa-new"][data-value="call"]');
+  await page.selectOption('[data-osa="0"][data-field="side"]', "sell");
+  await page.fill('[data-osa="0"][data-field="qty"]', "3");
+  await page.press('[data-osa="0"][data-field="qty"]', "Tab");
+  page.once("dialog", (d) => d.accept());
+  await page.click('[data-action="osa-trade"]');
+  await page.waitForSelector("text=Naked short calls aren't supported");
+  await page.click('[data-action="osa-clear"]');
   await page.click('.fn-strip [data-value="SPLC"]');
   if ((await page.locator(".evidence-card").count()) !== 3)
     throw Error("Apple neighborhood absent");

@@ -200,3 +200,37 @@ test("book scenarios add up across underlyings", () => {
   const g = bookScenario([a, b], { moves: [-0.1, 0, 0.1], shifts: [0] });
   assert.deepEqual(g.map((r) => Math.round(r.cells[0].pnl)), [-2000, 0, 2000]);
 });
+
+import { hedgeSim } from "../src/options/strategy.js";
+test("delta hedging: gamma pays when realized beats implied, and hedging shrinks the spread", () => {
+  const legs = [{ kind: "call", strike: 100, days: 30, qty: 1, iv: 0.2 }];
+  legs[0].entry = bsm({ kind: "call", s: 100, k: 100, t: 30 / 365, r: 0.04, sigma: 0.2 }).price;
+  const fair = hedgeSim(legs, 100, { realizedVol: 0.2, paths: 600, seed: 3 });
+  const rich = hedgeSim(legs, 100, { realizedVol: 0.35, paths: 600, seed: 3 });
+  const cheap = hedgeSim(legs, 100, { realizedVol: 0.1, paths: 600, seed: 3 });
+  assert.ok(Math.abs(fair.hedged.mean) < 15, `fair vol: hedged P&L near zero, got ${fair.hedged.mean}`);
+  assert.ok(rich.hedged.mean > 30 && cheap.hedged.mean < -30, `${rich.hedged.mean} / ${cheap.hedged.mean}`);
+  assert.ok(Math.sign(rich.theory) === 1 && Math.sign(cheap.theory) === -1);
+  assert.ok(fair.hedged.sd < fair.unhedged.sd / 3, "hedging removes most of the spread");
+  const slow = hedgeSim(legs, 100, { realizedVol: 0.2, rebalanceDays: 5, paths: 600, seed: 3 });
+  assert.ok(slow.hedged.sd > fair.hedged.sd, "less frequent hedging leaves more error");
+  const costly = hedgeSim(legs, 100, { realizedVol: 0.2, costBps: 10, paths: 300, seed: 3 });
+  assert.ok(costly.cost > 0 && costly.hedged.mean < fair.hedged.mean);
+  assert.equal(hedgeSim([{ kind: "stock", qty: 100 }], 100), null);
+});
+
+import { gammaExposure, impliedMove, earningsMoves, GEX_CONVENTIONS } from "../src/options/chain.js";
+test("gamma exposure, implied moves and earnings moves", () => {
+  const c = syntheticChain("XYZ", 100, "2026-01-15");
+  const g = gammaExposure(c);
+  assert.ok(g.contracts > 100 && g.byStrike.length >= 15, `${g.contracts} contracts, ${g.byStrike.length} strikes`);
+  assert.ok(g.conventions.short.total < 0, "dealers short everything are short gamma");
+  assert.equal(Object.keys(g.conventions).length, Object.keys(GEX_CONVENTIONS).length);
+  const near = g.byStrike.reduce((a, b) => (Math.abs(b.strike - 100) < Math.abs(a.strike - 100) ? b : a));
+  assert.ok(near.call > 0 && near.put > 0);
+  const m = impliedMove(c, c.expiries[2].expiry, "amc");
+  assert.equal(m.expiry, c.expiries[3].expiry);
+  assert.ok(m.move > 0.01 && m.move < 0.2, `${m.move}`);
+  const bars = [100, 100, 110, 110, 99].map((close, i) => ({ date: `2026-01-0${i + 1}`, close }));
+  assert.deepEqual(earningsMoves(bars, [{ date: "2026-01-02", hour: "amc" }, { date: "2026-01-05", hour: "bmo" }]).map((x) => +x.move.toFixed(3)), [0.1, -0.1]);
+});

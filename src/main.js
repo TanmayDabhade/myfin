@@ -61,8 +61,8 @@ import { loadMath, ESTIMATORS } from "./options/math.js";
 import { VOL_SERIES, VOL_CITATION, RV_WINDOWS, fredSeries, rankPercentile, vrpSeries, termRatio, regime, REGIME_RULES, volProfile, realized } from "./vol.js";
 import { multiLine, signedBars, coneChart, SERIES_COLORS } from "./volcharts.js";
 import { bsm } from "./options/math.js";
-import { syntheticChain, strikeRows, nearMoney, smile, termPoints, strikeStep, DAY_MS } from "./options/chain.js";
-import { TEMPLATES, buildTemplate, curves, extremes, positionGreeks, scenarioGrid, netPremium, lastExpiry, bookScenario } from "./options/strategy.js";
+import { syntheticChain, strikeRows, nearMoney, smile, termPoints, strikeStep, DAY_MS, gammaExposure, GEX_CONVENTIONS, impliedMove, earningsMoves } from "./options/chain.js";
+import { TEMPLATES, buildTemplate, curves, extremes, positionGreeks, scenarioGrid, netPremium, lastExpiry, bookScenario, hedgeSim } from "./options/strategy.js";
 import { optionsChain, optionsHistory, backfillStatus, backfillStart, backfillPause, optionsPurge, agentStatus, agentInstall, agentRemove } from "./bridge.js";
 import { labInit, labPage, labAction, labPaint, labOpen } from "./quantlab/ui.js";
 import {
@@ -3671,7 +3671,7 @@ function omonView() {
   const tp = termPoints(c);
   const charts = `<div class="grid halves"><section class="panel"><div class="panel-head"><h2>Smile · ${shortDate(exp)}</h2></div><p class="muted">Implied volatility of the out-of-the-money option at each strike. Dashed: the feed's own figure, for comparison.</p>${vc("smile", 220, "Volatility smile", (W) => multiLine(sm.map((p) => "$" + fmt(p.strike, p.strike % 1 ? 2 : 0)), [{ label: "Our IV", values: sm.map((p) => (p.iv == null ? null : p.iv * 100)) }, { label: c.synthetic ? "Model" : "Alpaca's IV", values: sm.map((p) => (p.vendor == null ? null : p.vendor * 100)), color: SERIES_COLORS.muted, dash: true }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section><section class="panel"><div class="panel-head"><h2>Term structure</h2></div><p class="muted">At-the-money implied volatility by expiry. A hump usually marks an event, such as earnings, inside that expiry.</p>${vc("term-iv", 220, "ATM implied volatility by expiry", (W) => multiLine(tp.map((p) => `${shortDate(p.expiry)} · ${p.days}d`), [{ label: "ATM IV", values: tp.map((p) => p.iv * 100) }], { fmt: (v) => v.toFixed(0) + "%" }, W))}</section></div>`;
   const note = `<small>IV is Aperture's own: Black's formula on the put–call-parity forward, solved from the mid of the out-of-the-money option at each strike; the in-the-money option at that strike uses the same IV, which keeps American early-exercise value out of the solve. Rate: ${esc(c.rate_source)} (${ivPct(c.rate)}). Greeks per share: Θ per calendar day, ν per volatility point. ⚠ marks a quote problem (hover the IV). ${c.synthetic ? "Demo data: the whole chain is synthetic." : "Indicative quotes aren't exchange quotes; spreads and fills based on them aren't realistic."}</small>`;
-  return `<section class="panel">${head(`${chainSource(c)}${native && state.mode === "market" ? button(chains[symbol]?.loading ? "Loading…" : "Refresh", "omon-refresh") : ""}${button("Strategy lab", "stock-view", "", 'data-value="OSA"')}`)}${kpis}<div class="omon-controls">${expPick}${rangePick_}${modePick}</div>${table_}${note}</section>${charts}`;
+  return `<section class="panel">${head(`${chainSource(c)}${native && state.mode === "market" ? button(chains[symbol]?.loading ? "Loading…" : "Refresh", "omon-refresh") : ""}${button("Strategy lab", "stock-view", "", 'data-value="OSA"')}`)}${kpis}<div class="omon-controls">${expPick}${rangePick_}${modePick}</div>${table_}${note}</section>${charts}${earningsPanel(c)}${gexPanel(c)}`;
 }
 
 // ---- Strategy lab -----------------------------------------------------------
@@ -3754,7 +3754,7 @@ function osaView() {
   const scen = `<section class="panel"><div class="panel-head"><h2>Scenarios · in ${horizon} days</h2></div><p class="muted">P&L if ${esc(symbol)} moves (rows) and implied volatility changes (columns) by then. Full revaluation of every leg; no transaction costs.</p><div class="table-wrap"><table class="scen"><thead><tr><th>${esc(symbol)} move</th>${grid[0].cells.map((c_) => `<th>IV ${c_.shift > 0 ? "+" : ""}${(c_.shift * 100).toFixed(0)} pts</th>`).join("")}</tr></thead><tbody>${grid
     .map((r) => `<tr><td>${r.move > 0 ? "+" : ""}${(r.move * 100).toFixed(0)}% · ${money(P.spot * (1 + r.move))}</td>${r.cells.map((c_) => `<td class="${c_.pnl >= 0 ? "up" : "down"}" style="background:rgba(${c_.pnl >= 0 ? "58,149,216" : "208,122,36"},${(0.06 + (0.3 * Math.abs(c_.pnl)) / maxAbs).toFixed(2)})">${(c_.pnl < 0 ? "−$" : "$") + compact(Math.abs(c_.pnl))}</td>`).join("")}</tr>`)
     .join("")}</tbody></table></div></section>`;
-  return `<section class="panel">${head(`<small class="muted">${basis}</small>`)}${templ}${legTable}${kpis}</section>${chart}${scen}`;
+  return `<section class="panel">${head(`<small class="muted">${basis}</small>`)}${templ}${legTable}${kpis}</section>${chart}${scen}${hedgePanel(legs, P)}`;
 }
 function osaUpdate(i, field, value) {
   const st = osaState();
@@ -3974,6 +3974,59 @@ function optionRiskPanel(p, marks) {
     rows.map(({ g, k }) => `<tr><td>${esc(g.underlying)}</td><td>${money(g.spot)}</td><td>${fmt(k.delta, 1)}</td><td>${fmt(k.gamma, 2)}</td><td>${money(k.theta)}</td><td>${money(k.vega)}</td></tr>`),
   )}<h3>Scenarios · every underlying moves together</h3>${scenTable(grid, (m) => `${m > 0 ? "+" : ""}${(m * 100).toFixed(0)}%`)}</section>`;
 }
+// ---- Delta-hedge simulator (strategy lab) ----------------------------------------
+const hedgeIn = { realizedVol: null, rebalance: 1, costBps: 2, jumps: false };
+let hedgeOut = null; // { key, main, frontier }
+function hedgePanel(legs, P) {
+  if (!legs.some((l) => l.kind !== "stock")) return "";
+  const rv = hedgeIn.realizedVol ?? P.vol;
+  const key = JSON.stringify([symbol, legs, rv, hedgeIn]);
+  const r = hedgeOut?.key === key ? hedgeOut : null;
+  const field = (name, label, input) => `<label>${label}${input}</label>`;
+  const inputs = `<div class="hedge-inputs">${field("rv", "Realized volatility (%)", `<input type="number" data-hedge="realizedVol" step="1" min="1" max="200" value="${(rv * 100).toFixed(0)}">`)}${field("rb", "Re-hedge every", `<select data-hedge="rebalance">${[1, 2, 5, 10, 21].map((d) => `<option value="${d}" ${hedgeIn.rebalance === d ? "selected" : ""}>${d} trading day${d > 1 ? "s" : ""}</option>`).join("")}</select>`)}${field("c", "Cost per share trade (bps)", `<input type="number" data-hedge="costBps" step="1" min="0" max="100" value="${hedgeIn.costBps}">`)}${field("j", "Crash jumps", `<select data-hedge="jumps"><option value="0" ${hedgeIn.jumps ? "" : "selected"}>None (smooth)</option><option value="1" ${hedgeIn.jumps ? "selected" : ""}>About 1.5 a year, −8% or worse</option></select>`)}</div>`;
+  const fmtD = (v) => (v < 0 ? "−$" : "$") + compact(Math.abs(v));
+  const result = r
+    ? `<div class="stats risk-kpis">${kpi("Hedged P&L · average", fmtD(r.main.hedged.mean), `5–95%: ${fmtD(r.main.hedged.p5)} to ${fmtD(r.main.hedged.p95)}`)}${kpi("Unhedged P&L · average", fmtD(r.main.unhedged.mean), `5–95%: ${fmtD(r.main.unhedged.p5)} to ${fmtD(r.main.unhedged.p95)}`)}${kpi("Theory (continuous hedging)", fmtD(r.main.theory), "½ Γ S² (σ realized² − σ implied²) T, at today's gamma")}${kpi("Hedging costs · average", fmtD(r.main.cost), `${r.main.rebalances.toFixed(1)} re-hedges over ${r.main.horizon} days`)}</div>${table(
+        ["Re-hedge every", "Hedged P&L, average", "Spread (std dev)", "Costs, average"],
+        r.frontier.map((f) => `<tr><td>${f.days} day${f.days > 1 ? "s" : ""}</td><td>${fmtD(f.res.hedged.mean)}</td><td>${fmtD(f.res.hedged.sd)}</td><td>${fmtD(f.res.cost)}</td></tr>`),
+      )}<small>${r.main.hedged.sd < r.main.unhedged.sd ? "Hedging narrows the outcomes; what's left is the gap between realized and implied volatility, discrete re-hedging error and costs. " : ""}Re-hedging more often shrinks the spread but costs more. With crash jumps on, no re-hedging frequency removes gap risk. 1,000 simulated paths, seeded: a simulation, not a forecast.</small>`
+    : `<p class="muted">Press Run to simulate.</p>`;
+  return `<section class="panel"><div class="panel-head"><h2>Delta-hedge simulator</h2>${button("Run", "hedge-run", "primary")}</div><p class="muted">Holds the option legs to the nearest expiry (${lastExpiry(legs.filter((l) => l.kind !== "stock"))} days), trading ${esc(symbol)} shares to stay delta-neutral at each leg's implied volatility. A hedged option earns roughly the gap between the volatility the stock then shows and the volatility you paid for. Try realized above and below the legs' IV.</p>${inputs}${result}</section>`;
+}
+function runHedge() {
+  const st = osaState();
+  const P = osaPricer();
+  const rv = hedgeIn.realizedVol ?? P.vol;
+  const base = { realizedVol: rv, costBps: hedgeIn.costBps, jumps: hedgeIn.jumps, r: P.r, seed: 7 };
+  const main = hedgeSim(st.legs, P.spot, { ...base, rebalanceDays: hedgeIn.rebalance, paths: 1000 });
+  if (!main) throw Error("Add at least one option leg to simulate hedging.");
+  const frontier = [1, 2, 5, 10].map((d) => ({ days: d, res: d === hedgeIn.rebalance ? main : hedgeSim(st.legs, P.spot, { ...base, rebalanceDays: d, paths: 500 }) }));
+  hedgeOut = { key: JSON.stringify([symbol, st.legs, rv, hedgeIn]), main, frontier };
+}
+
+// ---- Gamma exposure and earnings (option monitor) ---------------------------------
+function gexPanel(c) {
+  const g = memo(`gex:${c.underlying}:${c.as_of}:${c.quotes.length}`, () => gammaExposure(c));
+  if (!g.contracts) return "";
+  const near = g.byStrike.filter((r) => Math.abs(r.strike / g.spot - 1) <= 0.15);
+  const conv = g.conventions;
+  const fmtG = (v) => (v < 0 ? "−$" : "$") + compact(Math.abs(v));
+  const oi = g.oiDates.length ? `open interest as of ${esc(g.oiDates.at(-1))}` : "open interest date not reported";
+  const flips = Object.entries(GEX_CONVENTIONS).map(([k, x]) => `${esc(x.label)}: ${conv[k].flip == null ? "no flip within ±15%" : money(conv[k].flip)}`).join(" · ");
+  return `<section class="panel"><div class="panel-head"><h2>Estimated gamma exposure <span class="pill">model</span></h2></div><p class="muted"><b>Estimated, not observed.</b> Open interest says how many contracts are open, not who is long or short them, and dealers' actual positions and hedges aren't public. These figures assume a side for every contract, shown under two conventions so you can see how much the answer depends on that assumption. Dollar gamma for a 1% move, from ${int(g.contracts)} contracts with an IV and open interest (${oi}).</p><div class="stats risk-kpis">${Object.entries(GEX_CONVENTIONS).map(([k, x]) => kpi(esc(x.label), fmtG(conv[k].total), "at today's price")).join("")}${kpi("Where the sign flips", "", flips)}</div><div class="grid halves"><div><h3>By strike · dealers long calls, short puts</h3>${vc("gex-strike", 200, "Estimated gamma exposure by strike", (W) => signedBars(near.map((r) => "$" + fmt(r.strike, r.strike % 1 ? 2 : 0)), near.map((r) => r.call - r.put), { fmt: fmtG, label: "Calls minus puts ($ gamma per 1%)" }, W))}</div><div><h3>If the price moved · both conventions</h3>${vc("gex-profile", 200, "Estimated gamma exposure across prices", (W) => multiLine(conv.lcsp.profile.map((p) => "$" + fmt(p.spot)), Object.entries(GEX_CONVENTIONS).map(([k, x], i) => ({ label: x.label, values: conv[k].profile.map((p) => p.gex), color: i ? SERIES_COLORS.muted : SERIES_COLORS.ink, dash: !!i })), { fmt: fmtG, ref: 0 }, W))}</div></div><small>Each contract's gamma is recomputed at every price with its own IV held fixed. Open interest is published once a day, so intraday changes aren't reflected.</small></section>`;
+}
+function earningsPanel(c) {
+  const cal = fh("earnings")?.earningsCalendar;
+  if (!Array.isArray(cal) || !cal.length) return "";
+  const today = new Date(marketNow()).toISOString().slice(0, 10);
+  const next = cal.filter((e) => e.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
+  const a = stockAsset();
+  const past = a ? earningsMoves(a.bars, cal.filter((e) => e.date < today).map((e) => ({ date: e.date, hour: e.hour === "bmo" ? "bmo" : "amc" }))) : [];
+  const avg = past.length ? past.reduce((s, x) => s + Math.abs(x.move), 0) / past.length : null;
+  const im = next ? impliedMove(c, next.date, next.hour === "bmo" ? "bmo" : "amc") : null;
+  const pctS = (v) => (v == null ? "—" : (v * 100).toFixed(1) + "%");
+  return `<section class="panel"><div class="panel-head"><h2>Earnings</h2></div><div class="stats risk-kpis">${kpi("Next report", next ? esc(next.date) : "—", next ? (next.hour === "bmo" ? "before the open" : next.hour === "amc" ? "after the close" : "time not given") + " · Finnhub" : "none in Finnhub's window")}${kpi("Implied move", im?.move == null ? "—" : "±" + pctS(im.move), im ? `${shortDate(im.expiry)} straddle at ${money(im.strike)} ÷ spot` : "needs a later expiry")}${kpi("Event-only move", im?.eventOnly == null ? "—" : "±" + pctS(im.eventOnly), im?.secondExpiry ? `from the ${shortDate(im.expiry)} and ${shortDate(im.secondExpiry)} term structure` : "needs two expiries after the report")}${kpi("Past realized · average", avg == null ? "—" : "±" + pctS(avg), `${past.length} report${past.length === 1 ? "" : "s"} in this price history`)}</div>${past.length ? `<p class="muted">Past moves: ${past.slice(-8).map((x) => `${esc(x.date)} ${x.move >= 0 ? "+" : ""}${pctS(x.move)}`).join(" · ")}</p>` : ""}<small>The straddle's price is what options charge for the move to its expiry, including ordinary days; the event-only figure separates the report's own variance using two expiries (σ²T = σ²<sub>base</sub>·T + E). Both are expected absolute moves, not forecasts of direction. After the report, implied volatility usually falls (IV crush); a long straddle still profits if the move beats what was priced in.</small></section>`;
+}
 function quantPanel() {
   const e = quantEnv;
   const status = !e ? '<span class="pill">Checking…</span>' : e.gsQuant ? `<span class="pill on">GS Quant ${esc(e.gsQuant)}</span>` : '<span class="pill">Not installed</span>';
@@ -4150,7 +4203,7 @@ function autoLoad() {
   }
   if (hasKey("finnhub") && isUSKey(symbol) && page === "Stock") {
     const s = symbol;
-    const want = { "company-news": ["GRID", "CN"], metric: ["GRID", "DES", "FA"], profile2: ["GRID", "DES"], earnings: ["DES", "CN"] };
+    const want = { "company-news": ["GRID", "CN"], metric: ["GRID", "DES", "FA"], profile2: ["GRID", "DES"], earnings: ["DES", "CN", "OMON"] };
     for (const [kind, views] of Object.entries(want))
       if (views.includes(v) && stale(state.datasets[`${s}:FH_${kind}`], 1800)) now_(`${s}:FH_${kind}`, () => loadFinnhub(kind, s));
   }
@@ -4278,6 +4331,13 @@ function bind() {
     el.onchange = async () => {
       osaUpdate(+el.dataset.osa, el.dataset.field, el.value);
       await persist();
+      render();
+    };
+  });
+  document.querySelectorAll("[data-hedge]").forEach((el) => {
+    el.onchange = () => {
+      const f = el.dataset.hedge;
+      hedgeIn[f] = f === "realizedVol" ? Math.max(0.01, +el.value / 100) : f === "jumps" ? el.value === "1" : +el.value;
       render();
     };
   });
@@ -4970,6 +5030,10 @@ async function action(act, value) {
       render();
       break;
     }
+    case "hedge-run":
+      runHedge();
+      render();
+      break;
     case "osa-remove":
       osaState().legs.splice(+value, 1);
       await persist();
