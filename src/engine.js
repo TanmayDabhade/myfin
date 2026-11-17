@@ -99,29 +99,100 @@ export function dcf({
     terminalShare: tv / (pv + tv),
   };
 }
+// Option contracts are traded by OCC symbol (AAPL260206C00250000) with a
+// multiplier; stocks by ticker. Positions are signed: a short option is a
+// negative quantity. Shares are long only.
+export const OCC = /^[A-Z.]{1,6}\d{6}[CP]\d{8}$/;
+export function parseContract(sym) {
+  const m = /^([A-Z.]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || "");
+  if (!m) return null;
+  return { underlying: m[1], expiry: `20${m[2]}-${m[3]}-${m[4]}`, kind: m[5] === "C" ? "call" : "put", strike: +m[6] / 1000 };
+}
+const multOf = (t) => (t.instrument === "option" ? t.multiplier || 100 : 1);
+
+// Cash, realized P&L and signed positions, by average cost. Opening or
+// adding costs qty × price × multiplier + fee (a short's cost is negative:
+// the credit received, less the fee); closing realizes the cash flow minus
+// the proportional cost basis.
 export function book(account) {
   let cash = account.initial,
     realized = 0;
   const holdings = {};
   for (const t of account.trades) {
-    let p = holdings[t.symbol] || { qty: 0, cost: 0, realized: 0 };
-    if (t.side === "buy") {
-      cash -= t.qty * t.price + t.fee;
-      p.cost += t.qty * t.price + t.fee;
-      p.qty += t.qty;
+    const m = multOf(t);
+    const p = holdings[t.symbol] || { qty: 0, cost: 0, realized: 0, ...(t.instrument === "option" ? { instrument: "option", multiplier: m, ...parseContract(t.symbol) } : {}) };
+    const dq = t.side === "buy" ? t.qty : -t.qty;
+    const flow = -dq * t.price * m - t.fee;
+    cash += flow;
+    if (p.qty === 0 || Math.sign(dq) === Math.sign(p.qty)) {
+      p.cost -= flow;
+      p.qty += dq;
     } else {
-      let basis = p.qty ? (p.cost / p.qty) * t.qty : 0;
-      let gain = t.qty * t.price - t.fee - basis;
-      cash += t.qty * t.price - t.fee;
+      const closing = Math.min(Math.abs(dq), Math.abs(p.qty));
+      const basis = (p.cost * closing) / Math.abs(p.qty);
+      const gain = flow - basis;
       p.cost -= basis;
-      p.qty -= t.qty;
+      p.qty += Math.sign(dq) * closing;
       p.realized += gain;
       realized += gain;
+      if (Math.abs(p.qty) < 1e-9) p.qty = 0, p.cost = 0;
     }
     holdings[t.symbol] = p;
   }
   return { cash, realized, holdings };
 }
+
+// What the option book ties up, by the paper rules: each short call is
+// covered by 100 shares or paired with a long call (expiring no earlier),
+// each short put paired with a long put or secured by strike × 100 in cash.
+// A spread reserves its maximum loss. Uncovered short calls aren't allowed.
+export function requirements(holdings) {
+  const by = {};
+  for (const [sym, p] of Object.entries(holdings)) {
+    if (!p.qty) continue;
+    if (p.instrument === "option") {
+      const u = (by[p.underlying] ||= { shares: 0, legs: [] });
+      u.legs.push({ sym, kind: p.kind, strike: p.strike, expiry: p.expiry, n: Math.abs(p.qty), short: p.qty < 0, m: p.multiplier || 100 });
+    } else (by[sym] ||= { shares: 0, legs: [] }).shares += p.qty;
+  }
+  let required = 0;
+  const uncovered = [];
+  const lockedShares = {};
+  for (const [u, g] of Object.entries(by)) {
+    let shares = g.shares;
+    const longs = (kind) => g.legs.filter((l) => !l.short && l.kind === kind).map((l) => ({ ...l, left: l.n }));
+    const lc = longs("call"),
+      lp = longs("put");
+    for (const sc of g.legs.filter((l) => l.short && l.kind === "call").sort((a, b) => a.strike - b.strike)) {
+      let n = sc.n;
+      const fromShares = Math.min(n, Math.floor(shares / sc.m));
+      shares -= fromShares * sc.m;
+      lockedShares[u] = (lockedShares[u] || 0) + fromShares * sc.m;
+      n -= fromShares;
+      for (const l of lc.filter((x) => x.expiry >= sc.expiry).sort((a, b) => a.strike - b.strike)) {
+        if (!n) break;
+        const k = Math.min(n, l.left);
+        l.left -= k;
+        n -= k;
+        required += k * sc.m * Math.max(0, l.strike - sc.strike);
+      }
+      if (n) uncovered.push(`${n} ${sc.sym}`);
+    }
+    for (const sp of g.legs.filter((l) => l.short && l.kind === "put").sort((a, b) => b.strike - a.strike)) {
+      let n = sp.n;
+      for (const l of lp.filter((x) => x.expiry >= sp.expiry).sort((a, b) => b.strike - a.strike)) {
+        if (!n) break;
+        const k = Math.min(n, l.left);
+        l.left -= k;
+        n -= k;
+        required += k * sp.m * Math.max(0, sp.strike - l.strike);
+      }
+      required += n * sp.m * sp.strike;
+    }
+  }
+  return { required, uncovered, lockedShares };
+}
+
 export function execute(
   account,
   {
@@ -133,59 +204,95 @@ export function execute(
     note = "",
     date = new Date().toISOString(),
     source = "manual",
+    instrument = "stock",
+    multiplier = 100,
+    iv = null,
   },
 ) {
+  const option = instrument === "option";
   if (
-    !/^[A-Z0-9.^_-]{1,20}$/.test(symbol) ||
+    !(option ? OCC.test(symbol) : /^[A-Z0-9.^_-]{1,20}$/.test(symbol)) ||
     !["buy", "sell"].includes(side) ||
     ![qty, price, fee].every(Number.isFinite) ||
     qty <= 0 ||
-    price <= 0 ||
-    fee < 0
+    price < 0 ||
+    (price === 0 && source !== "expiry") ||
+    fee < 0 ||
+    (option && (!Number.isFinite(multiplier) || multiplier <= 0))
   )
     throw Error(
       "Invalid order: enter positive quantity and price, and nonnegative fees.",
     );
-  const b = book(account);
-  if (side === "buy" && qty * price + fee > b.cash + 1e-8)
-    throw Error("Insufficient paper cash.");
-  if (side === "sell" && qty > (b.holdings[symbol]?.qty || 0) + 1e-8)
-    throw Error("Cannot sell more shares than held.");
-  if (side === "sell" && b.cash + qty * price - fee < 0)
-    throw Error("Insufficient cash for fees.");
-  return {
-    ...account,
-    trades: [
-      ...account.trades,
-      {
-        id: globalThis.crypto.randomUUID(),
-        symbol,
-        side,
-        qty,
-        price,
-        fee,
-        note,
-        date,
-        source,
-      },
-    ],
-  };
+  if (option && !Number.isInteger(qty)) throw Error("Option orders are whole contracts.");
+  const trade = { id: globalThis.crypto.randomUUID(), symbol, side, qty, price, fee, note, date, source, ...(option ? { instrument, multiplier, ...(iv == null ? {} : { iv }) } : {}) };
+  const before = book(account);
+  const held = before.holdings[symbol]?.qty || 0;
+  if (!option && side === "sell" && qty > held + 1e-8) throw Error("Cannot sell more shares than held.");
+  const dq = side === "buy" ? qty : -qty;
+  if (option && held && Math.sign(held) !== Math.sign(dq) && qty > Math.abs(held) + 1e-9)
+    throw Error(`That would turn a ${held > 0 ? "long" : "short"} position into the opposite one. Close it first, then open the new one.`);
+  const next = { ...account, trades: [...account.trades, trade] };
+  const after = book(next);
+  const req = requirements(after.holdings);
+  if (req.uncovered.length)
+    throw Error(`Short calls must be covered by 100 shares each or paired with a long call (a spread): ${req.uncovered.join(", ")} would be uncovered. Naked short calls aren't supported.`);
+  const opening = side === "buy" || (option && held <= 0);
+  if (opening && after.cash < req.required - 1e-8)
+    throw Error(req.required > 0 ? `Insufficient paper cash: ${money2(after.cash)} left, but ${money2(req.required)} must be held against short puts and spreads.` : "Insufficient paper cash.");
+  if (!opening && after.cash < -1e-8) throw Error("Insufficient cash for fees.");
+  return next;
 }
-export function portfolio(account, assets) {
+const money2 = (x) => "$" + x.toLocaleString("en-US", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+
+// Expired options settle at intrinsic value against the underlying's close
+// on expiry day (cash-settled here for simplicity, so an exercised call
+// doesn't need cash for shares). `closeOn(underlying, date)` returns that close.
+export function settleExpiries(account, closeOn, today = new Date().toISOString().slice(0, 10)) {
+  let next = account;
+  const b = book(account);
+  for (const [sym, p] of Object.entries(b.holdings)) {
+    if (p.instrument !== "option" || !p.qty || p.expiry >= today) continue;
+    const s = closeOn(p.underlying, p.expiry);
+    if (s == null) continue;
+    const intrinsic = Math.max(0, (p.kind === "call" ? 1 : -1) * (s - p.strike));
+    const last = next.trades.at(-1)?.date || "";
+    const at = p.expiry + "T21:00:00Z";
+    next = execute(next, {
+      symbol: sym,
+      side: p.qty > 0 ? "sell" : "buy",
+      qty: Math.abs(p.qty),
+      price: +intrinsic.toFixed(4),
+      fee: 0,
+      note: `Expired ${p.expiry}: settled at intrinsic value ${intrinsic.toFixed(2)} against ${p.underlying}'s close of ${s.toFixed(2)}${intrinsic > 0 ? " (in the money)" : " (worthless)"}`,
+      date: last > at ? last : at,
+      source: "expiry",
+      instrument: "option",
+      multiplier: p.multiplier,
+    });
+  }
+  return next;
+}
+
+// Marks: stocks at the latest close, options at `optionMarks[symbol].price`
+// (a chain mid or a model price, said so by `.source`); cost basis otherwise.
+export function portfolio(account, assets, optionMarks = {}) {
   const b = book(account);
   let value = b.cash,
     unrealized = 0;
   const positions = Object.entries(b.holdings)
-    .filter(([, p]) => p.qty > 1e-8)
+    .filter(([, p]) => Math.abs(p.qty) > 1e-8)
     .map(([symbol, p]) => {
-      const price = assets[symbol]?.bars?.at(-1)?.close ?? null;
-      const market = price === null ? null : price * p.qty;
+      const m = p.instrument === "option" ? p.multiplier || 100 : 1;
+      const mark = p.instrument === "option" ? optionMarks[symbol] || null : null;
+      const price = p.instrument === "option" ? (mark?.price ?? null) : (assets[symbol]?.bars?.at(-1)?.close ?? null);
+      const market = price === null ? null : price * p.qty * m;
       value += market ?? p.cost;
       unrealized += market === null ? 0 : market - p.cost;
       return {
         symbol,
         ...p,
         price,
+        markSource: mark?.source || null,
         market,
         pnl: market === null ? null : market - p.cost,
       };

@@ -27,6 +27,12 @@ export const providers = {
     keyURL: "https://app.alpaca.markets/signup",
     secret: true,
   },
+  massive: {
+    name: "Massive",
+    provides: "Two years of end-of-day option and stock history, used to fill in implied-volatility history (IV rank, skew, earnings moves), plus splits and dividends. One account; the data stays on this computer.",
+    limits: "Free plan: 5 requests/minute, individual use. Aperture waits 13 s between requests.",
+    keyURL: "https://massive.com/pricing",
+  },
   fred: {
     name: "FRED",
     provides: "US economic series (CPI, unemployment, rates, GDP)",

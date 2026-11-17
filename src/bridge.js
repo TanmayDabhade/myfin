@@ -91,3 +91,14 @@ export const analystNews = (query) => call("analyst_news", { query });
 export const analystRead = (url) => call("analyst_read", { url });
 // Streamed reply text: fn({ id, text?, stage? }).
 export const onAnalystDelta = (fn) => window.__TAURI__?.event?.listen?.("analyst-delta", (e) => fn(e.payload));
+// Option chains (Alpaca's free feed), implied-volatility history, the Massive
+// backfill and the background recorder (desktop only).
+export const optionsChain = (symbol, spot = null, force = false) => call("options_chain", { symbol, spot, force });
+export const optionsHistory = (symbol) => call("options_history", { symbol });
+export const backfillStatus = () => call("backfill_status");
+export const backfillStart = (symbols = null) => call("backfill_start", { symbols });
+export const backfillPause = (paused) => call("backfill_pause", { paused });
+export const optionsPurge = (source) => call("options_purge", { source });
+export const agentStatus = () => call("agent_status");
+export const agentInstall = () => call("agent_install");
+export const agentRemove = () => call("agent_remove");

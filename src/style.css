@@ -1406,3 +1406,24 @@ textarea.ql-json { resize: vertical; }
 .ql-sim-log li b { text-align: right; font-weight: 500; }
 .ql-sim-log li:first-child { animation: ql-flash 0.6s ease-out; }
 @keyframes ql-flash { from { background: #1f2a24; } to { background: transparent; } }
+
+/* ---- Options: chain, strategy lab */
+.omon-controls { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 10px; }
+.seg.wrap { flex-wrap: wrap; }
+.chain-wrap { max-height: 640px; }
+table.chain td, table.chain th { padding: 7px 8px; }
+table.chain th.calls, table.chain th.puts { text-align: center; color: #d6d6d6; }
+table.chain td.strike { text-align: center; background: #161616; }
+table.chain tr.itm-call td:nth-child(-n+6) { background: rgba(58, 149, 216, 0.07); }
+table.chain tr.itm-put td:nth-last-child(-n+6) { background: rgba(58, 149, 216, 0.07); }
+table.chain tr.atm td.strike { outline: 1px solid #5a5a5a; }
+table.chain button.icon { padding: 0 6px; font-size: 12px; line-height: 18px; }
+table.osa-legs td, table.osa-legs th { text-align: left; padding: 8px; }
+table.osa-legs input { width: 82px; }
+table.osa-legs input[data-field="qty"] { width: 56px; }
+table.osa-legs small { display: block; }
+.osa-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 10px 0; font-size: 12px; color: #a8a8a8; }
+.osa-controls input[type="range"] { width: 100%; }
+table.scen td { text-align: center; }
+table.scen td:first-child { text-align: left; }
+.run-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: #9a9a9a; }

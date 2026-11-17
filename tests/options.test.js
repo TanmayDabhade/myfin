@@ -135,3 +135,68 @@ test("a stock's volatility profile", () => {
   assert.ok(Object.values(p.byEstimator).every((v) => v > 0 && v < 1));
   assert.equal(volProfile([]), null);
 });
+
+import { pnl, extremes, positionGreeks, scenarioGrid, curves, breakEvens, buildTemplate, netPremium } from "../src/options/strategy.js";
+import { syntheticChain, strikeRows, nearMoney, smile, termPoints } from "../src/options/chain.js";
+
+test("strategy payoffs match their textbook shapes", () => {
+  // Bull call spread 100/110 bought for a 4.00 debit.
+  const spread = [
+    { kind: "call", strike: 100, days: 30, qty: 1, entry: 6, iv: 0.3 },
+    { kind: "call", strike: 110, days: 30, qty: -1, entry: 2, iv: 0.3 },
+  ];
+  const x = extremes(spread, 100);
+  assert.ok(Math.abs(x.maxGain - 600) < 1e-6 && Math.abs(x.maxLoss + 400) < 1e-6);
+  assert.equal(x.breakEvens.length, 1);
+  assert.ok(Math.abs(x.breakEvens[0] - 104) < 0.05);
+  assert.equal(netPremium(spread), 400);
+  // A long straddle's gain is unbounded; a covered call's loss is bounded by the stock.
+  assert.equal(extremes([{ kind: "call", strike: 100, days: 30, qty: 1, entry: 4 }, { kind: "put", strike: 100, days: 30, qty: 1, entry: 4 }], 100).maxGain, Infinity);
+  const cc = extremes([{ kind: "stock", qty: 100, entry: 100 }, { kind: "call", strike: 105, days: 30, qty: -1, entry: 2 }], 100);
+  assert.ok(Number.isFinite(cc.maxLoss) && Math.abs(cc.maxGain - 700) < 1e-6);
+  // At expiry and today.
+  assert.equal(pnl(spread, 120, { daysForward: 30 }), 600);
+  const today = pnl(spread, 100);
+  assert.ok(today > -400 && today < 600);
+  const { prices, atExpiry } = curves(spread, 100);
+  assert.ok(Math.abs(breakEvens(prices, atExpiry)[0] - 104) < 0.05);
+});
+
+test("position Greeks and the scenario grid", () => {
+  const call = [{ kind: "call", strike: 100, days: 365, qty: 2, entry: 10, iv: 0.2 }];
+  const g = positionGreeks(call, 100, { r: 0.05, q: 0 });
+  const one = bsm({ kind: "call", s: 100, k: 100, t: 1, r: 0.05, sigma: 0.2 });
+  assert.ok(Math.abs(g.delta - 200 * one.delta) < 1e-9);
+  assert.ok(Math.abs(g.vega - (200 * one.vega) / 100) < 1e-9);
+  assert.equal(positionGreeks([{ kind: "stock", qty: 50 }], 100).delta, 50);
+  const grid = scenarioGrid(call, 100, { days: 0 });
+  assert.equal(grid.length, 7);
+  assert.equal(grid[3].cells.length, 5);
+  assert.ok(grid[6].cells[2].pnl > grid[0].cells[2].pnl, "calls gain when the stock rises");
+  assert.ok(grid[3].cells[4].pnl > grid[3].cells[0].pnl, "and when volatility rises");
+  const legs = buildTemplate("iron-condor", 100, (kind, k) => ({ strike: k, days: 30, iv: 0.25, entry: 1 }));
+  assert.equal(legs.length, 4);
+});
+
+test("the synthetic demo chain is consistent", () => {
+  const c = syntheticChain("AAPL", 200, "2026-01-15");
+  assert.ok(c.synthetic && c.expiries.length === 8);
+  const e = c.expiries[3];
+  const rows = strikeRows(c, e.expiry);
+  assert.ok(rows.length > 20 && rows.every((r) => r.call && r.put));
+  assert.equal(nearMoney(rows, e.forward, 5).length, 10);
+  const s = smile(c, e.expiry);
+  assert.ok(s.length > 10);
+  // Our IV, solved from the mid of a bid/ask around the model price, is close to the model's.
+  const close = s.filter((p) => p.iv && Math.abs(p.strike / e.forward - 1) < 0.1);
+  assert.ok(close.every((p) => Math.abs(p.iv - p.vendor) < 0.02), JSON.stringify(close.slice(0, 3)));
+  assert.equal(termPoints(c).length, 8);
+});
+
+import { bookScenario } from "../src/options/strategy.js";
+test("book scenarios add up across underlyings", () => {
+  const a = { spot: 100, legs: [{ kind: "stock", qty: 100, entry: 100 }] };
+  const b = { spot: 50, legs: [{ kind: "stock", qty: 200, entry: 50 }] };
+  const g = bookScenario([a, b], { moves: [-0.1, 0, 0.1], shifts: [0] });
+  assert.deepEqual(g.map((r) => Math.round(r.cells[0].pnl)), [-2000, 0, 2000]);
+});

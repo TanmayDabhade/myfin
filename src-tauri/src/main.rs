@@ -311,7 +311,12 @@ fn paper_trade(
     } else {
         "marketAssets"
     };
-    if state[map].get(&order.symbol).is_none() {
+    // Options trade on their underlying's prices; shares on their own.
+    let priced = match order.instrument.as_deref() {
+        Some("option") => options::parse_occ(&order.symbol).map(|c| c.root),
+        _ => Some(order.symbol.clone()),
+    };
+    if priced.as_ref().is_none_or(|s| state[map].get(s).is_none()) {
         return Err("Import prices for this symbol before trading".into());
     }
     account.append(order)?;
