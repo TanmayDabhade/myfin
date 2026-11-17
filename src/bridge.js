@@ -42,8 +42,8 @@ export async function fetchSEC(kind, cik = "", accession = "", doc = "", force =
 export const aisStart = (area, lat, lon) => invoke("ais_start", { area, lat, lon });
 export const aisStop = () => (native ? invoke("ais_stop") : Promise.resolve());
 export const aisSnapshot = () => invoke("ais_snapshot");
-export async function nativeTrade(mode, order) {
-  return invoke("paper_trade", { mode, order });
+export async function nativeTrade(mode, order, marks = null) {
+  return invoke("paper_trade", { mode, order, marks });
 }
 export const quotesStart = (symbols) => invoke("quotes_start", { symbols });
 export const quotesStop = () => (native ? invoke("quotes_stop") : Promise.resolve());

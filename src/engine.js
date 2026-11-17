@@ -146,7 +146,16 @@ export function book(account) {
 // covered by 100 shares or paired with a long call (expiring no earlier),
 // each short put paired with a long put or secured by strike × 100 in cash.
 // A spread reserves its maximum loss. Uncovered short calls aren't allowed.
-export function requirements(holdings) {
+// Simulated margin for an uncovered short option (standard strategy-based
+// formula for equity options): premium + 20% of the underlying's value
+// minus the out-of-the-money amount, at least premium + 10% of the
+// underlying (calls) or of the strike (puts); per share, × multiplier.
+// Brokers set their own, higher house requirements.
+export function nakedMargin(kind, strike, spot, premium) {
+  const otm = Math.max(0, kind === "call" ? strike - spot : spot - strike);
+  return premium + Math.max(0.2 * spot - otm, 0.1 * (kind === "call" ? spot : strike));
+}
+export function requirements(holdings, { margin = false, spot = {}, premium = {} } = {}) {
   const by = {};
   for (const [sym, p] of Object.entries(holdings)) {
     if (!p.qty) continue;
@@ -176,7 +185,8 @@ export function requirements(holdings) {
         n -= k;
         required += k * sc.m * Math.max(0, l.strike - sc.strike);
       }
-      if (n) uncovered.push(`${n} ${sc.sym}`);
+      if (n && margin && spot[u] > 0) required += n * sc.m * nakedMargin("call", sc.strike, spot[u], premium[sc.sym] ?? 0);
+      else if (n) uncovered.push(`${n} ${sc.sym}`);
     }
     for (const sp of g.legs.filter((l) => l.short && l.kind === "put").sort((a, b) => b.strike - a.strike)) {
       let n = sp.n;
@@ -187,7 +197,8 @@ export function requirements(holdings) {
         n -= k;
         required += k * sp.m * Math.max(0, sp.strike - l.strike);
       }
-      required += n * sp.m * sp.strike;
+      // Cash-secured, or (with simulated margin on) the margin formula when that is smaller.
+      required += n * sp.m * (margin && spot[u] > 0 ? Math.min(sp.strike, nakedMargin("put", sp.strike, spot[u], premium[sp.sym] ?? 0)) : sp.strike);
     }
   }
   return { required, uncovered, lockedShares };
@@ -208,6 +219,7 @@ export function execute(
     multiplier = 100,
     iv = null,
   },
+  marks = {},
 ) {
   const option = instrument === "option";
   if (
@@ -233,12 +245,12 @@ export function execute(
     throw Error(`That would turn a ${held > 0 ? "long" : "short"} position into the opposite one. Close it first, then open the new one.`);
   const next = { ...account, trades: [...account.trades, trade] };
   const after = book(next);
-  const req = requirements(after.holdings);
+  const req = requirements(after.holdings, { margin: !!account.margin, ...marks });
   if (req.uncovered.length)
-    throw Error(`Short calls must be covered by 100 shares each or paired with a long call (a spread): ${req.uncovered.join(", ")} would be uncovered. Naked short calls aren't supported.`);
+    throw Error(`Short calls must be covered by 100 shares each or paired with a long call (a spread): ${req.uncovered.join(", ")} would be uncovered. Naked short calls aren't supported${account.margin ? " without a price for the underlying" : " unless you turn on simulated margin (Portfolio → Option risk)"}.`);
   const opening = side === "buy" || (option && held <= 0);
   if (opening && after.cash < req.required - 1e-8)
-    throw Error(req.required > 0 ? `Insufficient paper cash: ${money2(after.cash)} left, but ${money2(req.required)} must be held against short puts and spreads.` : "Insufficient paper cash.");
+    throw Error(req.required > 0 ? `Insufficient paper cash: ${money2(after.cash)} left, but ${money2(req.required)} must be held against short options and spreads.` : "Insufficient paper cash.");
   if (!opening && after.cash < -1e-8) throw Error("Insufficient cash for fees.");
   return next;
 }

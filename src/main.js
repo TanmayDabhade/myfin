@@ -132,6 +132,7 @@ import {
   validateWorkspace,
   migrate,
   number,
+  requirements,
   parseContract,
   settleExpiries,
 } from "./engine.js";
@@ -3525,7 +3526,7 @@ function volatilityPage() {
     ? `<section class="panel"><div class="panel-head"><h2>Realized volatility in your workspace</h2></div>${table(
         ["Stock", "21 days", "63 days", "1 year", "21-day vs its past year"],
         list.map((x) => `<tr><td><button class="link" data-action="vol-open" data-value="${esc(x.a.symbol)}">${esc(x.a.symbol)}</button></td><td>${volPct(x.rv21)}</td><td>${volPct(x.rv63)}</td><td>${volPct(x.rv252)}</td><td>${x.p?.rank ? `${ordinal(x.p.rank.percentile)} percentile${x.p.rank.full ? "" : ` · ${x.p.rank.n} days`}` : "—"}</td></tr>`),
-      )}<small>Yang–Zhang estimator on daily bars, annualized with 252 trading days. Implied volatility for single stocks needs option chains, which aren't connected.</small></section>`
+      )}<small>Yang–Zhang estimator on daily bars, annualized with 252 trading days. Each stock's implied volatility, from its option chain and recorded history, is on its Volatility (<kbd>VOL</kbd>) and Options (<kbd>OMON</kbd>) views.</small></section>`
     : "";
   const sources = `<section class="panel"><small>VIX (${fredLink("VIXCLS")}) and VIX3M (${fredLink("VXVCLS")}): ${esc(VOL_CITATION)}. Cboe holds the copyright; shown for your own research.${state.macro[volKey("VIXCLS")] ? " " + datasetStamp({ ...state.macro[volKey("VIXCLS")], provider: "fred" }) : ""}</small></section>`;
   return head + charts + table_ + sources;
@@ -3730,7 +3731,7 @@ function osaView() {
     const strikes = strikesFor(l);
     return `<tr><td>${sel("side", [["buy", "Buy"], ["sell", "Sell"]], l.qty >= 0 ? "buy" : "sell")}</td><td><input data-osa="${i}" data-field="qty" type="number" min="1" step="1" value="${Math.abs(l.qty)}" aria-label="Quantity"></td><td>${sel("kind", kinds, l.kind)}</td><td>${l.kind === "stock" ? "—" : strikes.length ? sel("strike", strikes.map((k) => [k, fmt(k, k % 1 ? 2 : 0)]), l.strike) : `<input data-osa="${i}" data-field="strike" type="number" step="any" value="${l.strike}" aria-label="Strike">`}</td><td>${l.kind === "stock" ? "—" : expiries.length ? sel("expiry", expiries.map((x) => [x, shortDate(x)]), l.expiry) : `<input data-osa="${i}" data-field="days" type="number" min="1" step="1" value="${l.days}" aria-label="Days to expiry"> d`}</td><td><input data-osa="${i}" data-field="entry" type="number" step="0.01" value="${l.entry}" aria-label="Entry price"><small class="muted">${esc(l.basis || "")}</small></td><td>${l.kind === "stock" ? "—" : `<input data-osa="${i}" data-field="iv" type="number" step="0.5" value="${((l.iv ?? 0) * 100).toFixed(1)}" aria-label="Implied volatility percent">%`}</td><td>${button("✕", "osa-remove", "icon", `data-value="${i}" aria-label="Remove leg"`)}</td></tr>`;
   };
-  const legTable = `<div class="table-wrap"><table class="osa-legs"><thead><tr><th>Side</th><th>Qty</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Entry price</th><th>IV</th><th></th></tr></thead><tbody>${legs.map(legRow).join("")}</tbody></table></div><div class="quant-actions">${button("+ Call", "osa-new", "", 'data-value="call"')}${button("+ Put", "osa-new", "", 'data-value="put"')}${button("+ 100 shares", "osa-new", "", 'data-value="stock"')}${legs.length ? button("Clear", "osa-clear") : ""}${legs.length ? button("Paper trade this", "osa-trade", "primary") : ""}</div>`;
+  const legTable = `<div class="table-wrap"><table class="osa-legs"><thead><tr><th>Side</th><th>Qty</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Entry price</th><th>IV</th><th></th></tr></thead><tbody>${legs.map(legRow).join("")}</tbody></table></div><div class="quant-actions">${button("+ Call", "osa-new", "", 'data-value="call"')}${button("+ Put", "osa-new", "", 'data-value="put"')}${button("+ 100 shares", "osa-new", "", 'data-value="stock"')}${legs.length ? button("Clear", "osa-clear") : ""}${legs.length ? button("Paper trade this", "osa-trade", "primary") : ""}${legs.some((l) => l.qty < 0 && l.kind !== "stock") ? `<small class="muted">${account().margin ? "Simulated margin is on for naked shorts." : "Naked shorts need simulated margin (Portfolio → Option risk)."}</small>` : ""}</div>`;
   if (!legs.length) return `<section class="panel">${head(`<small class="muted">${basis}</small>`)}<p class="muted">Pick a template or add legs. Payoffs, Greeks and scenarios are calculated with Black–Scholes on this computer; they are models of what could happen, not forecasts.</p>${templ}${legTable}</section>`;
   const opts = { r: P.r, q: 0 };
   const exp = lastExpiry(legs);
@@ -3889,14 +3890,23 @@ function optionMarks() {
 }
 // Validates every order together, then records them (through the desktop
 // ledger in the app, which checks them again).
+// Prices the simulated-margin check uses: underlying closes and option
+// premiums (current marks, and each order's own price).
+function tradeMarks(orders = []) {
+  const spot = Object.fromEntries(assets().filter((a) => a.bars?.length).map((a) => [a.symbol, a.bars.at(-1).close]));
+  const premium = Object.fromEntries(Object.entries(optionMarks()).map(([k, v]) => [k, v.price]));
+  for (const o of orders) if (o.instrument === "option") premium[o.symbol] = o.price;
+  return { spot, premium };
+}
 async function applyOrders(orders) {
+  const marks = tradeMarks(orders);
   let next = account();
-  for (const o of orders) next = execute(next, o);
+  for (const o of orders) next = execute(next, o, marks);
   const added = next.trades.slice(account().trades.length);
   if (native) {
     await persist();
     try {
-      for (const o of added) state = await nativeTrade(state.mode, o);
+      for (const o of added) state = await nativeTrade(state.mode, o, marks);
     } catch (e) {
       state = migrate(await load());
       throw e;
@@ -3964,12 +3974,16 @@ function scenTable(grid, rowLabel) {
     .join("")}</tbody></table></div>`;
 }
 function optionRiskPanel(p, marks) {
-  if (!p.positions.some((x) => x.instrument === "option")) return "";
+  if (!p.positions.some((x) => x.instrument === "option"))
+    return `<section class="panel"><div class="panel-head"><h2>Option risk</h2>${button(account().margin ? "Turn off simulated margin" : "Turn on simulated margin", "margin-toggle")}</div><p class="muted">No option positions. Build one in a stock's Strategy lab (<kbd>OSA</kbd>). ${account().margin ? "Simulated margin is on: naked short options are allowed against the margin formula." : "Short calls must be covered or spread and short puts cash-secured or spread, unless you turn on simulated margin."}</p></section>`;
   const groups = bookGroups(p, marks);
   const rows = groups.map((g) => ({ g, k: positionGreeks(g.legs, g.spot, { r: 0.04 }) }));
   const tot = rows.reduce((a, { g, k }) => ({ dd: a.dd + k.delta * g.spot, gamma: a.gamma + (k.gamma * g.spot * g.spot) / 100, theta: a.theta + k.theta, vega: a.vega + k.vega }), { dd: 0, gamma: 0, theta: 0, vega: 0 });
   const grid = bookScenario(groups, { r: 0.04 });
-  return `<section class="panel"><div class="panel-head"><h2>Option risk</h2></div><p class="muted">Greeks and scenarios for everything you hold, options valued at their current marks (chain mids when loaded, otherwise Black–Scholes at the IV recorded with each order). A model, not a forecast: it holds volatility shifts equal across strikes and ignores costs.</p><div class="stats risk-kpis">${kpi("Dollar delta", money(tot.dd), "value change for a 1-unit move, as $ of stock")}${kpi("Gamma", money(tot.gamma), "change in dollar delta for a 1% move")}${kpi("Theta", money(tot.theta) + "/day", "time decay at today's prices")}${kpi("Vega", money(tot.vega) + "/pt", "per volatility point")}</div>${table(
+  const req = requirements(book(account()).holdings, { margin: !!account().margin, ...tradeMarks() });
+  const excess = p.cash - req.required;
+  const marginLine = `<p>${account().margin ? "<b>Simulated margin is on</b>: naked short options are allowed against the standard strategy-based formula (premium + 20% of the stock's value minus the out-of-the-money amount, at least premium + 10%). Brokers require more." : "Simulated margin is off: short calls must be covered or spread, short puts cash-secured or spread."} Held against short options: <b>${money(req.required)}</b> · cash ${money(p.cash)} · ${excess >= 0 ? `excess ${money(excess)}` : `<span class="down">margin call: ${money(-excess)} short. Close or reduce short options.</span>`}</p>`;
+  return `<section class="panel"><div class="panel-head"><h2>Option risk</h2>${button(account().margin ? "Turn off simulated margin" : "Turn on simulated margin", "margin-toggle")}</div>${marginLine}<p class="muted">Greeks and scenarios for everything you hold, options valued at their current marks (chain mids when loaded, otherwise Black–Scholes at the IV recorded with each order). A model, not a forecast: it holds volatility shifts equal across strikes and ignores costs.</p><div class="stats risk-kpis">${kpi("Dollar delta", money(tot.dd), "value change for a 1-unit move, as $ of stock")}${kpi("Gamma", money(tot.gamma), "change in dollar delta for a 1% move")}${kpi("Theta", money(tot.theta) + "/day", "time decay at today's prices")}${kpi("Vega", money(tot.vega) + "/pt", "per volatility point")}</div>${table(
     ["Underlying", "Spot", "Delta (shares)", "Gamma (shares per $1)", "Theta $/day", "Vega $/pt"],
     rows.map(({ g, k }) => `<tr><td>${esc(g.underlying)}</td><td>${money(g.spot)}</td><td>${fmt(k.delta, 1)}</td><td>${fmt(k.gamma, 2)}</td><td>${money(k.theta)}</td><td>${money(k.vega)}</td></tr>`),
   )}<h3>Scenarios · every underlying moves together</h3>${scenTable(grid, (m) => `${m > 0 ? "+" : ""}${(m * 100).toFixed(0)}%`)}</section>`;
@@ -5034,6 +5048,14 @@ async function action(act, value) {
       runHedge();
       render();
       break;
+    case "margin-toggle": {
+      const ac = account();
+      if (!ac.margin && !confirm("Turn on simulated margin for this paper account? Naked short calls and puts become possible, held against a margin formula. Losses on naked short calls are unlimited. Paper only.")) break;
+      ac.margin = !ac.margin;
+      await persist();
+      render();
+      break;
+    }
     case "osa-remove":
       osaState().legs.splice(+value, 1);
       await persist();

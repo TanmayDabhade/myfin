@@ -29,6 +29,25 @@ pub struct Trade {
 pub struct Account {
     pub initial: f64,
     pub trades: Vec<Trade>,
+    /// Simulated margin: naked short options allowed against the margin formula.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub margin: bool,
+}
+
+/// Prices the order was checked against in the interface: underlying spot
+/// and option premium per share, used by the simulated-margin formula.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Marks {
+    #[serde(default)]
+    pub spot: HashMap<String, f64>,
+    #[serde(default)]
+    pub premium: HashMap<String, f64>,
+}
+
+/// Same formula as `nakedMargin()` in src/engine.js, per share.
+pub fn naked_margin(call: bool, strike: f64, spot: f64, premium: f64) -> f64 {
+    let otm = if call { strike - spot } else { spot - strike }.max(0.0);
+    premium + (0.2 * spot - otm).max(0.1 * if call { spot } else { strike })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -76,7 +95,7 @@ fn book(initial: f64, trades: &[Trade]) -> (f64, HashMap<String, Pos>) {
 }
 
 /// (cash that must stay in the account, uncovered short calls).
-fn requirements(pos: &HashMap<String, Pos>) -> (f64, Vec<String>) {
+fn requirements(pos: &HashMap<String, Pos>, margin: bool, marks: &Marks) -> (f64, Vec<String>) {
     use options_math::black::Kind;
     struct Leg {
         kind: Kind,
@@ -99,7 +118,8 @@ fn requirements(pos: &HashMap<String, Pos>) -> (f64, Vec<String>) {
     }
     let mut required = 0.0;
     let mut uncovered = vec![];
-    for (_, (shares, legs)) in by.iter_mut() {
+    for (u, (shares, legs)) in by.iter_mut() {
+        let spot = marks.spot.get(u).copied().filter(|s| *s > 0.0 && margin);
         let mut shares = *shares;
         let longs = |kind: Kind| legs.iter().filter(|l| !l.short && l.kind == kind).map(|l| (l.strike, l.expiry.clone(), l.n)).collect::<Vec<_>>();
         let mut lc = longs(Kind::Call);
@@ -123,7 +143,10 @@ fn requirements(pos: &HashMap<String, Pos>) -> (f64, Vec<String>) {
                 required += k * l.m * (long.0 - l.strike).max(0.0);
             }
             if n > 1e-9 {
-                uncovered.push(format!("{n} {}", l.sym));
+                match spot {
+                    Some(s) => required += n * l.m * naked_margin(true, l.strike, s, marks.premium.get(&l.sym).copied().unwrap_or(0.0)),
+                    None => uncovered.push(format!("{n} {}", l.sym)),
+                }
             }
         }
         let mut sp: Vec<&Leg> = legs.iter().filter(|l| l.short && l.kind == Kind::Put).collect();
@@ -139,14 +162,22 @@ fn requirements(pos: &HashMap<String, Pos>) -> (f64, Vec<String>) {
                 n -= k;
                 required += k * l.m * (l.strike - long.0).max(0.0);
             }
-            required += n * l.m * l.strike;
+            let secured = match spot {
+                Some(s) => l.strike.min(naked_margin(false, l.strike, s, marks.premium.get(&l.sym).copied().unwrap_or(0.0))),
+                None => l.strike,
+            };
+            required += n * l.m * secured;
         }
     }
     (required, uncovered)
 }
 
 impl Account {
+    #[allow(dead_code)] // the desktop command passes marks; tests use this
     pub fn append(&mut self, t: Trade) -> Result<(), String> {
+        self.append_with(t, &Marks::default())
+    }
+    pub fn append_with(&mut self, t: Trade, marks: &Marks) -> Result<(), String> {
         let option = t.is_option();
         if !self.initial.is_finite()
             || self.initial <= 0.
@@ -189,7 +220,7 @@ impl Account {
         let side = t.side.clone();
         next.push(t);
         let (cash, after) = book(self.initial, &next);
-        let (required, uncovered) = requirements(&after);
+        let (required, uncovered) = requirements(&after, self.margin, marks);
         if !uncovered.is_empty() {
             return Err(format!("Short calls must be covered by shares or a long call: {} would be uncovered", uncovered.join(", ")));
         }
@@ -213,18 +244,18 @@ mod tests {
     }
     #[test]
     fn buying_and_duplicate() {
-        let mut a = Account { initial: 1000., trades: vec![] };
+        let mut a = Account { margin: false, initial: 1000., trades: vec![] };
         assert!(a.append(trade()).is_ok());
         assert!(a.append(trade()).is_err());
     }
     #[test]
     fn cannot_overspend() {
-        let mut a = Account { initial: 100., trades: vec![] };
+        let mut a = Account { margin: false, initial: 100., trades: vec![] };
         assert!(a.append(trade()).is_err());
     }
     #[test]
     fn cannot_short() {
-        let mut a = Account { initial: 1000., trades: vec![] };
+        let mut a = Account { margin: false, initial: 1000., trades: vec![] };
         let mut t = trade();
         t.side = "sell".into();
         assert!(a.append(t).is_err());
@@ -235,19 +266,19 @@ mod tests {
         let c260 = "AAPL261218C00260000";
         let p240 = "AAPL261218P00240000";
         // Naked call refused; covered call accepted.
-        let mut a = Account { initial: 50_000., trades: vec![] };
+        let mut a = Account { margin: false, initial: 50_000., trades: vec![] };
         assert!(a.append(opt("1", c260, "sell", 1., 2.)).is_err());
         a.append(Trade { id: "2".into(), qty: 100., price: 248., fee: 0., ..trade() }).unwrap();
         a.append(opt("3", c260, "sell", 1., 2.)).unwrap();
         // The covering shares can't be sold.
         assert!(a.append(Trade { id: "4".into(), side: "sell".into(), qty: 50., price: 250., fee: 0., ..trade() }).is_err());
         // Cash-secured put needs strike × 100.
-        let mut b = Account { initial: 10_000., trades: vec![] };
+        let mut b = Account { margin: false, initial: 10_000., trades: vec![] };
         assert!(b.append(opt("5", p240, "sell", 1., 3.)).is_err());
-        let mut c = Account { initial: 30_000., trades: vec![] };
+        let mut c = Account { margin: false, initial: 30_000., trades: vec![] };
         c.append(opt("6", p240, "sell", 1., 3.)).unwrap();
         // Spread: long 250 call, short 260 call.
-        let mut d = Account { initial: 1_000., trades: vec![] };
+        let mut d = Account { margin: false, initial: 1_000., trades: vec![] };
         d.append(opt("7", c250, "buy", 1., 6.)).unwrap();
         d.append(opt("8", c260, "sell", 1., 2.)).unwrap();
         // No flipping; whole contracts only; a padded symbol isn't accepted.
@@ -255,9 +286,18 @@ mod tests {
         assert!(d.append(opt("10", c250, "buy", 0.5, 6.)).is_err());
         assert!(d.append(opt("11", "AAPL  261218C00250000", "buy", 1., 1.)).is_err());
         // Expiry settlement may be at zero.
-        let mut e = Account { initial: 1_000., trades: vec![] };
+        let mut e = Account { margin: false, initial: 1_000., trades: vec![] };
         e.append(opt("12", c250, "buy", 1., 6.)).unwrap();
         e.append(Trade { source: "expiry".into(), fee: 0., ..opt("13", c250, "sell", 1., 0.) }).unwrap();
         assert!(e.append(opt("14", c250, "buy", 1., 0.)).is_err());
+        // Simulated margin: a naked call is allowed when turned on, against the formula.
+        let marks = Marks { spot: [("AAPL".to_string(), 248.0)].into(), premium: [(c250.to_string(), 5.0)].into() };
+        assert!((naked_margin(true, 250.0, 248.0, 5.0) - 52.6).abs() < 1e-9);
+        let mut f = Account { margin: true, initial: 50_000., trades: vec![] };
+        f.append_with(opt("15", c250, "sell", 1., 5.), &marks).unwrap();
+        let mut g = Account { margin: true, initial: 4_000., trades: vec![] };
+        assert!(g.append_with(opt("16", c250, "sell", 1., 5.), &marks).is_err());
+        let mut h = Account { margin: false, initial: 50_000., trades: vec![] };
+        assert!(h.append_with(opt("17", c250, "sell", 1., 5.), &marks).is_err());
     }
 }

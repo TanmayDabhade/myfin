@@ -294,6 +294,7 @@ fn paper_trade(
     b: tauri::State<Backend>,
     mode: String,
     order: ledger::Trade,
+    marks: Option<serde_json::Value>,
 ) -> Result<Value, String> {
     if !["sample", "market"].contains(&mode.as_str()) {
         return Err("Invalid account".into());
@@ -319,7 +320,8 @@ fn paper_trade(
     if priced.as_ref().is_none_or(|s| state[map].get(s).is_none()) {
         return Err("Import prices for this symbol before trading".into());
     }
-    account.append(order)?;
+    let marks: ledger::Marks = marks.and_then(|m| serde_json::from_value(m).ok()).unwrap_or_default();
+    account.append_with(order, &marks)?;
     state["accounts"][&mode] = serde_json::to_value(account).map_err(|e| e.to_string())?;
     tx.execute(
         "UPDATE workspace SET body=?1 WHERE id=1",

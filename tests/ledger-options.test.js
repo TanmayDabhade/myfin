@@ -42,7 +42,7 @@ test("short calls need shares or a long call; naked calls are refused", () => {
 });
 
 test("short puts are cash-secured or part of a spread", () => {
-  assert.throws(() => execute({ initial: 10000, trades: [] }, opt(P240, "sell", 1, 3)), /must be held against short puts/);
+  assert.throws(() => execute({ initial: 10000, trades: [] }, opt(P240, "sell", 1, 3)), /must be held against short options/);
   const a = execute({ initial: 30000, trades: [] }, opt(P240, "sell", 1, 3));
   assert.equal(requirements(book(a).holdings).required, 24000);
   let s = execute({ initial: 10000, trades: [] }, opt(P230, "buy", 1, 1.5));
@@ -75,4 +75,20 @@ test("portfolio marks options by the given marks", () => {
   assert.equal(p.positions[0].market, 600);
   assert.equal(p.positions[0].markSource, "model");
   assert.ok(Math.abs(p.value - (10000 - 500.65 + 600)) < 1e-9);
+});
+
+import { nakedMargin } from "../src/engine.js";
+test("simulated margin allows naked shorts when turned on", () => {
+  // Short 250 call, stock at 248, premium 5: 5 + max(49.6 − 2, 24.8) = 52.6 per share.
+  assert.ok(Math.abs(nakedMargin("call", 250, 248, 5) - 52.6) < 1e-9);
+  // Deep OTM put floors at 10% of the strike: 1 + max(40 − 60, 14) = 15.
+  assert.ok(Math.abs(nakedMargin("put", 140, 200, 1) - 15) < 1e-9);
+  const marks = { spot: { AAPL: 248 }, premium: { [C250]: 5 } };
+  assert.throws(() => execute({ initial: 50000, trades: [] }, opt(C250, "sell", 1, 5), marks), /simulated margin/);
+  const a = execute({ initial: 50000, trades: [], margin: true }, opt(C250, "sell", 1, 5), marks);
+  assert.ok(Math.abs(requirements(book(a).holdings, { margin: true, ...marks }).required - 5260) < 1e-6);
+  assert.throws(() => execute({ initial: 4000, trades: [], margin: true }, opt(C250, "sell", 1, 5), marks), /Insufficient paper cash/);
+  // A naked put needs less than full cash security with margin on.
+  const p = execute({ initial: 10000, trades: [], margin: true }, opt(P240, "sell", 1, 3), { spot: { AAPL: 248 }, premium: { [P240]: 3 } });
+  assert.equal(book(p).holdings[P240].qty, -1);
 });

@@ -144,9 +144,25 @@ The `RSK` view runs [gs-quant](https://github.com/goldmansachs/gs-quant), Goldma
 - **Term structure:** VIX ÷ VIX3M, with days above 1 (near-term stress) shaded. A stated regime label (Calm, Normal, Elevated, Stressed, plus Inverted) comes from VIX's 1-year percentile; the rule is printed beside it.
 - **Every stock in the workspace:** realized volatility over 21 days, 63 days and a year, and where the 21-day figure sits in its own past year.
 - **`VOL` view:** close-to-close, Parkinson, Garman–Klass, Rogers–Satchell and Yang–Zhang estimators (log returns, 252 days a year), a volatility cone across 10–252-day windows, and rolling 1-month volatility. A day whose open is more than 40% from the prior close (most likely a split the price source didn't adjust for) contributes no overnight return; the page lists those days.
-- **Not yet:** implied volatility for single stocks, skew and option chains. Option chains aren't connected.
+- **Implied volatility per stock:** 30-day at-the-money IV history (recorded and backfilled), IV rank and percentile, implied minus realized, and 90–110% skew. See [Options](#options).
 
 **How it's calculated:** one Rust crate, `src-tauri/crates/options-math`, holds the option pricing (Black–Scholes–Merton, Black-76, Leisen–Reimer American trees with discrete dividends), implied-volatility solving, Greeks, the parity forward, the Treasury-bill rate curve and the realized-volatility estimators. It has no dependencies, so the same code builds for the desktop app and, through `src-tauri/crates/options-wasm`, as a 54 KB WebAssembly module the interface loads (`src/options/math.js`). `scripts/build-wasm.cjs` builds it before `npm run dev`, `build`, `test` and `test:e2e`, adding Rust's `wasm32-unknown-unknown` target the first time. It's tested against textbook values (Hull, Haug), Greek identities and the Black–Scholes PDE, and against independent scipy/numpy reference values (`scripts/options-oracle.py` writes `tests/oracle.txt`): normal distribution to 1e-13, prices and Greeks to 1e-10, implied volatility to 1e-9, realized volatility to 1e-12, in Rust and again through WebAssembly.
+
+## Options
+
+All option data is for your own research, and all trading is paper only.
+
+- **Option monitor (`OMON`):** the chain from Alpaca's free indicative feed (your Alpaca key ID and secret; paper-account keys are enough, and Aperture only reads data). It shows bid/ask, volume, open interest and Aperture's own IV and Greeks. IV uses Black's formula on the put–call-parity forward, from the out-of-the-money option at each strike. The view also has the smile, term structure, an earnings panel (straddle and event-only implied move against past realized moves) and **estimated** gamma exposure under two stated dealer conventions. Indicative quotes are derived from, but are not, exchange (OPRA) quotes. Demo data uses a synthetic chain.
+- **Strategy lab (`OSA`):** legs or templates (spreads, straddles, collars, condors, covered calls). It shows the payoff at expiry, today and any later date; max gain and loss; break-evens; position Greeks; and a price × volatility scenario grid. A **delta-hedge simulator** tests hedging against realized volatility, re-hedge frequency, costs and crash jumps, next to the continuous-hedging theory.
+- **Paper trading:** "Paper trade this" places all legs together, filling at the chain's ask for buys and bid for sells, with a $0.65-per-contract fee. Rules, enforced in both the interface and the desktop ledger:
+  - long options are allowed;
+  - short calls must be covered by 100 shares each or by a long call (a spread);
+  - short puts must be cash-secured or part of a spread;
+  - with **simulated margin** turned on (Portfolio → Option risk), naked shorts are held against the standard strategy-based margin formula.
+  - Expired options settle at intrinsic value against the expiry-day close. Portfolio shows option marks, book Greeks, margin status and scenarios.
+- **History:** a free Massive account (key in Settings → Data sources) backfills about two years of option and stock data in priority order. That covers reference data and contract lists first, then at-the-money contracts (IV history and IV rank), then skew strikes. IV comes from trade prints between 15:30 and 16:00 New York, matched to the stock's price in the same minute. Requests go only to `api.massive.com`, one every 13 seconds. Everything is stored in `options.sqlite` tagged with its source, and **Delete all Massive data** removes it. After each close, Alpaca chains for SPY, QQQ and the watchlist (up to 30) are recorded.
+- **Background recorder:** Settings → Option data installs `aperture --agent`, run every 30 minutes by launchd (macOS), Task Scheduler (Windows) or a systemd user timer (Linux). It does the captures and backfill while the app is closed, then exits. Without it, the open app does the same work.
+- **Maths:** `src-tauri/crates/options-math` (Rust), also compiled to WebAssembly for the interface. See [Volatility](#volatility).
 
 ## Quant Lab (strategy research)
 
