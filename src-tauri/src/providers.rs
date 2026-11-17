@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub const PROVIDERS: [&str; 8] = ["alpha", "twelve", "fred", "sec", "ais", "finnhub", "alpaca", "alpacasecret"];
+pub const PROVIDERS: [&str; 9] = ["alpha", "twelve", "fred", "sec", "ais", "finnhub", "alpaca", "alpacasecret", "massive"];
 
 const ALPHA_KINDS: [&str; 8] = [
     "TIME_SERIES_DAILY",
@@ -39,6 +39,8 @@ pub fn budget(provider: &str) -> Budget {
         "finnhub" => Budget { daily: 3_000, gap: 1, ttl: 1_800 },
         // Past trades change only while the market is open.
         "alpaca" => Budget { daily: 3_000, gap: 1, ttl: 300 },
+        // Massive's free tier allows 5 calls a minute: one every 13 s stays under it.
+        "massive" => Budget { daily: 6_000, gap: 13, ttl: 43_200 },
         _ => Budget { daily: 2_000, gap: 1, ttl: 43_200 },
     }
 }
@@ -52,6 +54,7 @@ pub fn env_name(provider: &str) -> &'static str {
         "finnhub" => "FINNHUB_API_KEY",
         "alpaca" => "ALPACA_API_KEY_ID",
         "alpacasecret" => "ALPACA_API_SECRET_KEY",
+        "massive" => "MASSIVE_API_KEY",
         _ => "FRED_API_KEY",
     }
 }
@@ -76,6 +79,9 @@ pub struct Credentials {
     pub alpaca: String,
     #[serde(default)]
     pub alpacasecret: String,
+    /// Massive (formerly Polygon.io) free tier, for option and stock history.
+    #[serde(default)]
+    pub massive: String,
 }
 
 impl Credentials {
@@ -89,6 +95,7 @@ impl Credentials {
             "finnhub" => &self.finnhub,
             "alpaca" => &self.alpaca,
             "alpacasecret" => &self.alpacasecret,
+            "massive" => &self.massive,
             _ => "",
         }
     }
@@ -112,6 +119,7 @@ impl Credentials {
             "finnhub" => self.finnhub = key,
             "alpaca" => self.alpaca = key,
             "alpacasecret" => self.alpacasecret = key,
+            "massive" => self.massive = key,
             _ => return Err("Unknown provider".into()),
         }
         Ok(())
@@ -127,6 +135,7 @@ impl Credentials {
             finnhub: read("finnhub"),
             alpaca: read("alpaca"),
             alpacasecret: read("alpacasecret"),
+            massive: read("massive"),
         }
     }
     pub fn load(path: &Path) -> Self {
@@ -311,6 +320,7 @@ pub fn display_name(provider: &str) -> &'static str {
         "twelve" => "Twelve Data",
         "finnhub" => "Finnhub",
         "alpaca" => "Alpaca",
+        "massive" => "Massive",
         _ => "FRED",
     }
 }

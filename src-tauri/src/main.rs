@@ -13,6 +13,10 @@ mod analyst;
 mod analyst_host;
 mod analyst_online;
 mod lab;
+mod options;
+mod massive;
+mod recorder;
+mod scheduler;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -50,6 +54,10 @@ struct Backend {
     /// Aperture Analyst: model downloads and the local llama.cpp server.
     analyst: std::sync::Arc<analyst_host::Host>,
     data_dir: std::path::PathBuf,
+    /// Option chains fetched in the last few minutes: symbol → (time, chain).
+    chains: Mutex<HashMap<String, (i64, Value)>>,
+    /// Set to stop a running Massive backfill.
+    backfill_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 #[derive(Default, Clone, serde::Serialize)]
 struct Job {
@@ -1377,7 +1385,140 @@ fn quant_cached(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<Value,
     }
     Ok(Value::Object(out))
 }
+// ---- Option chains, history backfill and the background recorder ----------
+fn recorder_ctx(b: &Backend, by: &str) -> Result<recorder::Ctx, String> {
+    let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
+    let mut keys = Credentials::default();
+    for p in providers::PROVIDERS {
+        let _ = keys.set(p, providers::resolve(&b.env_keys, &saved, p).0.to_string());
+    }
+    Ok(recorder::Ctx { http: b.http.clone(), data_dir: b.data_dir.clone(), keys, by: by.into() })
+}
+/// While the app is open and the background agent isn't installed, the app
+/// does the agent's work itself: end-of-day captures and the backfill.
+async fn recorder_loop(data_dir: std::path::PathBuf) {
+    tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+    loop {
+        if !scheduler::installed() {
+            let ctx = recorder::Ctx { http: recorder::http_client(), keys: recorder::resolved_keys(&data_dir), data_dir: data_dir.clone(), by: "app".into() };
+            recorder::run_once(&ctx, std::time::Duration::from_secs(25 * 60), Default::default()).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+    }
+}
+#[tauri::command]
+async fn options_chain(b: tauri::State<'_, Backend>, symbol: String, spot: Option<f64>, force: Option<bool>) -> Result<Value, String> {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    if !quotes::valid_symbol(&symbol) || symbol.contains(':') {
+        return Err("Option chains cover US-listed stocks and ETFs.".into());
+    }
+    if !force.unwrap_or(false) {
+        if let Some((t, v)) = b.chains.lock().map_err(|_| "Cache unavailable")?.get(&symbol) {
+            if now() - t < 600 {
+                return Ok(v.clone());
+            }
+        }
+    }
+    let ctx = recorder_ctx(&b, "app")?;
+    let chain = recorder::alpaca_chain(&ctx, &symbol, spot).await?;
+    // After the close, an opened chain also counts as that day's capture.
+    if recorder::capture_window(chain.as_of) {
+        if let Ok(db) = ctx.open_options() {
+            if !recorder::captured_today(&db, &symbol, chain.as_of) {
+                let _ = options::save_chain(&db, &chain, "alpaca", "app");
+            }
+        }
+    }
+    let v = serde_json::to_value(&chain).map_err(|e| e.to_string())?;
+    b.chains.lock().map_err(|_| "Cache unavailable")?.insert(symbol, (now(), v.clone()));
+    Ok(v)
+}
+#[tauri::command]
+fn options_history(b: tauri::State<Backend>, symbol: String) -> Result<Value, String> {
+    let db = options::open(&b.data_dir.join("options.sqlite")).map_err(|e| e.to_string())?;
+    options::history(&db, &symbol.trim().to_ascii_uppercase())
+}
+#[tauri::command]
+fn backfill_status(b: tauri::State<Backend>) -> Result<Value, String> {
+    let ctx = recorder_ctx(&b, "app")?;
+    let db = ctx.open_options()?;
+    let mut s = recorder::backfill_status(&db)?;
+    s["configured"] = json!(!ctx.keys.massive.is_empty());
+    s["symbols_planned"] = json!(recorder::recorder_list(&ctx));
+    Ok(s)
+}
+#[tauri::command]
+fn backfill_start(b: tauri::State<Backend>, symbols: Option<Vec<String>>) -> Result<Value, String> {
+    let ctx = recorder_ctx(&b, "app")?;
+    if ctx.keys.massive.is_empty() {
+        return Err("Add your free Massive key in Settings → Data sources first.".into());
+    }
+    let list: Vec<String> = match symbols {
+        Some(s) => s.into_iter().map(|x| x.trim().to_ascii_uppercase()).filter(|x| quotes::valid_symbol(x) && !x.contains(':')).take(30).collect(),
+        None => recorder::recorder_list(&ctx),
+    };
+    {
+        let db = ctx.open_options()?;
+        let _ = db.execute("DELETE FROM meta WHERE key='massive:paused'", []);
+        recorder::plan_backfill(&db, &list, options::ny_clock(now()).0)?;
+    }
+    b.backfill_stop.store(false, std::sync::atomic::Ordering::Relaxed);
+    let stop = b.backfill_stop.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = recorder::run_backfill(&ctx, std::time::Instant::now() + std::time::Duration::from_secs(24 * 3600), stop).await;
+    });
+    backfill_status(b)
+}
+#[tauri::command]
+fn backfill_pause(b: tauri::State<Backend>, paused: bool) -> Result<Value, String> {
+    let db = options::open(&b.data_dir.join("options.sqlite")).map_err(|e| e.to_string())?;
+    if paused {
+        options::meta_set(&db, "massive:paused", "1").map_err(|e| e.to_string())?;
+        b.backfill_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        db.execute("DELETE FROM meta WHERE key='massive:paused'", []).map_err(|e| e.to_string())?;
+    }
+    drop(db);
+    backfill_status(b)
+}
+#[tauri::command]
+fn options_purge(b: tauri::State<Backend>, source: String) -> Result<usize, String> {
+    if !["massive", "alpaca"].contains(&source.as_str()) {
+        return Err("Unknown source".into());
+    }
+    if source == "massive" {
+        b.backfill_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    b.chains.lock().map_err(|_| "Cache unavailable")?.clear();
+    let db = options::open(&b.data_dir.join("options.sqlite")).map_err(|e| e.to_string())?;
+    options::purge(&db, &source)
+}
+#[tauri::command]
+fn agent_status(b: tauri::State<Backend>) -> Result<Value, String> {
+    let db = options::open(&b.data_dir.join("options.sqlite")).map_err(|e| e.to_string())?;
+    Ok(json!({ "installed": scheduler::installed(), "runs": recorder::last_runs(&db, 8), "log": b.data_dir.join("agent.log").display().to_string() }))
+}
+#[tauri::command]
+fn agent_install(b: tauri::State<Backend>) -> Result<Value, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    scheduler::install(&exe, &b.data_dir)?;
+    agent_status(b)
+}
+#[tauri::command]
+fn agent_remove(b: tauri::State<Backend>) -> Result<Value, String> {
+    scheduler::remove()?;
+    agent_status(b)
+}
 fn main() {
+    // Headless background run (installed by Settings → Option data): no window.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--agent") {
+        let dir = args.iter().position(|a| a == "--data").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
+        std::process::exit(match dir {
+            Some(d) if d.is_dir() => recorder::agent_main(d),
+            _ => 2,
+        });
+    }
     tauri::Builder::default().plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init()).setup(|app|{let path=app.path().app_data_dir()?;
             // Bring over data from when the app was called Market Lens.
@@ -1388,7 +1529,7 @@ fn main() {
                     _ => {}
                 }
             }
-            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;db.execute_batch(lab::SCHEMA)?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone()});let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![lab_put,lab_get,lab_list,quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read,analyst_configure,analyst_pick_model,analyst_set_key,analyst_sign_out,analyst_sign_in,analyst_models]).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
+            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;db.execute_batch(lab::SCHEMA)?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone(),chains:Default::default(),backfill_stop:Default::default()});options::open(&path.join("options.sqlite")).map_err(|e|e.to_string())?;tauri::async_runtime::spawn(recorder_loop(path.clone()));let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![lab_put,lab_get,lab_list,quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read,analyst_configure,analyst_pick_model,analyst_set_key,analyst_sign_out,analyst_sign_in,analyst_models,options_chain,options_history,backfill_status,backfill_start,backfill_pause,options_purge,agent_status,agent_install,agent_remove]).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
         // Never leave the AI engine running (and holding memory) after quitting.
         if let tauri::RunEvent::Exit=event{let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::block_on(analyst_host::stop(&host));}
     });
