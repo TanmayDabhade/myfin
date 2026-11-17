@@ -3,6 +3,17 @@
 Status: research only, no implementation. Written 2026-11-17 against `main` at `096acef` (after PR #47).
 Companion documents: [Architecture](DERIVATIVES_ARCHITECTURE.md) · [Product design](DERIVATIVES_PRODUCT_DESIGN.md) · [Roadmap](DERIVATIVES_ROADMAP.md) · [Learning map](DERIVATIVES_LEARNING_MAP.md)
 
+## Decisions recorded 2026-11-17
+
+| Question | Decision | Effect on this document |
+|---|---|---|
+| Data budget | **$0** | Paid sources stay in the tables for reference only. The plan uses Alpaca's free indicative feed, FRED, existing providers and Massive's **free** Options Basic tier for an optional, slow end-of-day backfill (§3.1) |
+| India | **Deferred** | §3.3 stays as background research. Nothing Indian is scheduled |
+| Short options on paper | Covered and spread-only first; **naked shorts with a margin model as a stretch goal** | See Architecture §6 |
+| Snapshot recorder | **A background agent is the primary path** | The recorder runs headless, without the app window. Option maths must therefore run in Rust. See Architecture §2–§4 |
+| Maths language | **Rust as the single implementation**, compiled to WebAssembly for the interface; Python only as a test oracle | Measured speeds in §6.3 |
+| Legal risk | **Nothing that could cause trouble** | Binding rules in §10 |
+
 Labels used throughout:
 
 | Label | Meaning |
@@ -99,7 +110,11 @@ Every figure shown must carry one of these classes, in the UI and in exports:
 | Cboe `cdn.cboe.com` delayed-quotes JSON | — | Delayed | Some | Some | None | **Undocumented, no published terms** | **Rejected.** `docs/ROADMAP.md` "Data contract" requires public documented endpoints |
 | ORATS, Cboe DataShop, IVolatility, OptionMetrics | Hundreds of $/mo to institutional | EOD to real-time | Yes, with smoothed surfaces | Yes | Decades | Commercial | Only path to **deep historical IV and surfaces** without waiting. Phase 5+ decision |
 
-**Conclusion:** a credible US options workspace can be built at **$0** with Alpaca indicative data, our own IV computation and our own EOD snapshot recorder. **$29/month (Massive Starter)** buys real delayed quotes, daily OI and two years of contract bars, which removes most of the caveats. Neither gives historical IV older than what we record or recompute ourselves.
+**Conclusion:** a credible US options workspace can be built at **$0** with Alpaca indicative data, our own IV computation and our own EOD snapshot recorder. Paid tiers (Massive Starter at $29/month and up) are **out of plan** under the $0 budget. They are listed only so the trade-off stays visible. No tier gives historical IV older than what we record or recompute ourselves.
+
+**Optional free backfill (Massive Options Basic, $0, individual use).** Basic includes end-of-day contract aggregates for 2 years (*verified (web)*, custom-bars endpoint: "Options Basic · End-of-day · 2 years"). One request returns the daily bars of **one contract** for a date range. At 5 calls/minute, a constant-maturity ATM IV history needs roughly 10 strikes near the money × ~24 monthly expiries ≈ 240 contracts per symbol, about **50 minutes per symbol**. Over a weekend the background agent could backfill a 20–30 symbol watchlist. The result is approximate: closes are last trades, sometimes hours stale, and there is no bid/ask. It is stored as `quality.source = "backfill"` and drawn differently from recorded data. It needs a second free account (Massive). If the user doesn't want one, recording from day one is the only path.
+
+Alpha Vantage `HISTORICAL_OPTIONS` stays unverified. Alpha Vantage's own documentation page didn't load its options section in this session. Even if it is free, the 25/day budget belongs to financial statements, so it isn't in the plan.
 
 ### 3.2 Volatility indices
 
@@ -107,14 +122,16 @@ Every figure shown must carry one of these classes, in the UI and in exports:
 |---|---|---|
 | VIX daily close since 1990 | FRED `VIXCLS` (Cboe copyright, citation required) and Cboe `VIX_History.csv` | **Available now** through the existing FRED key. *Verified (web)* |
 | VIX3M (93-day) | FRED `VXVCLS`; Cboe `VIX3M_History.csv` (OHLC) | Available now. *Verified (web)* |
-| VIX9D | Cboe CSV (from 2011, OHLC) | Same CDN pattern as above, but the exact URL is **unverified** |
+| VIX9D | Cboe CSV (from 2011, OHLC) | **Not planned.** The download URL is unverified. FRED covers VIX and VIX3M, so Cboe files aren't needed |
 | VVIX, SKEW, VIX1D, VXN, RVX, GVZ, OVX | Cboe historical-data page; several also on FRED | **Unverified** per series. Check each id before building |
 | VIX futures term structure | Cboe Futures Exchange (CFE) historical data | Daily settlement files appear free. **Unverified** licence |
-| India VIX | NSE publishes history on its India VIX page and in its reports section. *Verified (web)* | Manual download only. NSE Data's portal terms prohibit *"systematic or automated data collection"*. *Verified (web), clause truncated* |
+| India VIX | NSE publishes history on its India VIX page and in its reports section. *Verified (web)* | **Deferred.** Manual download only if resumed; NSE Data's portal terms prohibit *"systematic or automated data collection"*. *Verified (web), clause truncated* |
 
 FRED's `limit=500` (`providers.rs:265`) gives about 2 years of daily values. A 1-year IV rank and percentile on VIX needs at least 252 points, so this works, but a regime study across 2008/2020 needs the limit raised or pagination (`offset`/`observation_start`). That is a small Rust change.
 
-### 3.3 Indian derivatives (NIFTY, BANKNIFTY)
+### 3.3 Indian derivatives (NIFTY, BANKNIFTY), deferred
+
+*Deferred by decision on 2026-11-17. Kept as background research for when India is resumed.*
 
 | Fact | Status |
 |---|---|
@@ -166,7 +183,7 @@ Legend for **Data**: E = existing provider, F = free with a new adapter, P = pai
 
 | Metric | Raw inputs | History needed | Computable in-house? | Model | Data | Delayed OK? | Cost | Reliability |
 |---|---|---|---|---|---|---|---|---|
-| IV from a market price | Bid/ask (or settle), spot or forward, strike, expiry timestamp, rate, dividends/forward, exercise style | None | Yes | BSM/Black-76 inversion for European; binomial or de-Americanized for American | F (Alpaca), P (Massive) | Yes | µs per contract; trivial | High for liquid OTM near-ATM; **low** for deep ITM American, stale or wide quotes, and below-intrinsic mids (no IV exists) |
+| IV from a market price | Bid/ask (or settle), spot or forward, strike, expiry timestamp, rate, dividends/forward, exercise style | None | Yes | BSM/Black-76 inversion for European; binomial or de-Americanized for American | F (Alpaca); paid tiers excluded | Yes | ~0.25 µs per contract (measured, §6.3) | High for liquid OTM near-ATM; **low** for deep ITM American, stale or wide quotes, and below-intrinsic mids (no IV exists) |
 | Historical IV (ATM 30d constant maturity) | Daily chain snapshots | ≥252 trading days for rank | Yes, from snapshots | Interpolate total variance between bracketing expiries | Record from day 1 (F). Backfill from Massive contract EOD bars (P, 2 yrs). VIX for SPX (E) | EOD | ~1 row/symbol/day | High once recorded. Backfill from EOD **last trades** is noisy (stale prints); prefer close-time mids |
 | IV vs realized | IV series + OHLC | ≥30 days | Yes | RV estimators §6.2 | E + F | EOD | Trivial | High, provided windows are matched (30-day IV vs **next** 30-day RV) |
 | IV rank / percentile | IV history | 252 days | Yes | rank = (IV − min)/(max − min); percentile = share of days below | E for VIX/VIX3M now; F for stocks after a year of recording | EOD | Trivial | Meaningless before ~1 year of data. The UI must show "n days of history" |
@@ -238,7 +255,7 @@ All are **derived** and become available as soon as a chain exists: spot moneyne
 | Expected vs realized move | |close(after) / close(before) − 1| vs implied | E (bars) + recorded chains | Use the close before the announcement and the close after (or open after for AMC, chosen by the user) |
 | IV crush | ATM IV of the event expiry before vs after | Recorded EOD snapshots | Needs the pre-event snapshot **recorded at the time**. Not reconstructible without paid history |
 | Option value decomposition across an event | ΔV ≈ Δ·dS + ½Γ·dS² + vega·dσ + θ·dt + residual, or exact full revaluation split by sequential input changes | Snapshots before and after | **A long straddle can make money despite IV crush** if the move is larger than implied. The decomposition shows exactly which input moved the value, which is the answer to "did crush kill the trade?" |
-| Historical event studies | Panel of past events per symbol | Earnings history (Alpha Vantage `EARNINGS` dates; E) + our recorded snapshots or paid history | Starting at $0, the study covers only **realized** moves (bars exist). Implied-move history needs a year of recording or Massive EOD aggregates (P) |
+| Historical event studies | Panel of past events per symbol | Earnings history (Alpha Vantage `EARNINGS` dates; E) + our recorded snapshots or paid history | Starting at $0, the study covers only **realized** moves (bars exist). Implied-move history needs recording, or the optional free Massive Basic backfill (approximate) |
 | Macro events (FOMC, CPI) | Same decomposition on SPY/SPX | Event dates (new, small) | Index event premia are small and can be swamped by term-structure noise |
 | Dividends, corporate actions | Early-exercise risk on calls before ex-date; adjusted contracts | Ex-dates (partial) | Flag, don't model, until a dividend source is wired |
 
@@ -286,7 +303,15 @@ Annualize with 252. Use log returns (today's `engine.js risk()` uses arithmetic 
 - Bracket: σ ∈ [1e-4, 5.0]. Reject the price if it is outside [intrinsic·DF, upper bound], where the upper bound is S·e^{−qT} for a call. Those contracts get *no IV*, not a clamped one.
 - Method: Newton on vega from a Brenner–Subrahmanyam initial guess (σ₀ ≈ √(2π/T)·C/S), falling back to Brent when vega < 1e-8 or a step leaves the bracket. Tolerance 1e-10 in price, max 100 iterations. Jäckel's "Let's Be Rational" gives machine precision in two iterations, but the extra code isn't worth it at this scale.
 - For American contracts, the solver wraps the binomial pricer (≈ 200–500 steps; Leisen–Reimer converges much faster than CRR for the same step count).
-- Cost: ~1–5 µs per European contract in JS; a full 5,000-contract chain in ≈ 25 ms. Binomial at 300 steps is ≈ 0.2 ms per price, ≈ 2 ms per IV, so ≈ 10 s for a 5,000-contract American chain. Restrict binomial to ITM/near-ex-date contracts, or run it in the worker.
+- **Measured cost** (2026-11-17, Intel i9-9880H, same algorithms in both languages, identical outputs to 1e-3 over 1M evaluations; erf-approximation normal CDF, Newton IV, CRR tree with precomputed node prices):
+
+| Operation | JavaScript (Node 24, V8) | Rust 1.98 (`-O`) |
+|---|---|---|
+| BSM price + vega | ~80 ns | ~44 ns |
+| IV solve (Newton, to 1e-10) | ~480 ns | ~240 ns |
+| American put, CRR 300 steps | ~102 µs | ~69 µs |
+
+  That works out to a 5,000-contract European chain in ≈ 1–2.5 ms, and an American chain (≈ 10 tree prices per IV) in ≈ 3.5 s in Rust or ≈ 5 s in JS. Rust is 1.5–2× faster, and both are fast enough for interactive use. **The language choice is decided by the headless background agent, not by speed** (Architecture §2). WebAssembly speed was not measured; it is usually close to native for scalar floating-point code (*unverified*).
 
 ### 6.4 Greeks
 
@@ -300,15 +325,15 @@ Analytic closed forms for BSM/Black-76 (Δ, Γ, ν, Θ, ρ, vanna, charm, vomma,
 
 ### 6.6 Portfolio scenarios and Monte Carlo
 
-- **Full revaluation grid:** spot shocks −30%…+20% × vol shocks −10…+30 vol points × horizon (today, +1 week, expiry). Each cell reprices every position. That is a few hundred thousand BSM evaluations, about 10 ms in a worker.
+- **Full revaluation grid:** spot shocks −30%…+20% × vol shocks −10…+30 vol points × horizon (today, +1 week, expiry). Each cell reprices every position. That is a few hundred thousand BSM evaluations, about 10–20 ms in Rust or WebAssembly (from the measured ~44 ns per price).
 - **Monte Carlo:** reuse the `quant.py` block bootstrap for underlying paths. For hedging simulations, add GBM and a jump-diffusion toggle so users can see how hedging fails under jumps. Seeded and recorded in the manifest, as Quant Lab runs are.
 - MC is justified only for path-dependent questions (hedging P&L, drawdown under a strategy). Vanilla options are priced in closed form or on a tree, never by MC.
 
 ### 6.7 Verification methodology
 
-1. **Reference values** from Hull's textbook examples and Haug's *Complete Guide to Option Pricing Formulas*, encoded as `node --test` fixtures (as `tests/quant.test.js` does today).
+1. **Reference values** from Hull's textbook examples and Haug's *Complete Guide to Option Pricing Formulas*, encoded as `cargo test` fixtures in `crates/options-math`.
 2. **Identities:** parity, the Greek relations above, Γ = ∂Δ/∂S by finite difference, the BSM PDE residual Θ + ½σ²S²Γ + (r − q)SΔ − rV ≈ 0.
-3. **Cross-implementation:** JS results vs an independent scipy implementation run through the bundled Python, on random inputs, in CI.
+3. **Cross-implementation:** Rust results, native and WebAssembly, against an independent scipy implementation run through the bundled Python, on random inputs, in CI.
 4. **Vendor cross-check (informational, not a test):** our IV vs Alpaca/Massive IV per contract. Show the difference distribution in a debug view. Large disagreements usually reveal timestamp or dividend issues.
 5. **Golden snapshots:** a frozen chain JSON fixture with expected IVs and Greeks, so refactors can't change numbers silently, mirroring Quant Lab's result hashes.
 
@@ -341,7 +366,7 @@ Analytic closed forms for BSM/Black-76 (Δ, Γ, ν, Θ, ρ, vanna, charm, vomma,
 | A year of EOD snapshots | ≈ 2.3 GB raw; ≈ 0.5 GB if wings beyond 5Δ and >1 yr expiries are dropped, or if only the derived per-expiry summary is kept for history | Keep full chains for 30–90 days and derived summaries (ATM IV per expiry, 25Δ RR/BF, SVI params, GEX by strike) forever |
 | Derived daily summary | ~2–5 KB per symbol per day | 30 symbols × 10 years ≈ 1.5 GB worst case; realistically < 200 MB |
 | Alpaca snapshot calls | 1 call per 1,000 contracts (pagination) | ~3–10 calls per symbol; 30 symbols ≈ 300 calls per EOD run, needs a budget entry in `providers.rs` |
-| IV + Greeks for a full chain | < 50 ms JS (European), seconds for American binomial | Worker |
+| IV + Greeks for a full chain | ≈ 1–2.5 ms (European); ≈ 3.5 s American binomial, measured in Rust (§6.3) | Native in the agent and commands; WebAssembly in the interface |
 | SVI fit | ~5–50 ms per expiry in scipy | Batched in one Python start (the `quant.py` batch pattern) |
 
 ---
@@ -352,6 +377,35 @@ Analytic closed forms for BSM/Black-76 (Δ, Γ, ν, Θ, ρ, vanna, charm, vomma,
 |---|---|
 | **Supportable immediately (existing providers)** | VIX/VIX3M levels, term-structure ratio, VIX IV rank/percentile; realized-vol estimators and vol cones on every stock; T-bill rate curve; earnings calendars for event timing; an options **math and payoff lab** using user-entered or model prices (clearly labelled theoretical) |
 | **Free with one new adapter (Alpaca, credentials already stored)** | Delayed/indicative chains with vendor and own IV/Greeks, daily OI, smile and term structure, payoff with market mids, an EOD snapshot recorder that builds Aperture's own IV history from day one |
-| **Affordable ($29/mo Massive Starter)** | Real delayed quotes (no "indicative" caveat), daily OI, 2 years of contract EOD aggregates to backfill approximate IV history, corporate actions |
+| **Free with a second account (Massive Options Basic, optional)** | Slow EOD backfill of approximate IV history (2 years), corporate actions, contract reference data |
+| **Excluded by the $0 budget** | Real (non-indicative) delayed quotes from Massive Starter ($29/mo) and above |
 | **Needs significant paid infrastructure** | Historical IV surfaces older than our own recording, intraday OPRA quotes and trades, aggressor-signed volume for GEX, real-time Indian F&O |
 | **Not possible from public data** | Actual dealer positions or inventory; true direction of open interest |
+
+---
+
+## 10. Staying out of trouble (binding rules)
+
+These rules apply to every feature in this plan, including the background agent. They extend the "Data contract" in `docs/ROADMAP.md`. This is an engineering policy, not legal advice. Provider terms change, so reread them before adding any new source.
+
+**Where data comes from**
+1. Only **documented, public APIs** reached with **the user's own keys**. No scraping, no undocumented endpoints (NSE `option-chain` API, Cboe `cdn.cboe.com` quote JSON), and no reverse-engineered app or broker endpoints.
+2. **Free-plan limits are enforced locally, in the agent too.** The agent and the app share the `requests` table, so the daily budget per key is counted once across both. No key sharing, key rotation, proxies or retry storms.
+3. **Read-only broker access.** The Alpaca integration only *reads* market data, contract reference and the market calendar. Aperture never calls an order, position-changing or account-changing endpoint. The Settings copy recommends **paper-account Alpaca keys** so a live brokerage account is never involved.
+
+**Who can see the data**
+4. **Personal use only. Alpaca's market data and Massive's Basic tier are licensed for individual use.** Aperture must not redistribute them:
+   - No recorded chains, IV history or vendor responses are committed to the repo, published on the project site, or bundled into installers.
+   - Test fixtures are **synthetic**, matching the provider's response *shape* but containing no real data.
+   - Screenshots and demo captures (`scripts/capture-demo.cjs`, `site/`) use **Demo data** only.
+   - Exports are labelled "For your own research. Check the data provider's terms before sharing."
+5. **Index data copyright.** VIX and VIX3M from FRED carry a Cboe copyright and a citation requirement. The UI cites "Cboe, retrieved from FRED" beside the series. The series is not re-published.
+6. **Non-professional status.** Free and individual tiers assume the user is a non-professional subscriber: not using the data for a business or as a registered market professional. If that ever changes, the data plan has to change too. The indicative feed avoids OPRA fees, but not provider terms.
+
+**What the app says and does**
+7. **Paper only.** No order routing and no real-money execution, at any phase. Naked shorts and margin are paper simulations, labelled as such.
+8. **Not investment advice.** No buy/sell signals presented as recommendations. Estimates (GEX, risk-neutral probabilities, implied moves) keep their class labels everywhere, including in Aperture Analyst answers. This matches the Analyst rules already in `src/analyst.js`.
+9. **A visible background agent.** It is opt-in, listed in Settings with its last run and log, removable with one click, and removed on uninstall. Nothing hidden or self-reinstalling.
+
+**Deferred work**
+10. **India stays deferred.** When it returns, the only routes are the user's own broker API under that broker's terms, or files the user downloads and imports manually.

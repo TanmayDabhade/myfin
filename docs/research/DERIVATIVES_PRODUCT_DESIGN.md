@@ -14,7 +14,7 @@ Status: proposal. Written 2026-11-17. Follows Aperture's existing interaction mo
 | `OMON` | Option monitor (chain) | Stock page | 2 |
 | `EVT` | Events: implied vs realized move, IV crush | Stock page | 3 |
 | `GEX` | Estimated gamma exposure (model) | Stock page | 5 |
-| `VIX` / page **Volatility** | VIX, VIX3M, term ratio, regimes, India VIX (imported) | Markets group in sidebar | 1 |
+| `VIX` / page **Volatility** | VIX, VIX3M, term ratio, regimes (India VIX deferred) | Markets group in sidebar | 1 |
 | `PRSK` | Portfolio risk: Greeks, scenario grid, hedging | Portfolio page tab | 4 |
 
 3. **Every derived value is clickable to its inputs.** Hover shows the class (Observed/Derived/Model/Simulation), the inputs and the formula name. This is the "make uncertainty visible" requirement, and it is also the main learning surface.
@@ -173,7 +173,7 @@ Realized-move history (bars only) is available in Phase 1. Implied history accru
 │ Term ratio VIX/VIX3M history   │ Cross-asset (your watchlist)  ATM IV 30d · RV 30d · IV−RV ·  │
 │ inversions shaded              │ IV rank (n days) — sortable table                             │
 ├───────────────────────────────┴────────────────────────────────────────────────────────────────┤
-│ India VIX  — import NSE CSV [Import…]  (NSE terms don't allow automated downloads) ⓘ           │
+│ Attribution: VIX and VIX3M © Cboe, retrieved from FRED                                         │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -215,7 +215,7 @@ The current "uniform asset-price shock" panel is replaced by the scenario grid o
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Multi-leg orders come from OSA's leg list as one atomic paper order. Short legs are allowed only when covered, cash-secured or inside a defined-risk spread (Phase 4 rule; see Architecture §5).
+Multi-leg orders come from OSA's leg list as one atomic paper order. Short legs are allowed only when covered, cash-secured or inside a defined-risk spread (Phase 3; see Architecture §6). Naked shorts with simulated margin are a stretch goal after M3.
 
 ## 11. Integrations with existing features
 
@@ -252,10 +252,28 @@ Multi-leg orders come from OSA's leg list as one atomic paper order. Short legs 
 | Theta decay surface (3D) | **Skip** | The 2D curves say the same thing |
 | Gamma flip as a single headline number | **Skip** | Implies false precision; show the profile and its range across conventions instead |
 
-## 13. Labelling rules (UI copy)
+## 13. Background recorder (Settings → Reference data)
+
+```
+┌ Option chain recorder ────────────────────────────────────────────────────────────────────────┐
+│ Background agent  ● Installed · runs every 30 min · captures after 16:15 ET on trading days     │
+│ Last capture  Nov 17, 16:22 ET · 30 symbols · 71,840 contracts · 6.8 MB   Next: Nov 18          │
+│ History  SPY 41 days · AAPL 41 days · NVDA 12 days … (gaps: Nov 3 — computer asleep)           │
+│ Calls today  Alpaca 212 (shared with the app's budget)                                          │
+│ [View log]  [Remove background agent]   Keep full chains for [90 days ▾]  Summaries: forever    │
+│ What it does: reads option quotes from your Alpaca account (read-only, never places orders),    │
+│ computes IV and Greeks on this computer, and saves them here. Nothing is uploaded or shared.    │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Before the agent is installed, the panel explains the same thing and offers **Install background agent**. The in-app recorder is used meanwhile, and captures are tagged by which one made them.
+
+## 14. Labelling rules (UI copy)
 
 - Header badge per view: `Observed · Alpaca indicative · 15:58 ET` / `Model · BSM on parity forward` / `Simulation · seed 2148…`.
 - IV rank and percentile always show **n days of history**. With fewer than 252 days: "IV rank needs a year of history; 41 days recorded."
 - Probabilities from N(d2) are "risk-neutral probability", never "chance".
 - GEX: "Estimated from open interest under an assumed dealer side. Dealer positions are not public."
 - Demo mode: a synthetic chain with the same "Demo data · synthetic" tag used for prices today.
+- Exports of recorded data: "For your own research. Check the data provider's terms before sharing." (Feasibility §10).
+- Site screenshots and demo captures use demo data only.

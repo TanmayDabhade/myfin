@@ -1,20 +1,31 @@
 # Derivatives Analytics — Roadmap
 
-Status: proposal for review. Nothing here is implemented. Written 2026-11-17.
-Efforts assume one developer working in the existing codebase: **Low** ≈ ≤ 3 days, **Medium** ≈ 1–2 weeks, **High** ≈ 3+ weeks.
+Status: proposal for review. Nothing here is implemented. Written 2026-11-17, revised the same day with the decisions below.
+Efforts assume one developer in the existing codebase: **Low** ≈ ≤ 3 days, **Medium** ≈ 1–2 weeks, **High** ≈ 3+ weeks.
 
-## 1. What changed from the starting hypothesis, and why
+## 0. Decisions (2026-11-17)
 
-| Hypothesis | Revised | Reason |
+| # | Decision |
+|---|---|
+| 1 | **Data budget $0.** No paid feeds. Free sources: Alpaca's indicative options feed (existing key), FRED, existing providers. Optional: Massive's free Options Basic tier for a slow EOD backfill and corporate actions |
+| 2 | **India deferred.** Nothing Indian is scheduled |
+| 3 | **Covered and spread-only shorts** are planned. **Naked shorts with a margin model are a stretch goal** |
+| 4 | **A background agent is the primary recorder.** It runs headless on an OS schedule; the in-app recorder is the fallback |
+| 5 | **Rust is the single maths implementation.** Measured 1.5–2× faster than JS (Feasibility §6.3). The deciding reason is that the headless agent has no JS engine. It compiles to WebAssembly for the interface |
+| 6 | **Nothing that could cause trouble.** The binding rules are in [Feasibility §10](DERIVATIVES_FEASIBILITY.md#10-staying-out-of-trouble-binding-rules) |
+
+## 1. How the plan differs from the original phase hypothesis
+
+| Original phase | Now | Reason |
 |---|---|---|
-| Phase 1 "foundational analytics" | Kept, but defined as **things that need no new data provider**: options math, realized vol, VIX/rates from FRED, theoretical strategy lab | FRED (already wired) carries VIX, VIX3M and T-bill rates; Twelve Data bars are OHLC. Real user value at zero data cost |
-| Phase 2 options research | Kept, and it **starts the EOD snapshot recorder as early as possible** | IV rank, IV history, event IV crush and skew history all need *time*. No free source provides historical IV, so every week without recording is lost history |
-| Phase 3 advanced vol, Phase 4 portfolio | **Swapped** | Advanced vol (IV rank, event studies with implied moves, VRP on single names) is gated by months of recorded history. Portfolio Greeks and options paper trading depend only on Phase 2 and are core to Aperture's paper-trading identity, so they fill the waiting time |
-| Hedging in Phase 4 | Delta-hedge **simulator** moves to Phase 3 | It needs only underlying paths (already in the workspace) and the Phase 1 pricer |
-| GEX in Phase 5 | Kept in Phase 5 | Its assumptions are the weakest of anything here. It depends on chains, OI history and a mature quality layer |
-| India in scope | **User-imported EOD only** until a broker adapter is chosen | NSE terms prohibit automated collection (Feasibility §3.3) |
+| Phase 1 foundational analytics | Kept, defined as **work that needs no new provider**: the Rust maths crate, realized vol, VIX and rates from FRED, a theoretical strategy lab | FRED already carries VIX, VIX3M and T-bills; Twelve Data bars are OHLC |
+| Phase 2 options research | Kept, and it **ships the background agent** so history starts accruing | No free source has historical IV. Every unrecorded day is lost |
+| Phase 3 advanced vol / Phase 4 portfolio | **Swapped** | Advanced vol waits on months of recorded history. Portfolio and options paper trading only need Phase 2 |
+| Hedging in Phase 4 | Simulator moves to Phase 3 | It needs only underlying paths and the pricer |
+| GEX in Phase 5 | Kept | Weakest assumptions; needs mature quality checks and OI history |
+| India | Deferred | Decision 2 |
 
-**The time-gated dependency:** IV rank and percentile need 252 recorded trading days. A recorder that starts at Milestone 2 gives single-name IV rank around **Milestone 2 + 12 months**, unless Massive EOD backfill is bought (approximate, last-trade-based). VIX IV rank is available at Milestone 1 because VIX history is on FRED.
+**Time-gated:** single-name IV rank needs 252 recorded trading days. If the agent starts at Milestone 2, IV rank arrives around **M2 + 12 months**, or sooner and approximate with the optional Massive Basic backfill. VIX IV rank is available at M1 from FRED history.
 
 ## 2. Phases and features
 
@@ -22,138 +33,142 @@ Efforts assume one developer working in the existing codebase: **Low** ≈ ≤ 3
 
 | Feature | Research purpose | Existing integration | Required data | Data availability | Mathematical model | Effort | Dependencies | Reliability | Priority |
 |---|---|---|---|---|---|---|---|---|---|
-| Options math core `src/options/{bsm,iv,american,forward,rates}.js` + test suite + Python oracle | Correct, reproducible prices, IV and Greeks; everything else depends on this | `engine.js` style pure modules; `tests/*.test.js`; `quant.py` pattern for the oracle | None (inputs only) | — | BSM with q, Black-76, Leisen–Reimer binomial with discrete dividends, Newton+Brent IV, analytic Greeks incl. 2nd order | **Medium** | None | High once verified against Hull/Haug and identities | **P0** |
-| Rate curve from FRED | Term-matched r for each expiry | `fetchData("fred", …)`, `macroSeries` in `main.js` | `DTB4WK`, `DTB3`, `DTB6`, `DTB1YR` (and `SOFR`) | **Existing** (FRED key) | Bill-yield → continuous zero; linear interpolation | **Low** | FRED | High | **P0** |
-| Realized-vol module `realized.js` + split filter | RV estimators with correct conventions; base for VRP | `asset.bars` (OHLC); `prepareBars` gap warnings | Daily OHLC | **Existing** | Close-to-close (log), Parkinson, GK, RS, **Yang–Zhang**; vol cone percentiles | **Low** | None | High, except across unadjusted splits (flagged) | **P0** |
-| Volatility page: VIX, VIX3M, term ratio, VIX IV rank/percentile, VIX vs SPY RV, VRP, regime band | Market-level vol context; first VRP research | New sidebar page in Markets; `lineChart`/`hover` from `riskcharts.js` | `VIXCLS`, `VXVCLS`; SPY bars | **Existing**; FRED history needs `observation_start`/pagination for > 2 years | VRP = VIX(t) − RV(t→t+21), shown only once known; regime buckets | **Low–Medium** | Realized module; FRED param change | High (observed series); regime labels are definitions, shown as such | **P0** |
-| VOL view, realized half (stock page) | Vol profile of any stock in the workspace | `VIEWS` in `stock.js`; `stockGrid()` tile | OHLC | **Existing** | Cone, RV history, estimator switch | **Low** | Realized module | High | **P1** |
-| OSA, theoretical mode | Payoffs, Greeks curves, scenario grid with model prices; the main learning tool | New stock view; `riskcharts.js` builders | Spot (existing), user IV or RV, rate curve | **Existing** | Full revaluation; sticky-strike / sticky-moneyness toggle | **Medium** | Math core | High as a model; **labelled "Model price"** | **P1** |
-| Synthetic demo chain in `sample.js` | Demo mode and E2E tests without keys | `sample()`, `scripts/smoke.cjs` | — | — | SVI smile + term structure + noise, seeded | **Low** | Math core | n/a (synthetic, badged) | **P1** |
-| India VIX CSV import | India vol context without violating NSE terms | Existing CSV import rules (`parseCSV`) | User-downloaded NSE file | **User import** | — | **Low** | Volatility page | High (official file) | **P2** |
+| `crates/options-math` (Rust) + test suite + Python oracle | Correct, reproducible prices, IV and Greeks for everything else | New workspace crate; `src-tauri` depends on it; `quant.py` pattern for the oracle | None | — | BSM with q, Black-76, Leisen–Reimer binomial with discrete dividends, Newton+Brent IV, analytic Greeks incl. 2nd order | **Medium** | None | High once verified (Hull/Haug, identities, oracle) | **P0** |
+| WebAssembly build of the maths crate | Instant sliders; browser preview and E2E tests keep working without Tauri | `crates/options-wasm` → `src/options/pkg`; `scripts/build-wasm.cjs` before `vite build`; CI target | — | — | — | **Low–Medium** | Maths crate | High (bit-identical test vs native) | **P0** |
+| Rate curve from FRED | Term-matched r per expiry | `fetchData("fred", …)` | `DTB4WK`, `DTB3`, `DTB6`, `DTB1YR`, `SOFR` | **Existing** | Bill yield → continuous zero, linear interpolation | **Low** | Maths crate | High | **P0** |
+| Realized vol + split filter | Correct RV conventions; basis for VRP | Workspace OHLC bars; `prepareBars` gap warnings | Daily OHLC | **Existing** | C2C (log), Parkinson, GK, RS, **Yang–Zhang**; cone | **Low** | Maths crate | High, except across unadjusted splits (flagged) | **P0** |
+| Volatility page (Markets): VIX, VIX3M, term ratio, VIX IV rank/percentile, VIX vs SPY RV, VRP, regimes | Market-level vol context; first VRP research | New sidebar page; `riskcharts.js` builders | `VIXCLS`, `VXVCLS`; SPY bars | **Existing**; FRED `observation_start` for > 2 years | VRP = VIX(t) − RV(t→t+21), shown only once known | **Low–Medium** | Realized vol; FRED param | High; regime labels are stated definitions | **P0** |
+| VOL view, realized half | Vol profile of any workspace stock | `VIEWS` in `stock.js`; grid tile | OHLC | **Existing** | Cone, RV history, estimator switch | **Low** | Realized vol | High | **P1** |
+| OSA, theoretical mode | Payoffs, Greeks curves, scenario grid with model prices; the main learning tool | New stock view | Spot, user IV or RV, rates | **Existing** | Full revaluation; sticky strike vs sticky moneyness | **Medium** | WebAssembly | High as a model; labelled "Model price" | **P1** |
+| Synthetic demo chain | Demo mode and E2E without keys | `sample.js`, `scripts/smoke.cjs` | — | — | Seeded SVI smile + term + noise | **Low** | Maths crate | n/a (badged synthetic) | **P1** |
 
-**Milestone 1 exit criteria:** math core passes the reference, identity and oracle tests in CI; the Volatility page shows VIX/VIX3M with source and date and a VRP chart that never uses future data at a past date; OSA prices a vertical spread and a collar in model mode with scenario grid; the demo chain renders in browser preview.
+**M1 exit criteria:** the maths crate passes reference, identity, oracle and WebAssembly-parity tests in CI. The Volatility page shows VIX/VIX3M with "Cboe, retrieved from FRED" attribution and a VRP chart that never uses future data at a past date. OSA prices a vertical spread and a collar with a scenario grid. The demo chain renders in browser preview.
 
-### Phase 2: Options research (chains, IV, recorder)
-
-| Feature | Research purpose | Existing integration | Required data | Data availability | Mathematical model | Effort | Dependencies | Reliability | Priority |
-|---|---|---|---|---|---|---|---|---|---|
-| Alpaca options adapter (`option_snapshots`, `option_contracts`) | First real chains at $0 | `providers.rs` kinds + budget; the Alpaca key/secret already stored; `fast_gate` | Chain snapshot, contract reference (OI, multiplier, style) | **Free** (indicative quotes; trades 15-min delayed) | — | **Medium** | None | Medium: indicative ≠ OPRA | **P0** |
-| `options.rs` normalizer + `options.sqlite` | Provider-independent schema; storage outside the workspace blob | `open_reference` pattern; `lab.rs` write-once | — | — | OCC parse; content hash | **Medium** | Adapter | High | **P0** |
-| Quality layer `quality.js` | Make bad quotes visible before they become bad analytics | Shown in every view | Quotes + times | — | Spread, age, intrinsic, parity residual, monotonic/convex checks | **Low–Medium** | Normalizer | High | **P0** |
-| OMON chain view | Contract-level research: IV, Greeks, liquidity, moneyness, compare | New stock view + tile | Chain | Free | Our IV/Greeks on parity forward; vendor values for cross-check | **Medium** | Adapter, math core, quality | Medium–High for liquid names | **P0** |
-| EOD snapshot recorder + `daily_summary` | **Starts the history clock** for IV rank, skew history, events | Runs while the app is open (like `watchFresh`); Settings → Reference data retention | Watchlist chains at ~16:15 ET | Free | Constant-maturity ATM IV (variance interpolation), 25Δ RR/BF | **Medium** | OMON pipeline | High for captured days; gaps are gaps | **P0** |
-| VOL implied half: smile, term structure, IV vs RV | Core equity-vol facts | VOL view | Chain + OHLC | Free | PCHIP display smile; forward variance | **Medium** | Recorder, realized module | Medium–High | **P1** |
-| OSA market mode | Strategies with real mids, bid/ask cost toggle | OSA | Chain | Free | Same as Phase 1 | **Low** | OMON | Medium (indicative quotes) | **P1** |
-| Massive provider (optional, paid) | Real delayed quotes, daily OI, 2y contract EOD aggregates | Second provider behind the same normalizer | Starter $29/mo | **Paid** | — | **Medium** | Normalizer | High for quotes; backfilled IV approximate | **P2** (needs your budget decision) |
-
-**Milestone 2 exit criteria:** OMON loads AAPL and SPY chains with our IV within tolerance of vendor IV for > 90% of liquid OTM contracts (an investigation tool, not a pass/fail on the vendor); every excluded contract shows a reason; the recorder writes one hashed snapshot and summary per watchlist symbol per trading day, and pruning never deletes a referenced snapshot.
-
-### Phase 3: Portfolio options and hedging
+### Phase 2: Options research and the background agent
 
 | Feature | Research purpose | Existing integration | Required data | Data availability | Mathematical model | Effort | Dependencies | Reliability | Priority |
 |---|---|---|---|---|---|---|---|---|---|
-| Ledger instrument model, multiplier, expiry settlement (long options only first) | Paper-trade options correctly | `ledger.rs`, `engine.js` `execute/book/portfolio`, `migrate()` to schema 3 | Contract reference | Free | Cash with multiplier; ITM settlement | **Medium–High** | Phase 2 | High (deterministic accounting) | **P0** |
-| Options ticket + multi-leg orders | Execute OSA strategies on paper | Trade page | Chain quotes with times | Free | Fill at bid/ask + slippage + per-contract fee | **Medium** | Ledger | Medium (fills from delayed/indicative quotes) | **P1** |
-| Defined-risk shorts (covered, cash-secured, spreads) | Covered calls, CSPs, credit spreads | `ledger.rs` validation | — | — | Collateral reservation | **Medium** | Ledger | High | **P1** |
-| Portfolio Greeks + β-weighted delta | Book-level exposure | Portfolio → Risk tab | Positions, chain, β (gs-quant `beta1y` already computed in RSK) | Free | Σ qty·m·Greek; β-weighting | **Low–Medium** | Ledger, recorder marks | Medium (β is a model) | **P0** |
-| Full-revaluation scenario grid + crash presets | Replace the uniform shock; real stress testing | Portfolio stress panel | Positions; VIX history for analogues | Existing + Free | Spot × vol × horizon revaluation | **Medium** | Math core, ledger | Model-dependent, transparent | **P0** |
-| Delta-hedge simulator | Learn hedging costs, rebalance trade-offs, jump risk | Opens from OSA/Portfolio; `quant.py` bootstrap paths | Underlying bars | **Existing** | Discrete re-hedging; GBM/bootstrap/jump paths; gamma-theta P&L decomposition | **Medium** | Math core | High as a simulation; labelled | **P1** |
-| Protective put / collar / put-spread comparison | Tail-hedge cost vs protection | Portfolio → hedge ideas | Chain | Free | Scenario rows per hedge | **Low** | Scenario grid | Medium | **P1** |
-| Option marks in equity curve | Honest paper equity history | `equityCurve()` | Recorded snapshots | Free (from recorder) | Mid if recorded, model mark otherwise (flagged) | **Medium** | Recorder, ledger | Medium | **P2** |
+| Alpaca options adapter (`option_snapshots`, `option_contracts`), read-only | Real chains at $0 | `providers.rs` kinds + budget; existing Alpaca key/secret; `fast_gate` | Chain snapshot, contract reference (OI, multiplier, style) | **Free** (indicative quotes; trades 15-min delayed) | — | **Medium** | None | Medium: indicative ≠ OPRA | **P0** |
+| `options.rs` normalizer + `options.sqlite` | Provider-independent schema; storage outside the workspace | `open_reference` pattern; `lab.rs` write-once | — | — | OCC parse; content hash | **Medium** | Adapter | High | **P0** |
+| Quality checks (`options_math::quality`) | Bad quotes made visible before they turn into bad analytics | Every view shows used/excluded counts | Quotes + times | — | Spread, age, intrinsic, parity residual, monotonic/convex checks | **Low–Medium** | Normalizer | High | **P0** |
+| OMON chain view | Contract research: IV, Greeks, liquidity, moneyness, compare | New stock view + tile | Chain | Free | Our IV on the parity forward; vendor IV as a cross-check | **Medium** | Adapter, maths, quality | Medium–High for liquid names | **P0** |
+| **Background agent `aperture-agent`** (launchd / Task Scheduler / systemd user timer), opt-in from Settings, removed on uninstall | **Starts the history clock** without needing the app open | Tauri sidecar; shares `options.sqlite`, `requests` budget log and `credentials.json`; Homebrew cask and Scoop uninstall hooks | Recorder list (watchlist, ≤ 30) at 16:15–23:59 ET on trading days | Free | Same maths natively; summaries; SVI via `vol.py` | **High** | Adapter, normalizer, maths | High for captured days; gaps stay gaps. **Risk:** an unsigned macOS sidecar under launchd must be tested on hardware | **P0** |
+| In-app recorder fallback | Recording without the agent | `watchFresh` loop | Same | Free | Same | **Low** | Agent job logic (shared) | Same | **P1** |
+| VOL implied half: smile, term, IV vs RV | Core equity-vol facts | VOL view | Chain + OHLC | Free | Display smile; forward variance | **Medium** | Recorder | Medium–High | **P1** |
+| OSA market mode | Strategies on real mids with optional spread cost | OSA | Chain | Free | Same | **Low** | OMON | Medium (indicative) | **P1** |
+| Massive Basic backfill + corporate actions (optional) | Approximate 2-year IV history; split data for RV | Agent job, resumable, 5 calls/minute | Free second account | **Free**, individual use | IV from EOD closes | **Medium** | Agent | Medium–Low (stale last trades) | **P2** |
 
-**Milestone 3 exit criteria:** buy, sell and expire an option on paper with correct cash to the cent (multiplier and fees); a covered call and a put spread validate, a naked short is refused with a reason; Portfolio shows book Greeks and a scenario grid that matches OSA for a single-position book; the hedging simulator reproduces textbook results (hedging error ∝ σ√(Δt) as rebalance frequency rises) on GBM paths.
+**M2 exit criteria:**
+- OMON loads AAPL and SPY with our IV; every excluded contract shows a reason; vendor IV disagreements are viewable.
+- The agent installs and uninstalls cleanly on macOS, Windows and Linux.
+- The agent captures one write-once snapshot and summary per recorder symbol per trading day, and never labels a late capture as that day's close.
+- The app and agent share one request budget.
+- Uninstalling through Homebrew or Scoop removes the schedule.
 
-### Phase 4: Advanced volatility intelligence (once 3–6+ months are recorded)
+### Phase 3: Options paper trading, portfolio risk and hedging
 
 | Feature | Research purpose | Existing integration | Required data | Data availability | Mathematical model | Effort | Dependencies | Reliability | Priority |
 |---|---|---|---|---|---|---|---|---|---|
-| Single-name IV rank / percentile, IV history | Is IV high relative to its own past? | VOL, DES, Screener columns, Alerts | ≥ 252 days of `daily_summary` | Free (time-gated) or Paid backfill | rank/percentile | **Low** | Recorder history | High once n ≥ 252; shown with n | **P1** |
-| EVT: implied move, event variance, expected vs realized, IV crush decomposition | Price event risk; test whether options over- or under-price events | EVT view; Finnhub/Alpha earnings dates; GP markers | Pre/post-event snapshots; earnings dates with timing | Free (needs recorded events) | Straddle move; two-expiry event variance; sequential revaluation attribution | **Medium** | Recorder, math core | Medium; small samples flagged | **P1** |
-| Single-name VRP and vol-selling study in Quant Lab | Does selling vol pay after costs, here, historically? | Quant Lab new experiment type; `lab.rs` kinds | Recorded or backfilled chains | Free (time-gated) / Paid | Short straddle/strangle backtest with bid/ask fills; holdout discipline | **High** | Ledger semantics, recorder, Quant Lab | Medium; survivorship and sample-size labels | **P2** |
-| SVI surface fit + arbitrage checks (`vol.py`) | Smooth, arbitrage-aware smiles; skew metrics; small-multiples view | Bundled scipy; `quant.rs` batch pattern | Chains | Free | Raw SVI, vega-weighted LSQ, butterfly/calendar checks | **Medium–High** | Phase 2 | Medium (fit quality reported) | **P2** |
-| Skew history (25Δ RR/BF over time) | Skew regime research | VOL | `daily_summary` | Free (time-gated) | — | **Low** | Recorder | Medium | **P2** |
-| Macro event calendar (FOMC, CPI) | Index event premia | Volatility page; EVT for SPY | Sourced static JSON + FRED release dates | Free | Same as EVT | **Low–Medium** | EVT | Medium | **P3** |
-| Optional 3D surface view | Visual intuition | VOL | SVI params | Free | — | **Low** | SVI | n/a | **P3** |
+| Ledger instrument model, multiplier, expiry settlement (long options) | Paper-trade options correctly | `ledger.rs`, `engine.js`, `migrate()` → schema 3 | Contract reference | Free | Cash with multiplier; ITM settlement | **Medium–High** | Phase 2 | High | **P0** |
+| Options ticket + multi-leg orders | Execute OSA strategies on paper | Trade page | Quotes with times | Free | Bid/ask fills + slippage + per-contract fees | **Medium** | Ledger | Medium (delayed/indicative fills) | **P1** |
+| Covered calls, cash-secured puts, spreads | The common defined-risk structures | `ledger.rs` validation | — | — | Collateral reservation | **Medium** | Ledger | High | **P1** |
+| Portfolio Greeks + β-weighted delta | Book exposure | Portfolio → Risk tab; RSK's gs-quant `beta1y` | Positions, chain | Free | Σ qty·m·Greek; β-weighting | **Low–Medium** | Ledger | Medium (β is a model) | **P0** |
+| Full-revaluation scenario grid + crash presets | Replaces the uniform shock; real stress tests | Portfolio stress panel | Positions; VIX history | Existing + Free | Spot × vol × horizon revaluation | **Medium** | Maths, ledger | Model-dependent, transparent | **P0** |
+| Delta-hedge simulator | Hedging costs, rebalance trade-offs, jump risk | From OSA/Portfolio | Underlying bars | **Existing** | Discrete re-hedging; bootstrap/GBM/jump paths; gamma–theta decomposition | **Medium** | Maths | High as a simulation (labelled) | **P1** |
+| Protective put / collar / put spread comparison | Tail-hedge cost vs protection | Portfolio hedge ideas | Chain | Free | Scenario rows | **Low** | Grid | Medium | **P1** |
+| Option marks in the equity curve | Honest paper equity history | `equityCurve()` | Recorded snapshots | Free | Recorded mid, otherwise flagged model mark | **Medium** | Recorder, ledger | Medium | **P2** |
+| **Stretch: naked shorts + margin model** | Simulate short-premium strategies honestly, margin calls included | `options_math::margin`, `ledger.rs` | Marks | Free | Strategy-based Reg T-style formula (verify against the Cboe Margin Manual); daily recompute; margin call → next-session paper liquidation | **High** | Covered/spread shorts, marks | Medium; labelled "simulated margin, brokers require more" | **P3** |
+
+**M3 exit criteria:**
+- An option can be bought, sold and expired on paper with cash correct to the cent.
+- A covered call and a put spread validate; a naked short is refused with a reason until the stretch goal ships.
+- Book Greeks and the scenario grid match OSA for a single-position book.
+- The simulator reproduces hedging error falling as √Δt on GBM paths.
+
+### Phase 4: Advanced volatility (once 3–6+ months are recorded)
+
+| Feature | Research purpose | Existing integration | Required data | Data availability | Mathematical model | Effort | Dependencies | Reliability | Priority |
+|---|---|---|---|---|---|---|---|---|---|
+| Single-name IV rank / percentile, IV history | IV relative to its own past | VOL, DES, workspace Screener columns, Alerts | ≥ 252 days of `daily_summary` | Free (time-gated) | rank / percentile | **Low** | Recorder history | High once n ≥ 252; n always shown | **P1** |
+| EVT: implied move, event variance, implied vs realized, IV-crush attribution | Price event risk; test whether options over- or under-price events | EVT view; Finnhub/Alpha earnings dates; GP markers | Pre/post-event snapshots | Free (needs recorded events) | Straddle move; two-expiry event variance; sequential revaluation | **Medium** | Recorder | Medium; small samples flagged | **P1** |
+| Vol-selling study in Quant Lab | Does selling vol pay after costs, here? | New Quant Lab experiment type | Recorded/backfilled chains | Free (time-gated) | Short straddle/strangle with bid/ask fills; sealed holdout | **High** | Ledger semantics, recorder | Medium; survivorship and sample labels | **P2** |
+| SVI surface + arbitrage checks (`vol.py`) | Smooth, arbitrage-aware smiles; skew metrics; small multiples | Bundled scipy, batch pattern | Chains | Free | Raw SVI, vega-weighted least squares | **Medium–High** | Phase 2 | Medium (fit quality reported) | **P2** |
+| Skew history (25Δ RR/BF) | Skew regimes | VOL | `daily_summary` | Free (time-gated) | — | **Low** | Recorder | Medium | **P2** |
+| Macro event dates (FOMC, CPI) | Index event premia | Volatility page; EVT for SPY | Sourced static JSON + FRED release dates | Free | As EVT | **Low–Medium** | EVT | Medium | **P3** |
+| Optional 3D surface | Visual intuition | VOL | SVI params | Free | — | **Low** | SVI | n/a | **P3** |
 
 ### Phase 5: Advanced derivatives research
 
 | Feature | Research purpose | Existing integration | Required data | Data availability | Mathematical model | Effort | Dependencies | Reliability | Priority |
 |---|---|---|---|---|---|---|---|---|---|
-| GEX by strike, profile across spot, flip range, under 2–3 named conventions | Describe OI-implied gamma structure | GEX view; Analyst briefing with "estimated" label | Chain + OI (daily) | Free | OI·Γ·m·S²·0.01 with assumed signs; re-evaluation over spot grid | **Medium** | Recorder, quality layer | **Low–Medium**; never presented as observed | **P2** |
-| OI by strike (mirrored) and OI change | Observed positioning structure (sides unknown) | OMON/GEX | Daily OI | Free | — | **Low** | Recorder | High (observed) | **P2** |
-| Second-order Greeks panel (vanna, charm, vomma, speed) | Advanced sensitivity | OMON Advanced preset, OSA | Chain | Free | Closed form | **Low** | Math core | Medium (IV-error sensitive) | **P2** |
-| India broker adapter (Upstox or Kite Connect) | Live/EOD NIFTY chains under the user's own broker terms | New provider; `contract.style = european`, cash settlement | Broker account (KYC) | **User's broker** (cost per broker) | Black-76 vs NIFTY future | **Medium–High** | Normalizer | Medium (broker Greeks reported unreliable; we compute our own) | **P3** |
-| NSE bhavcopy import (EOD chains) | Indian EOD research without automation | `options_import_csv` | User-downloaded files | **User import** | Black-76 on settle vs future settle | **Medium** | Normalizer | Medium–High (settle prices, no bid/ask) | **P2** |
-| Massive backfill → approximate IV history | Skip the 12-month wait | Recorder tables, `quality.source = backfill` | Starter/Developer plan | **Paid** | IV from EOD closes | **Medium** | Massive adapter | Medium–Low (stale last trades) | **P3** |
-| GARCH(1,1) forecast vs IV | Model-based vol forecast comparison | VOL; `vol.py` | OHLC | Existing | MLE in scipy | **Low–Medium** | Realized module | Medium | **P3** |
-| Real-time OPRA / intraday GEX / 0DTE | Intraday research | — | $199/mo+ | Paid | — | **High** | Everything | — | **Not planned** |
+| GEX by strike, profile across spot, flip range under named conventions | Describe OI-implied gamma structure | GEX view; Analyst with "estimated" label | Chain + daily OI | Free | OI·Γ·m·S²·0.01 with assumed signs | **Medium** | Recorder, quality | **Low–Medium**; never presented as observed | **P2** |
+| OI by strike and OI change | Observed positioning structure (sides unknown) | OMON / GEX | Daily OI | Free | — | **Low** | Recorder | High (observed) | **P2** |
+| Second-order Greeks panel | Advanced sensitivity | OMON Advanced, OSA | Chain | Free | Closed form | **Low** | Maths | Medium (IV-error sensitive) | **P2** |
+| GARCH(1,1) forecast vs IV | Model forecast vs market | VOL; `vol.py` | OHLC | Existing | MLE in scipy | **Low–Medium** | Realized vol | Medium | **P3** |
+| India (broker adapter or manual imports) | NIFTY research | — | — | — | Black-76 vs future | — | — | — | **Deferred** |
+| Paid feeds, real-time OPRA, intraday GEX, 0DTE | — | — | — | Paid | — | — | — | — | **Not planned ($0)** |
 
 ## 3. Dependency graph
 
 ```
-Math core ─┬─► OSA (theoretical) ─────────────┐
-           ├─► Hedging simulator               │
-Rates ─────┤                                   │
-Realized ──┼─► Volatility page, VOL realized   │
-           │                                   ▼
-           └─► Alpaca adapter ─► normalizer ─► quality ─► OMON ─► OSA market ─► Ledger options ─► Portfolio Greeks/grid
-                                    │                       │                                     └► equity curve marks
-                                    └─► options.sqlite ─► EOD recorder ══(time: 3–12 months)══► IV rank, EVT, skew history,
-                                                                       │                         vol-selling study
-                                                                       └─► SVI fits ─► surface views
-                                                                       └─► GEX (with quality + OI history)
+options-math (Rust) ─┬─► WebAssembly ─► OSA theoretical, VOL realized, Volatility page
+                     ├─► Hedging simulator
+FRED rates/VIX ──────┤
+                     └─► Alpaca adapter ─► normalizer ─► quality ─► OMON ─► OSA market ─► Ledger options ─► Portfolio Greeks / grid
+                                              │                                             └─► (stretch) margin model
+                                              └─► options.sqlite ─► background agent ══ time: 3–12 months ══► IV rank, EVT, skew history,
+                                                                     (+ in-app fallback)                       vol-selling study, GEX
+                                                                     └─► optional Massive Basic backfill
 ```
 
-## 4. First three milestones (concrete)
+## 4. First three milestones
 
-### M1: Vol foundations and the options math core (≈ 3–4 weeks)
-1. `src/options/bsm.js`, `iv.js`, `american.js`, `forward.js`, `rates.js`, `realized.js` + `tests/options.*.test.js` (Hull/Haug values, identities, PDE residual, FD vs analytic, solver edge cases).
-2. `src-tauri/src/vol.py --oracle` + `scripts/options-oracle.cjs` in `pr-checks.yml`.
-3. FRED: add VIX/VIX3M/T-bill/SOFR series; allow `observation_start` in `providers.rs` with a test.
-4. Volatility page (Markets): VIX, VIX3M, ratio, VIX rank/percentile, VIX vs SPY Yang–Zhang RV, VRP shown only for dates ≥ 21 sessions old, regime band.
-5. `VOL` stock view, realized half + tile.
-6. `OSA` theoretical mode (legs, templates, payoff, Greeks curves, scenario grid) + synthetic demo chain + smoke test.
-**Not in M1:** any option chain provider, ledger changes.
+### M1: Rust maths core and vol foundations (≈ 4–5 weeks)
+1. Cargo workspace; `crates/options-math` (BSM, Black-76, binomial, IV, Greeks, forward, rates, realized) with `cargo test` reference and identity suites.
+2. `crates/options-wasm` + `scripts/build-wasm.cjs`; WebAssembly-parity tests in `node --test`; CI target.
+3. `vol.py --oracle` in CI.
+4. FRED VIX/VIX3M/T-bill/SOFR; `observation_start` in `providers.rs` with tests.
+5. Volatility page; VOL realized half + tile.
+6. OSA theoretical mode + synthetic demo chain + smoke test.
+**Not in M1:** any options provider, ledger changes, the agent.
 
-### M2: Chains, OMON and the recorder (≈ 4–5 weeks)
-1. Alpaca `option_snapshots` + `option_contracts` kinds, budgets, live contract test (`#[ignore]`).
-2. `options.rs` normalizer + fixtures; `options.sqlite` with write-once snapshots and retention settings.
-3. `quality.js` rules and the per-chart used/excluded counts.
-4. `OMON` (chain, presets, compare, our vs vendor IV) and the OMON tile.
-5. EOD recorder for the watchlist + `daily_summary` (ATM IV 30/60/90, 25Δ RR/BF, term JSON).
-6. VOL implied half (smile, term, IV vs RV); OSA market mode.
-**Not in M2:** paid providers, paper trading options, GEX.
+### M2: Chains, OMON and the background agent (≈ 6–7 weeks)
+1. Alpaca read-only option kinds, budgets, `#[ignore]` live contract test.
+2. `options.rs` normalizer on synthetic fixtures; `options.sqlite`; retention.
+3. Quality checks and used/excluded counts.
+4. OMON + tile; VOL implied half; OSA market mode.
+5. `aperture-agent` sidecar: due-work logic, OS scheduling for all three platforms, Settings install/status/remove, log, lock file, shared budget; cask and Scoop uninstall hooks; in-app fallback.
+**Not in M2:** paper options trading, GEX, backfill (it can follow as an M2.5 if you want it).
 
 ### M3: Options paper trading and portfolio risk (≈ 4–6 weeks)
-1. Schema 3 migration: `instrument` on trades; multiplier-aware `book()`/`portfolio()` in JS and Rust with mirrored tests.
-2. Long options, then covered/cash-secured/spread shorts; multi-leg atomic orders; expiry settlement as `source: "expiry"` trades.
-3. Options ticket with bid/ask fills, quote-time stamping and indicative warnings.
-4. Portfolio → Risk: book Greeks, β-weighted delta, full-revaluation grid with crash presets, hedge ideas.
-5. Delta-hedge simulator (historical, bootstrap, GBM, jump) with cost/tracking-error frontier.
-**Not in M3:** margin model for naked shorts, early-exercise assignment simulation beyond documented rules.
+1. Schema 3 migration; multiplier-aware ledger in Rust and JS with mirrored tests.
+2. Long options, then covered calls, cash-secured puts and spreads; multi-leg orders; expiry settlement.
+3. Options ticket with bid/ask fills, quote-time stamps and indicative warnings.
+4. Portfolio Risk tab: book Greeks, β-weighted delta, scenario grid with crash presets, hedge ideas.
+5. Delta-hedge simulator.
+**Not in M3:** naked shorts and the margin model (stretch, after M3).
 
 ## 5. MVP boundary
 
-The **MVP is M1 + M2**: a correct pricer, realized and index vol, real chains with honest quality flags, and a recorder building history. That is a credible options and vol research tool at $0 data cost. Everything requiring history (IV rank on single names, event studies with implied moves, vol-selling backtests) is visibly "accruing", never faked.
+**MVP = M1 + M2:** a verified pricer, realized and index vol, real chains with quality flags, and a background recorder building history at $0. Anything that needs history is shown as "accruing, n days", never faked.
 
 ## 6. Risks
 
 | Risk | Mitigation |
 |---|---|
-| Alpaca indicative quotes mislead (modified quotes) | Permanent badge; liquidity analytics disabled for indicative; optional Massive Starter |
-| Silent numerical errors | Oracle tests, identity tests, golden chain fixture, vendor cross-check view |
-| History gaps because the app wasn't open at 16:15 ET | Late-capture flag; gaps shown; optional tray/launch-agent recorder later (an OS-specific decision) |
-| Storage growth | Retention for full quotes; summaries kept; Settings shows the size, as 13F quarters do |
-| Users read GEX or N(d2) as forecasts | Fixed labelling rules (Product Design §13); Analyst instructed to keep the class labels |
-| Unadjusted splits corrupt RV/VRP | Split filter in M1; a corporate-actions source in Phase 2 (Massive Basic free tier lists corporate actions) |
-| Ledger change breaks existing paper accounts | Schema migration with tests on saved workspaces (`tests/migrate.test.js` pattern) |
-| Expiry weekdays and lot sizes change (India) | Always taken from contract data, never constants |
+| Indicative quotes mislead | Permanent badge; liquidity analytics disabled for indicative quotes |
+| launchd refuses an unsigned or quarantined sidecar on macOS | Test on hardware early in M2; in-app fallback always available; signing is a separate release decision |
+| WebAssembly toolchain friction | IPC fallback (Architecture §2); decide by the end of M1 week 2 |
+| Agent and app writing the same database | WAL + `busy_timeout` + agent lock file; one shared `requests` log |
+| Silent numerical errors | Oracle, identity, WebAssembly-parity and golden-fixture tests |
+| History gaps (machine asleep or off) | Gaps shown, never filled; optional backfill |
+| Storage growth | Quote retention; summaries kept; size shown in Settings |
+| GEX or N(d2) read as forecasts | Labelling rules (Product Design §14); Analyst keeps class labels |
+| Unadjusted splits | Split filter in M1; Massive Basic corporate actions if enabled |
+| Ledger migration breaks old accounts | Migration tests on saved workspaces |
+| A licence or terms change | Feasibility §10; the weekly `source-health.yml` workflow catches endpoint breakage; reread terms when adding a source |
 
-## 7. Decisions needed from you
+## 7. Still open (small)
 
-1. **Data budget:** stay at $0 (Alpaca indicative + recorder) or add Massive Options Starter ($29/mo, individual use) for real delayed quotes and backfill?
-2. **India:** is user-imported NSE EOD data enough, or should a broker adapter (Upstox vs Kite Connect) be planned, given it needs your Indian brokerage account?
-3. **Short options on paper:** defined-risk only (recommended), or also naked shorts with a margin model?
-4. **Recorder scope and timing:** watchlist only (recommended, ≤ 30 symbols) at 16:15 ET; and is a background launch agent acceptable later so captures don't depend on the window being open?
-5. **Math location:** JS canonical with Python as test oracle (recommended) vs Rust canonical.
-6. **Undocumented endpoints:** confirm the project rule stays (no Cboe CDN JSON, no NSE API scraping).
+1. **A second free account (Massive Options Basic):** OK for the optional backfill and corporate-actions data, or keep to the providers you already use?
+2. **Recorder list:** default to the watchlist (≤ 30 symbols)? SPY and QQQ are always included for index vol.

@@ -1,91 +1,125 @@
 # Derivatives Analytics — Proposed Architecture
 
-Status: proposal, not implemented. Written 2026-11-17 against `main` at `096acef`.
+Status: proposal, not implemented. Written 2026-11-17 against `main` at `096acef`. Revised the same day for the recorded decisions: $0 data budget, background agent as the primary recorder, Rust as the single maths implementation, India deferred, naked shorts as a stretch goal, and the compliance rules in [Feasibility §10](DERIVATIVES_FEASIBILITY.md#10-staying-out-of-trouble-binding-rules).
 Read [Feasibility](DERIVATIVES_FEASIBILITY.md) first for data sources and model choices.
 
 ## 1. Principles
 
-1. **Keep the stack.** Tauri 2 + Rust + SQLite + vanilla JS + Lightweight Charts + SVG builders + the bundled Python. No new runtime, no server, no microservices. Nothing in this plan needs one: the heaviest workload (a full American chain) is seconds of CPU on a laptop.
-2. **Ingestion in Rust, math in pure JS, batch fitting in Python.** This mirrors the current split:
-   - Rust owns keys, quotas, HTTP and SQLite (`providers.rs`, `fetch_data` in `main.rs`).
-   - Calculations are pure, testable JS modules (`engine.js`, `quantlab/*`) run on the UI thread or in a Worker.
-   - Heavy scientific work runs as a fixed script in the bundled Python (`quant.py` via `quant.rs`).
-3. **One canonical implementation per formula.** Options math lives in `src/options/` (JS). Rust only *stores* derived numbers and never recomputes them. Python reimplements the core formulas **only as a test oracle** (§8), plus the SVI fitter, which has no JS counterpart.
-4. **Provider-independent contracts.** Every chain source normalizes to one `OptionQuote` schema before anything else sees it.
-5. **Separate large data from the workspace blob.** Chains and history go to a new `options.sqlite`, as 13F data went to `reference.sqlite`.
-6. **Every number carries its class** (observed / derived / model / simulation; see Feasibility §2) and its provenance.
+1. **Keep the stack.** Tauri 2 + Rust + SQLite + vanilla JS + Lightweight Charts + SVG builders + the bundled Python. No server, queue or database server. The one new process is a small scheduled agent built from the same Rust code.
+2. **One maths implementation, in Rust.** Pricing, IV, Greeks, realized vol, summaries, scenarios and hedging simulations live in one dependency-free Rust crate, used three ways:
+   - **natively by the background agent**, which runs with no window and therefore no JavaScript engine (this is the deciding reason);
+   - **natively by Tauri commands** for batch work: whole chains, history, Monte Carlo;
+   - **in the interface as WebAssembly** for instant slider-driven work (payoff, scenario grid) and for the browser preview and Playwright smoke tests, which run without Tauri today (`scripts/smoke.cjs`).
+   
+   Measured speed (Feasibility §6.3): Rust is 1.5–2× faster than JS. That is useful, but it isn't the reason for the choice.
+3. **Python is an oracle and a fitter, not a second pricer.** `vol.py` reimplements the core formulas only to test the Rust crate, and it runs the SVI fit (scipy), which has no Rust counterpart worth writing.
+4. **Ingestion and calculation are separate.** Provider adapters only fetch and normalize. Calculation never makes network calls.
+5. **Provider-independent contracts.** Every chain source normalizes to one `OptionQuote` schema.
+6. **Large data stays out of the workspace blob.** Chains and history go to a new `options.sqlite`, as 13F data went to `reference.sqlite`.
+7. **Every number carries its class** (observed / derived / model / simulation) and its provenance.
+8. **The compliance rules are design constraints** (Feasibility §10): read-only market data, local budgets shared between app and agent, no real data in the repo, and a visible, removable agent.
 
-## 2. Component map
+## 2. Crates and processes
 
 ```
-                         ┌───────────────────────────── UI (src/main.js + views) ─────────────────────────────┐
-                         │ Stock page: OMON · VOL · OSA · EVT · GEX     Markets: Volatility page              │
-                         │ Portfolio: Greeks, scenario grid             Trade: option ticket                   │
-                         │ Quant Lab: vol/event experiments              Analyst: vol facts in briefing        │
-                         └───────────────▲───────────────────────────────▲───────────────────────────────▲────┘
-                                         │ view models                   │                               │
-              ┌──────────────────────────┴──────────┐      ┌─────────────┴────────────┐      ┌───────────┴──────────┐
-              │ src/options/ (pure JS, node-tested) │      │ src/options/worker.js    │      │ src/riskcharts.js +  │
-              │  contract.js   normalize, OCC ids   │      │ chain-wide IV/Greeks,    │      │ src/options/charts.js│
-              │  bsm.js        BSM / Black-76       │◄────►│ scenario grids, hedging  │      │ smile, term, payoff, │
-              │  american.js   LR/CRR binomial      │      │ sims (off UI thread)     │      │ GEX, heatmap (SVG)   │
-              │  iv.js         solver + flags       │      └──────────────────────────┘      └──────────────────────┘
-              │  forward.js    parity forward       │
-              │  rates.js      curve from FRED      │      ┌──────────────────────────────────────────────────────┐
-              │  realized.js   YZ/GK/Parkinson, cone│      │ src-tauri/src/vol.py (bundled Python, fixed script)   │
-              │  surface.js    smile/term summaries │◄────►│ SVI fit + arbitrage checks · GARCH(1,1) MLE ·          │
-              │  events.js     implied move, E, crush│     │ oracle tests for bsm/iv                               │
-              │  exposure.js   GEX (conventions)    │      └──────────────────────────▲───────────────────────────┘
-              │  portfolio.js  position/book Greeks │                                 │ stdin/stdout JSON (quant.rs pattern)
-              │  hedge.js      delta-hedge sim      │                                 │
-              │  quality.js    staleness, arb checks│                                 │
-              └──────────────────▲──────────────────┘                                 │
-                                 │ bridge.js (invoke)                                 │
-┌────────────────────────────────┴──────────────── Rust (src-tauri/src) ─────────────┴───────────────────────────────┐
-│ providers.rs  + "alpaca" kinds: option_contracts, option_snapshots; "massive" provider (optional, paid)           │
-│               + "fred" observation_start/offset;  + budgets                                                       │
-│ options.rs    NEW pure module: normalize provider JSON → OptionQuote rows; OCC symbol parse; snapshot schema        │
-│ main.rs       commands: options_chain, options_snapshot_record, options_history, options_import_csv, vol_fit       │
-│ ledger.rs     + instrument kind, multiplier, expiry/settlement events, defined-risk shorts                          │
-│ options.sqlite NEW: contracts, snapshots, quotes, daily_summary, events  (WAL, separate from workspace)            │
-└───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+crates/options-math/          NEW  pure Rust, no dependencies (std only; serde behind a feature)
+  src/bsm.rs  black76.rs  american.rs (Leisen–Reimer, CRR, discrete dividends)
+  src/iv.rs (Newton + Brent, no-solution flags)   forward.rs (put–call parity forward)
+  src/rates.rs (bill yield → continuous zero curve)   realized.rs (C2C, Parkinson, GK, RS, Yang–Zhang, cone)
+  src/surface.rs (constant-maturity ATM IV, 25Δ RR/BF, term)   events.rs (implied move, event variance, attribution)
+  src/exposure.rs (GEX under named conventions)   portfolio.rs (position/book Greeks, β-weighting, scenario grid)
+  src/hedge.rs (delta-hedge simulator, seeded RNG)   margin.rs (stretch: strategy-based margin)
+  src/quality.rs (quote sanity, parity residual, monotonic/convex/calendar checks)
+
+crates/options-wasm/          NEW  thin wasm-bindgen wrapper → src/options/pkg/ (imported by Vite)
+
+src-tauri/                    EXISTING crate, gains:
+  src/options.rs              provider JSON → OptionQuote, OCC symbol parse, snapshot hashing, options.sqlite access
+  src/agent.rs                the recorder's job logic (pure parts unit-tested like ledger.rs)
+  src/bin/aperture-agent.rs   NEW headless binary: no Tauri, no webview
+  src/main.rs                 + commands: options_chain, options_history, options_eval, agent_install/remove/status
 ```
 
-## 3. Data model
+Cargo becomes a small workspace (`src-tauri`, `crates/options-math`, `crates/options-wasm`). `src-tauri` depends on `options-math` by path. The existing `cargo test --no-default-features --lib` gate keeps working, and `options-math` adds its own `cargo test`.
 
-### 3.1 Normalized contract and quote (JS and Rust share this shape)
+**Why a separate maths crate:** the `src-tauri` library pulls in rusqlite (bundled C), reqwest and tokio, which cannot compile to `wasm32-unknown-unknown`. A dependency-free crate compiles to native and to WebAssembly unchanged.
 
-```js
+**WebAssembly build cost** (the one new toolchain step): `rustup target add wasm32-unknown-unknown` plus `wasm-bindgen-cli` pinned to the crate's version. A `scripts/build-wasm.cjs` step runs before `vite build`, and CI caches it. Only aarch64/x86_64 Apple targets are installed locally today. **Fallback** if WebAssembly proves to be friction: the interface calls `options_eval` over Tauri IPC (a 600-point payoff evaluates in ~30 µs, so the IPC round trip dominates at about a millisecond), and the browser preview shows a precomputed demo. That is acceptable, but it loses E2E coverage of the strategy lab.
+
+## 3. Background agent (primary recorder)
+
+### 3.1 Shape
+
+- **A separate headless binary** `aperture-agent`, shipped inside the app bundle as a Tauri sidecar (`bundle.externalBin`, target-triple naming). It links `options-math`, `providers.rs`, `options.rs`, rusqlite and reqwest. It has no webview and no window.
+- **It is not a resident daemon.** The OS starts it every 30 minutes. It checks whether any work is due, does it, and exits. Most runs end within milliseconds.
+- **Scheduling, per user, with no admin rights:**
+
+| OS | Mechanism | Notes |
+|---|---|---|
+| macOS | `~/Library/LaunchAgents/com.aperture.agent.plist`, `StartInterval 1800`, `RunAtLoad false` | macOS 13+ shows a "Background Items Added" notice and lists the agent under Login Items. Whether launchd can start an **unsigned** sidecar inside a quarantined bundle must be tested on real hardware (*unverified*); the current builds are unsigned and not notarized |
+| Windows | Task Scheduler per-user task: `schtasks /Create /SC MINUTE /MO 30 /TN Aperture\Agent` | Runs only while the user is logged on, so no stored password is needed |
+| Linux | `systemd --user` timer (`OnCalendar=*:0/30`); fallback: XDG autostart, which only works while logged in | |
+
+- **Install and remove** come from Settings ("Record option chains in the background"), with an explicit description of what it does, when it runs and which providers it calls. Status shows the last run, next run, result and a link to the log file in the app-data folder.
+- **Uninstall cleanup:** the Homebrew cask (`Casks/aperture-preview.rb`) gains `uninstall launchctl: "com.aperture.agent"` and a `zap` entry for the plist. The Scoop manifest (`bucket/aperture-preview.json`) gains a `pre_uninstall` step that deletes the scheduled task. The app also removes the agent when it detects it is being replaced by a build without one.
+
+### 3.2 Due work (decided on each wake-up)
+
+| Job | When due | Provider calls |
+|---|---|---|
+| **EOD chain capture** for the recorder list (default: watchlist, ≤ 30 symbols) | Trading day, between 16:15 and 23:59 ET, not yet captured today | Alpaca option snapshots + contracts (OI), paginated |
+| Summaries (ATM IV by constant maturity, RR/BF, term, GEX by convention) | After each capture | None (Rust maths) |
+| SVI fits | After capture, batched | None (bundled Python `vol.py`, one start) |
+| FRED vol and rate series | Every 12 h (as the app does today) | FRED |
+| Optional Massive Basic backfill | Only when the user starts it; 5 calls/minute; resumable | Massive (free tier, second account) |
+| Retention pruning | Weekly | None |
+
+- **Trading calendar:** a bundled NYSE holiday list (maintained yearly, sourced) cross-checked against Alpaca's market calendar endpoint. That endpoint is part of Alpaca's trading API, read-only (*endpoint not verified this session*).
+- **Capture validity:** a capture taken after 23:59 ET, or after the next session opens, is **not** recorded as that day's close. The day becomes a gap. A sleeping laptop therefore produces gaps, never mislabeled data.
+- **Concurrency with the open app:** SQLite WAL with `busy_timeout`; a lock file so only one agent runs; the app and agent share the `requests` table, so free-plan budgets are counted once (Feasibility §10, rule 2).
+- **Credentials:** read from the same owner-only `credentials.json`. Environment variable overrides don't exist under launchd or Task Scheduler; the docs say so.
+- **Failure behaviour:** provider errors are logged, the day stays a gap, and backoff follows the provider's rules. A rejected key stops the job until the user fixes it, as AISStream handling does today.
+
+### 3.3 In-app fallback
+
+If the agent isn't installed, the same job runs inside the desktop app while it is open (the `watchFresh` loop). Captures are flagged `captured_by: "app"` or `"agent"`.
+
+## 4. Data model
+
+### 4.1 Normalized contract and quote
+
+```rust
 // OptionContract: static per contract
-{
-  id: "O:AAPL261218C00250000",   // provider-independent: "O:" + OCC symbol (no padding)
-  underlying: "AAPL",            // workspace symbol; Indian: "NIFTY:XNSE"
-  root: "AAPL",                  // OCC root (differs after adjustments, e.g. "AAPL1")
-  type: "call" | "put",
-  strike: 250,                   // in underlying currency
-  expiry: "2026-12-18",
-  expiryTime: "16:00 America/New_York" | "09:30 America/New_York (AM-settled)" | "15:30 Asia/Kolkata",
-  style: "american" | "european",
-  settlement: "physical" | "cash",
-  multiplier: 100,               // cash multiplier
-  deliverable: 100,              // shares on exercise; ≠ multiplier → "adjusted"
-  adjusted: false,
-  currency: "USD",
+struct OptionContract {
+    id: String,            // "O:" + OCC symbol without padding, e.g. "O:AAPL261218C00250000"
+    underlying: String,    // workspace symbol
+    root: String,          // OCC root (differs after adjustments, e.g. "AAPL1")
+    kind: Call | Put,
+    strike: f64,
+    expiry: Date,
+    expiry_time: ExpiryTime,  // PM close 16:00 ET | AM-settled | market-specific
+    style: American | European,
+    settlement: Physical | Cash,
+    multiplier: f64,       // cash multiplier
+    deliverable: f64,      // shares on exercise; ≠ multiplier → adjusted
+    adjusted: bool,
+    currency: String,
 }
 // OptionQuote: one observation
-{
-  contractId, provider: "alpaca", feed: "indicative" | "opra" | "eod" | "import",
-  quoteTime: 1794076205000, retrievedAt: 1794076210000,
-  bid, ask, bidSize, askSize, last, lastTime, volume, openInterest, oiDate,
-  vendor: { iv, delta, gamma, theta, vega, rho } | null,   // what the provider said; never mixed with ours
-  underlyingPrice, underlyingTime,                          // what we priced against
-  flags: ["indicative", "wide-spread", "stale-quote", "below-intrinsic", ...]
+struct OptionQuote {
+    contract_id: String, provider: String, feed: Indicative | Opra | Eod | Import,
+    quote_time: i64, retrieved_at: i64,
+    bid, ask, bid_size, ask_size, last, last_time, volume: Option<f64>,
+    open_interest: Option<f64>, oi_date: Option<Date>,
+    vendor: Option<VendorGreeks>,       // kept only for cross-checks, never mixed with ours
+    underlying_price: f64, underlying_time: i64,
+    flags: Vec<Flag>,                   // Indicative, WideSpread, StaleQuote, BelowIntrinsic, …
 }
 ```
 
-**Our** computed IV and Greeks are a separate derived record keyed by (contractId, quoteTime, modelVersion). Vendor values are kept only for cross-checking.
+Our IV and Greeks are a separate derived record keyed by (contract, quote_time, model_version).
 
-### 3.2 `options.sqlite` (new, in the app-data folder)
+### 4.2 `options.sqlite` (new, in the app-data folder)
 
 ```sql
 CREATE TABLE contracts(id TEXT PRIMARY KEY, underlying TEXT, root TEXT, type TEXT, strike REAL,
@@ -93,11 +127,11 @@ CREATE TABLE contracts(id TEXT PRIMARY KEY, underlying TEXT, root TEXT, type TEX
   currency TEXT, first_seen INTEGER, last_seen INTEGER);
 CREATE INDEX contracts_u ON contracts(underlying, expiry, strike);
 
--- One immutable capture of a chain (write-once, like quant_lab snapshots)
-CREATE TABLE snapshots(id TEXT PRIMARY KEY,             -- "snap_" + sha256(content)[:20]
+CREATE TABLE snapshots(id TEXT PRIMARY KEY,             -- "snap_" + sha256(content)[:20], write-once
   underlying TEXT, provider TEXT, feed TEXT, taken_at INTEGER, underlying_price REAL,
   underlying_time INTEGER, rate_curve TEXT, model_version TEXT, content_sha256 TEXT,
-  kind TEXT);                                           -- "eod" | "manual" | "import"
+  kind TEXT,                                            -- eod | manual | backfill | import
+  captured_by TEXT);                                    -- agent | app
 CREATE INDEX snapshots_u ON snapshots(underlying, taken_at);
 
 CREATE TABLE quotes(snapshot TEXT, contract TEXT, bid REAL, ask REAL, last REAL, volume REAL,
@@ -105,145 +139,134 @@ CREATE TABLE quotes(snapshot TEXT, contract TEXT, bid REAL, ask REAL, last REAL,
   iv REAL, delta REAL, gamma REAL, theta REAL, vega REAL, rho REAL, flags TEXT,
   PRIMARY KEY(snapshot, contract)) WITHOUT ROWID;
 
--- Derived, small, kept forever: the basis of IV history, rank, skew history, event studies
 CREATE TABLE daily_summary(underlying TEXT, date TEXT, source_snapshot TEXT,
   atm_iv_30 REAL, atm_iv_60 REAL, atm_iv_90 REAL, rr25_30 REAL, bf25_30 REAL,
-  term TEXT,            -- JSON [{expiry, T, F, atmIV, n_ok}]
-  svi TEXT,             -- JSON per expiry {a,b,rho,m,sigma,rmse,arb}
-  gex TEXT,             -- JSON {convention: {total, flip, byStrike}}
-  quality TEXT, PRIMARY KEY(underlying, date)) WITHOUT ROWID;
+  term TEXT, svi TEXT, gex TEXT, quality TEXT,          -- JSON
+  PRIMARY KEY(underlying, date)) WITHOUT ROWID;
 
 CREATE TABLE events(id TEXT PRIMARY KEY, underlying TEXT, kind TEXT,  -- earnings|fomc|cpi|dividend
   date TEXT, timing TEXT, source TEXT, source_url TEXT, recorded_at INTEGER);
+
+CREATE TABLE agent_runs(started INTEGER PRIMARY KEY, finished INTEGER, job TEXT, result TEXT, detail TEXT);
 ```
 
-Retention: `quotes` pruned after N days (default 90, configurable in Settings → Reference data, the way 13F quarters are). `snapshots` and `daily_summary` are kept. Pruning never touches a snapshot referenced by a Quant Lab run or a saved event study. The Rust check is the same `immutable` idea as `lab.rs`.
+Retention: `quotes` pruned after N days (default 90; Settings → Reference data, like 13F quarters). `snapshots` and `daily_summary` are kept. Snapshots referenced by Quant Lab runs or saved event studies are never pruned. This uses the write-once idea of `lab.rs`.
 
-### 3.3 Workspace additions (small, in the JSON blob)
+**This database is personal data under provider licences** (Feasibility §10, rule 4). It lives only in the app-data folder. It is excluded from the JSON backup export, as API keys are today, and never synced, uploaded or committed.
 
-- `account.trades[]` gains `instrument: { kind: "equity" | "option", contractId?, multiplier? }`. Older trades migrate to `kind: "equity"`, with `SCHEMA` bumped from 2 to 3 in `engine.js migrate()`.
-- `state.options = { watch: [...underlyings], recorder: { enabled, time: "16:15 ET" }, gexConvention: "compare" }`.
+### 4.3 Workspace additions (small, in the JSON blob)
 
-## 4. Pipelines
+- `account.trades[]` gains `instrument: { kind: "equity" | "option", contractId?, multiplier? }`. Migration: `SCHEMA` 2 → 3 in `engine.js migrate()`; old trades become `kind: "equity"`.
+- `state.options = { recorder: [...underlyings], gexConvention: "compare" }`. Whether the agent is installed is read from the OS, not stored.
 
-### 4.1 Chain fetch (on demand)
+## 5. Pipelines
 
-```
-UI opens OMON for AAPL
- └─ bridge.optionsChain("AAPL", {expiries})          JS
-     └─ invoke options_chain                          Rust
-         ├─ providers::validate("alpaca","option_snapshots","AAPL")
-         ├─ cache lookup  "alpaca:option_snapshots:AAPL"   (ttl 15 min market hours, 12 h closed)
-         ├─ budget/gap gate (fast_gate, like Finnhub/Alpaca today)
-         ├─ paginate snapshots (limit 1000, page_token) + contracts (OI, multiplier, style)
-         └─ options::normalize → Vec<OptionQuote>   (pure, unit-tested on fixtures)
- └─ options/worker.js: forward.js → iv.js → greeks → quality.js   JS (pure)
- └─ view model → OMON table, smile, term charts
-```
-
-The underlying price is the Finnhub stream price if streaming and fresh, otherwise the latest daily close, and the option quote time is compared against it (`quality.js` rule 1).
-
-### 4.2 EOD snapshot recorder (builds history from day one)
+### 5.1 Chain fetch (on demand, in the app)
 
 ```
-Once per trading day after 16:15 ET while the app is open (or at next launch, labelled "late capture"):
- for each underlying in state.options.watch (cap ~30):
-   chain fetch (4.1) → compute IV/Greeks → write snapshot + quotes (write-once)
-   → summarize (ATM IV by constant maturity, 25Δ RR/BF, term JSON, GEX by convention)
-   → batch SVI fits through vol.py (one Python start for all symbols)
-   → daily_summary row
+OMON opens AAPL
+ └ bridge.optionsChain("AAPL")                           JS
+    └ invoke options_chain                                Rust
+       ├ providers::validate("alpaca", "option_snapshots", "AAPL")
+       ├ cache "alpaca:option_snapshots:AAPL"  (15 min in market hours, 12 h closed)
+       ├ budget + gap gate (fast_gate), shared `requests` log
+       ├ paginate snapshots (limit 1000) + contracts (OI, multiplier, style)
+       ├ options::normalize → Vec<OptionQuote>
+       └ options_math: forward → iv → greeks → quality      (native, ~ms)
+ └ view model → OMON table, smile, term charts (SVG builders from riskcharts.js)
 ```
 
-There is no daemon, consistent with the current app (Alerts run only while the app is open). A missed day is a **gap**, never interpolated. The snapshot time is recorded, and a late capture is flagged because next-morning quotes are not closing quotes.
+### 5.2 Interactive maths (in the interface)
 
-### 4.3 Backfill (optional, paid)
+The strategy lab sliders and scenario grids call the WebAssembly build of `options-math` directly. There is no IPC and no round trip. The same function signatures exist natively, so a grid computed in the interface and one computed by `options_eval` are bit-identical by construction. A test asserts this on fixtures.
 
-Massive Basic/Starter EOD contract aggregates (2 years) → recompute IV from close prices against the underlying close. Each row is flagged `backfill-last-trade`, because closes are last trades and can be stale. Backfilled summaries are stored with `quality.source = "backfill"` and are visually distinct in charts.
+### 5.3 EOD capture (agent, or in-app fallback)
 
-### 4.4 Indian EOD import
+§3.2. Each capture writes one write-once snapshot, its quotes and a `daily_summary` row; missed days stay gaps.
 
-User downloads the NSE F&O bhavcopy and the India VIX CSV → `options_import_csv` (Rust; reuses the CSV parsing rules in `engine.js parseCSV`, including formula neutralization) → contracts + snapshot `kind: "import"` with `feed: "eod"` and settle prices → Black-76 IV against the same-expiry NIFTY future settle from the same file. No network request is made.
+### 5.4 Optional free backfill
 
-### 4.5 Volatility indices and rates
+User-started from Settings. The agent works through the Massive Basic contract-bars queue at 5/minute, resumable across runs, and writes `kind: "backfill"` snapshots whose IVs come from EOD closes against the underlying close. These are flagged `backfill-last-trade` and drawn as dashed series.
 
-Existing `fetch_data("fred", "observations", id)`. Add `VIXCLS`, `VXVCLS`, `DTB4WK`, `DTB3`, `DTB6`, `DTB1YR`, `SOFR` to a `volSeries`/`rateSeries` map beside `macroSeries` in `main.js`. Rust change: allow `observation_start` (or a higher `limit`) for the vol page's long history. `rates.js` builds a piecewise-linear zero curve from T-bill yields, converted from bank discount or bond-equivalent yields to continuous compounding. The conversion convention is documented and tested.
+### 5.5 Volatility indices and rates
 
-### 4.6 Realized vol
+Existing `fetch_data("fred", "observations", id)` with `VIXCLS`, `VXVCLS`, `DTB4WK`, `DTB3`, `DTB6`, `DTB1YR`, `SOFR`. Rust change: allow `observation_start` (or a higher `limit`) for long history. `options_math::rates` converts bill yields to continuous zero rates; the convention is documented and tested.
 
-Pure JS `realized.js` on `asset.bars` (OHLC already in the workspace). A split filter uses `prepareBars` warnings as a first cut and a corporate-actions source later. The existing gs-quant `volatility()` stays as is in RSK. VOL uses `realized.js` so that the estimator is explicit and consistent with IV conventions (log returns, 252).
+### 5.6 Realized vol
 
-## 5. Portfolio and paper trading integration
+`options_math::realized` on the workspace OHLC bars, through WebAssembly in the interface and natively in the agent for summaries. A split filter starts from `prepareBars` gap warnings and moves to Massive Basic corporate actions if the user enables that account.
 
-| Change | File | Detail |
+## 6. Paper trading and portfolio
+
+| Change | Where | Detail |
 |---|---|---|
-| Instrument model | `ledger.rs`, `engine.js` | `Trade.instrument`; validation per kind; option ids validated against the OCC pattern instead of the 20-char regex |
+| Instrument model | `ledger.rs`, `engine.js` | `Trade.instrument`; option ids validated against the OCC pattern, replacing the 20-character regex for options |
 | Multiplier-aware cash | `book()`, `ledger.rs` | cash −= qty·price·multiplier + fee |
-| Defined-risk shorts (Phase 4) | `ledger.rs` | Allowed if covered (enough shares per call), cash-secured (cash ≥ strike × multiplier per put), or part of a spread order whose max loss is reserved. Naked shorts are rejected with an explanation. A margin model is a separate decision |
-| Multi-leg orders | new `Order { legs[] }` | Atomic validation; one id; fees per leg |
-| Expiry processing | new pure fn `settleExpiries(account, closes, date)` | ITM by > $0.01 → exercise or assignment (physical → shares at strike; cash → difference). OTM → expire worthless. Recorded as synthetic trades with `source: "expiry"` so the ledger stays chronological and replayable |
-| Marks | `portfolio()` | Option mark = recorded snapshot mid if fresh, else **model price flagged "model mark"**, never a silent last trade |
-| Fills | Trade ticket | Default fill at the delayed/indicative **bid for sells and ask for buys** plus user slippage, timestamped with the quote time. Indicative quotes get a stronger warning |
-| Equity curve | `equityCurve()` | Needs historical option marks → recorded snapshots, otherwise model marks with the IV assumption shown. Both are flagged |
+| **Defined-risk shorts (planned)** | `ledger.rs` | Allowed when **covered** (shares ≥ 100 × short calls), **cash-secured** (cash ≥ strike × multiplier per short put, reserved), or **inside a spread** submitted as one order whose maximum loss is reserved. Anything else is refused with the reason |
+| Multi-leg orders | `Order { legs[] }` | Validated atomically; one id; fees per leg |
+| Expiry processing | `settle_expiries(account, closes, date)` | ITM by > $0.01: exercise/assignment (physical → shares at strike, cash → difference); OTM expires. Recorded as `source: "expiry"` trades, keeping the ledger chronological and replayable |
+| Marks | `portfolio()` | Recorded snapshot mid when fresh; otherwise a **model mark** flagged as such |
+| Fills | Options ticket | Default: delayed/indicative **ask for buys, bid for sells**, plus user slippage and per-contract fee, stamped with the quote time |
+| **Stretch: naked shorts with a margin model** | `options_math::margin`, `ledger.rs` | Strategy-based, Reg T-style paper margin. Standard published formula for a short equity option: 100% of premium + max(20% of underlying − out-of-the-money amount, 10% of underlying for calls / 10% of strike for puts) × multiplier; broad-based index options use 15% / 10%. *Percentages from the standard Cboe/FINRA formula: verify against the current Cboe Margin Manual before implementing.* Recomputed daily from marks. A deficit raises a paper **margin call**; if it isn't cured by the next session, the position is closed at the ask plus slippage, and that is recorded. Labelled "Simulated margin. Brokers set higher house requirements." Paper only |
+| Equity curve | `equityCurve()` | Recorded marks where captured, model marks otherwise (flagged) |
 
-## 6. Quant Lab integration
+Rust remains the validation boundary, as today. The JS ledger counterpart used by the browser preview calls the same WebAssembly maths for marks and margin.
 
-Quant Lab's guarantees (hashed snapshots, write-once records, sealed holdout, look-ahead-safe fills) apply unchanged. New experiment *types* rather than new engines:
+## 7. Quant Lab integration
 
-- **Vol-selling study:** monthly short ATM straddle or 25Δ strangle on SPY, priced from **recorded or backfilled** chains, fills at bid/ask, the user-set commission, expiry or early close rules. Reports a P&L distribution and its relation to VRP at entry. Needs history; until then the UI says how many days exist.
-- **Event study:** per-symbol panel of implied vs realized moves (§Feasibility 4.6) with snapshot hashes for each event.
-- **Hedging study:** delta-hedge simulator runs (§7) saved as runs with a seed.
+Quant Lab's guarantees (hashed snapshots, write-once records, sealed holdout, look-ahead-safe fills) apply unchanged. New experiment types, not new engines:
 
-`lab.rs` `KINDS` gets `"vol_study"` and `"event_study"`. Bodies remain JSON, so nothing changes in Rust except the allow-list.
+- **Vol-selling study:** short ATM straddle or 25Δ strangle on recorded or backfilled chains, bid/ask fills, fees, exit rules; P&L distribution vs VRP at entry.
+- **Event study:** implied vs realized moves with the snapshot hash of each event.
+- **Hedging study:** simulator runs with a seed.
 
-## 7. Hedging simulator (`hedge.js`)
+`lab.rs` `KINDS` gains `"vol_study"` and `"event_study"`.
 
-Inputs: option position(s), a path source (historical bars from date d, or bootstrap/GBM/jump paths), an IV path (recorded, constant, or RV-linked), rebalance rule (every n days / |Δ| band / both), costs (per-share fee, half-spread bps, option fees), rate curve.
-Per step: reprice, compute Δ, trade shares if the rule fires, accrue financing on cash and shares.
-Outputs: P&L path, terminal P&L distribution (MC), Σ costs, number of rebalances, tracking error vs the perfect-hedge theoretical value, and a decomposition of the hedged P&L into ½Γ(dS)² − θdt (gamma-theta) + vega·dσ + costs + residual.
-Runs in `options/worker.js`. Deterministic seed (as `quant.py`: crc32 of the inputs).
+## 8. Hedging simulator (`options_math::hedge`)
 
-## 8. Testing strategy
+Inputs: option position(s); a path source (historical bars from a date, bootstrap like `quant.py`, GBM, jump-diffusion); an IV path (recorded, constant, or RV-linked); a rebalance rule (every n days, |Δ| band, or both); costs (per-share fee, half-spread bps, option fees); the rate curve.
+Outputs: P&L path, terminal distribution, Σ costs, rebalance count, tracking error, and a decomposition into ½Γ(dS)² − θdt + vega·dσ + costs + residual. Seeded deterministically. Runs natively through `options_eval` for 10k-path Monte Carlo, or in WebAssembly for single paths.
+
+## 9. Testing
 
 | Layer | Tests |
 |---|---|
-| `src/options/*.js` | `tests/options.*.test.js`: reference values (Hull, Haug), parity and Greek identities, PDE residual, finite-difference vs analytic, solver edge cases (deep ITM/OTM, T→0, σ bounds, below-intrinsic → null), binomial convergence, forward from parity with dividends, rate-curve conversions |
-| Python oracle | `scripts/options-oracle.cjs` runs `vol.py --oracle` on 10,000 random inputs and compares with JS to 1e-9. Runs in CI after `bundle-python.cjs` |
-| `options.rs` | Normalization of recorded Alpaca/Massive fixture JSON (`tests/fixtures/options/*.json`), OCC parse round-trip, write-once snapshot refusal (as `lab.rs` tests) |
-| `providers.rs` | `validate`/`request` for the new kinds, key masking; live contract test marked `#[ignore]` like `live_demo_keys` |
-| Ledger | Multiplier cash, covered/secured short validation, expiry settlement, migration from schema 2 |
-| E2E | `scripts/smoke.cjs` opens OMON/VOL/OSA in demo mode with a deterministic synthetic chain from `sample.js` (labelled synthetic, as demo prices are today) |
+| `options-math` | `cargo test`: Hull/Haug reference values; parity and Greek identities; BSM PDE residual; finite difference vs analytic; solver edge cases (deep ITM/OTM, T→0, σ bounds, below-intrinsic → none); binomial convergence; parity forward with dividends; rate conversions; margin formula cases (stretch) |
+| Python oracle | `vol.py --oracle` compares 10,000 random inputs with the Rust results to 1e-9; runs in CI after `bundle-python.cjs` |
+| WebAssembly parity | `node --test` loads the WebAssembly package and checks bit-identical outputs against native fixtures |
+| `options.rs` | Normalization of **synthetic** fixtures shaped like Alpaca/Massive responses (no real vendor data in the repo, Feasibility §10, rule 4); OCC round-trip; write-once refusal |
+| `agent.rs` | Due-work logic: trading day, capture window, gap on late wake, lock file, budget sharing; pure functions with injected clock |
+| `providers.rs` | `validate`/`request` for new kinds and key masking; live contract test `#[ignore]` like `live_demo_keys` |
+| Ledger | Multiplier cash, covered/secured/spread validation, expiry settlement, schema-2 migration; margin calls (stretch) |
+| E2E | `scripts/smoke.cjs` opens VOL/OSA/OMON in demo mode with a deterministic synthetic chain from `sample.js` |
 
-## 9. Demo data
+## 10. Demo data
 
-`src/sample.js` gains a deterministic synthetic chain generator (SVI smile + term structure + noise) for demo mode, so the browser preview and smoke tests work without keys. It is **always** badged "Demo data · synthetic", exactly as today's demo prices are. The generator never runs in Live data mode.
-
-## 10. Extensibility
-
-- New exchange: a provider adapter in `providers.rs` + a normalizer in `options.rs` producing `OptionQuote`. `contract.style/settlement/expiryTime` carry the market rules; no market-specific branches in the math.
-- New instrument (options on futures, VIX options): `underlyingKind: "future"` plus a futures price source; Black-76 already covers the pricing.
-- Real-time later: a websocket adapter like `quotes.rs` that writes into the same in-memory book shape. Analytics don't change.
+`src/sample.js` gains a seeded synthetic chain (SVI smile + term structure + noise) for demo mode and tests. It is always badged "Demo data · synthetic", and site screenshots use only this.
 
 ## 11. Relevant existing files
 
-| File | Role in this plan |
+| File | Role |
 |---|---|
-| `src-tauri/src/providers.rs` | Add Alpaca option kinds, optional Massive provider, FRED history params, budgets |
-| `src-tauri/src/main.rs` | New commands; open `options.sqlite` next to `reference.sqlite` (`open_reference` pattern) |
-| `src-tauri/src/lab.rs` | Write-once pattern to copy; new Quant Lab kinds |
-| `src-tauri/src/quant.rs`, `quant.py` | Pattern for `vol.py` (fixed script, `-I -B`, stdin JSON, batch) |
-| `src-tauri/src/ledger.rs`, `src/engine.js` | Instrument model, multiplier, expiry, shorts |
-| `src/bridge.js` | New invoke wrappers |
-| `src/stock.js` | `VIEWS` gets `OMON`, `VOL`, `OSA`, `EVT`, `GEX` |
-| `src/riskcharts.js` | `ticks`, `wrap`, `hover`, `lineChart` reused for smile/term/GEX/payoff |
-| `src/pricechart.js` | Overlay realized/implied vol pane and event markers on GP |
-| `src/quant.js` | `fredRate` superseded by `options/rates.js` |
-| `src/quantlab/*` | Snapshot hashing, manifests, worker pattern |
-| `src/main.js` `analystFacts()` | Add vol facts (ATM IV, IV rank with n days, implied move, next earnings) with source ids |
+| `src-tauri/src/providers.rs` | Alpaca option kinds, optional Massive Basic provider, FRED history params, budgets |
+| `src-tauri/src/main.rs` | New commands; open `options.sqlite` like `open_reference` |
+| `src-tauri/src/lib.rs` | Export `options`, `agent` modules for the agent binary and tests |
+| `src-tauri/Cargo.toml` | Workspace membership; `[[bin]] aperture-agent` without the `desktop` feature |
+| `src-tauri/tauri.conf.json` | `bundle.externalBin` for the agent sidecar |
+| `Casks/aperture-preview.rb`, `bucket/aperture-preview.json` | Agent removal on uninstall |
+| `src-tauri/src/lab.rs` | Write-once pattern; new Quant Lab kinds |
+| `src-tauri/src/quant.rs`, `quant.py` | Pattern for `vol.py` |
+| `src-tauri/src/ledger.rs`, `src/engine.js` | Instrument model, multiplier, expiry, shorts, margin (stretch) |
+| `src/bridge.js` | Invoke wrappers; WebAssembly loader |
+| `src/stock.js` | `VIEWS` gains `VOL`, `OMON`, `OSA`, `EVT`, `GEX` |
+| `src/riskcharts.js` | `ticks`, `wrap`, `hover`, `lineChart` for the new charts |
+| `src/main.js` `analystFacts()` | Vol facts with source ids and class labels |
 | `src/sample.js` | Synthetic demo chain |
 
 ## 12. Explicitly not proposed
 
-- A separate service, message queue or database server.
-- Moving the existing analytics to Rust or Python.
+- A resident daemon, a server, or a cloud service.
+- Rewriting existing JS analytics (`engine.js`, Quant Lab) in Rust. Only the new options maths is Rust.
 - Real-time OPRA streaming, order routing, or any real-money execution.
-- Scraping undocumented endpoints (NSE option-chain API, Cboe CDN quotes JSON).
+- Paid data, scraping, or undocumented endpoints (Feasibility §10).
+- Indian markets, until that work is resumed.
