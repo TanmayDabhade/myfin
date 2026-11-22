@@ -14,3 +14,5 @@ pub mod options;
 pub mod massive;
 pub mod recorder;
 pub mod scheduler;
+pub mod windows;
+pub mod workspace;

@@ -856,6 +856,8 @@ nav { gap: 2px; }
 .stream { font-size: 11px; color: #8d8d8d; line-height: 1.5; display: block; }
 .stream.on { color: #4cc38a; }
 .stream.down { color: #f0716a; }
+.new-window { width: 100%; font-size: 11px; padding: 7px 10px; text-align: left; background: transparent; border-color: #2a2a2a; color: #a8a8a8; }
+.new-window:hover { color: #fff; border-color: #444; }
 .stream-cta { width: 100%; font-size: 11px; padding: 8px 10px; text-align: left; background: #111; border-color: #2a2a2a; border-style: dashed; color: #cfcfcf; line-height: 1.4; }
 .content { padding-top: 34px; }
 .title-tags { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }

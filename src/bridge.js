@@ -1,23 +1,67 @@
 import { sample } from "./sample.js";
+import { flatten, diff, applyRead, changedPaths } from "./workspace.js";
 const invoke = window.__TAURI__?.core.invoke;
 export const native = !!invoke;
 const KEY = "aperture-v1";
-export async function load() {
-  return (
-    (native
-      ? await invoke("load_state")
-      : JSON.parse(
-          localStorage.getItem(KEY) ||
-            // Saved before the app was renamed from Market Lens.
-            localStorage.getItem("market-lens-v1") ||
-            "null",
-        )) ||
-    sample()
-  );
+// Desktop: the workspace as this window last saved or read it, and one queue
+// for saves and reads so they reach the app in order (see workspace.js).
+let baseline = new Map(),
+  queue = Promise.resolve();
+const queued = (task) => {
+  const run = queue.then(task);
+  queue = run.catch(() => {});
+  return run;
+};
+export function load() {
+  if (!native)
+    return Promise.resolve(
+      JSON.parse(
+        localStorage.getItem(KEY) ||
+          // Saved before the app was renamed from Market Lens.
+          localStorage.getItem("market-lens-v1") ||
+          "null",
+      ) || sample(),
+    );
+  return queued(async () => {
+    const saved = await invoke("load_state");
+    baseline = saved ? flatten(saved) : new Map();
+    return saved || sample();
+  });
 }
-export async function save(state) {
-  if (native) await invoke("save_state", { state });
-  else localStorage.setItem(KEY, JSON.stringify(state));
+// Sends what changed since the last save; nothing when nothing did.
+export function save(state) {
+  if (!native) {
+    localStorage.setItem(KEY, JSON.stringify(state));
+    return Promise.resolve();
+  }
+  return queued(async () => {
+    const next = flatten(state),
+      ops = diff(baseline, next, state);
+    if (!ops.length) return;
+    await invoke("workspace_patch", { ops });
+    baseline = next;
+  });
+}
+// ---- Windows ------------------------------------------------------------------
+const listen = (name, fn) => window.__TAURI__?.event?.listen?.(name, (e) => fn(e.payload));
+// { label, leader, intent }: the browser and older stand-ins are one window.
+export const windowHello = () => (native ? invoke("window_hello").catch(() => ({ label: "main", leader: true, intent: null })) : Promise.resolve({ label: "main", leader: true, intent: null }));
+export const windowOpen = (view, title) => call("window_open", { view, title });
+export const setWindowTitle = (title) => window.__TAURI__?.window?.getCurrentWindow?.().setTitle(title).catch(() => {});
+export const onWindowLeader = (fn) => listen("window-leader", (p) => fn(p?.label));
+// Another window saved: read the new values into `getState()` (after this
+// window's own pending saves), then `done(paths)`.
+export function onWorkspaceChanged(self, getState, done) {
+  return listen("workspace-changed", (p) => {
+    const paths = changedPaths(p);
+    if (!native || p?.from === self || !paths.length) return;
+    queued(async () => {
+      const entries = await invoke("workspace_read", { paths });
+      applyRead(getState(), baseline, entries);
+    })
+      .then(() => done(paths))
+      .catch(() => {});
+  });
 }
 // Which providers have a key. Never returns the keys themselves.
 export async function keyStatus() {
@@ -42,8 +86,13 @@ export async function fetchSEC(kind, cik = "", accession = "", doc = "", force =
 export const aisStart = (area, lat, lon) => invoke("ais_start", { area, lat, lon });
 export const aisStop = () => (native ? invoke("ais_stop") : Promise.resolve());
 export const aisSnapshot = () => invoke("ais_snapshot");
-export async function nativeTrade(mode, order, marks = null) {
-  return invoke("paper_trade", { mode, order, marks });
+// Returns the whole saved workspace with the trade applied.
+export function nativeTrade(mode, order, marks = null) {
+  return queued(async () => {
+    const state = await invoke("paper_trade", { mode, order, marks });
+    baseline = flatten(state);
+    return state;
+  });
 }
 export const quotesStart = (symbols) => invoke("quotes_start", { symbols });
 export const quotesStop = () => (native ? invoke("quotes_stop") : Promise.resolve());

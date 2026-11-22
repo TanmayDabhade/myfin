@@ -44,7 +44,19 @@ function fakeBackend() {
     backfill_status: () => ({ configured: false, pending: 0, tiers: [], symbols: {}, summaryDays: 0 }),
     agent_status: () => ({ installed: false, runs: [], log: "/tmp/agent.log" }),
     load_state: () => store("native-state"),
-    save_state: ({ state }) => store("native-state", state),
+    // Each window sends what it changed (src/workspace.js has the operations).
+    workspace_patch: ({ ops }) => {
+      const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+      let body = store("native-state");
+      if (!plain(body)) body = {};
+      for (const [kind, [k, e], v] of ops) {
+        if (kind === "obj") { if (!plain(body[k])) body[k] = {}; }
+        else if (kind === "set") { if (e === undefined) body[k] = v; else (plain(body[k]) ? body[k] : (body[k] = {}))[e] = v; }
+        else if (e === undefined) delete body[k];
+        else if (plain(body[k])) delete body[k][e];
+      }
+      store("native-state", body);
+    },
     key_status: () => {
       const k = store("native-keys") || {};
       return Object.fromEntries(["alpha", "twelve", "fred", "sec", "ais", "finnhub", "alpaca", "alpacasecret"].map((p) => [p, { configured: !!k[p], source: k[p] ? "saved" : "none" }]));
