@@ -17,6 +17,8 @@ mod options;
 mod massive;
 mod recorder;
 mod scheduler;
+mod windows;
+mod workspace;
 use providers::Credentials;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -25,7 +27,7 @@ use std::{
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 struct Backend {
     db: Mutex<Connection>,
@@ -58,6 +60,10 @@ struct Backend {
     chains: Mutex<HashMap<String, (i64, Value)>>,
     /// Set to stop a running Massive backfill.
     backfill_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The saved workspace, kept in memory so each window's small changes
+    /// don't re-read the whole thing.
+    ws: Mutex<Option<Value>>,
+    windows: Mutex<windows::Registry>,
 }
 #[derive(Default, Clone, serde::Serialize)]
 struct Job {
@@ -270,9 +276,8 @@ fn lab_list(b: tauri::State<Backend>, kind: String, parent: Option<String>) -> R
     let db = b.db.lock().map_err(|_| "Database unavailable")?;
     lab::list(&db, &kind, parent.as_deref())
 }
-#[tauri::command]
-fn load_state(b: tauri::State<Backend>) -> Result<Value, String> {
-    let db = b.db.lock().map_err(|_| "Database unavailable")?;
+const WORKSPACE_LIMIT: usize = 20_000_000;
+fn read_workspace(db: &Connection) -> Result<Value, String> {
     let raw: String = db
         .query_row("SELECT body FROM workspace WHERE id=1", [], |r| r.get(0))
         .optional()
@@ -280,17 +285,112 @@ fn load_state(b: tauri::State<Backend>) -> Result<Value, String> {
         .unwrap_or("null".into());
     serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
-#[tauri::command]
-fn save_state(b: tauri::State<Backend>, state: Value) -> Result<(), String> {
-    if state.to_string().len() > 20_000_000 {
-        return Err("Workspace exceeds 20 MB".into());
-    }
+/// Runs `f` on the workspace and saves the result; on an error, or a
+/// workspace over the size limit, nothing is saved.
+fn change_workspace<T>(b: &Backend, f: impl FnOnce(&mut Value) -> Result<T, String>) -> Result<T, String> {
+    let mut ws = b.ws.lock().map_err(|_| "Workspace unavailable")?;
     let db = b.db.lock().map_err(|_| "Database unavailable")?;
-    db.execute("INSERT INTO workspace(id,body) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET body=excluded.body",[state.to_string()]).map_err(|e|e.to_string())?;
+    let mut body = match ws.take() {
+        Some(v) => v,
+        None => read_workspace(&db)?,
+    };
+    let before = body.clone();
+    let out = f(&mut body).and_then(|out| {
+        let text = body.to_string();
+        if text.len() > WORKSPACE_LIMIT {
+            return Err("Workspace exceeds 20 MB".to_string());
+        }
+        db.execute("INSERT INTO workspace(id,body) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET body=excluded.body", [text]).map_err(|e| e.to_string())?;
+        Ok(out)
+    });
+    *ws = Some(if out.is_ok() { body } else { before });
+    out
+}
+/// Tells the other windows which parts of the workspace changed; they read
+/// the new values with `workspace_read`.
+fn announce(app: &tauri::AppHandle, from: &str, paths: &[workspace::Path]) {
+    let _ = app.emit("workspace-changed", json!({"from": from, "paths": paths}));
+}
+#[tauri::command]
+fn load_state(b: tauri::State<Backend>) -> Result<Value, String> {
+    let mut ws = b.ws.lock().map_err(|_| "Workspace unavailable")?;
+    if ws.is_none() {
+        *ws = Some(read_workspace(&*b.db.lock().map_err(|_| "Database unavailable")?)?);
+    }
+    Ok(ws.clone().unwrap_or(Value::Null))
+}
+/// Saves one window's changes (see `workspace.rs` for the operations).
+#[tauri::command]
+fn workspace_patch(app: tauri::AppHandle, window: tauri::Window, b: tauri::State<Backend>, ops: Vec<Value>) -> Result<(), String> {
+    let paths = change_workspace(&b, |body| workspace::apply(body, &ops))?;
+    announce(&app, window.label(), &paths);
     Ok(())
 }
 #[tauri::command]
+fn workspace_read(b: tauri::State<Backend>, paths: Vec<workspace::Path>) -> Result<Value, String> {
+    let ws = b.ws.lock().map_err(|_| "Workspace unavailable")?;
+    Ok(workspace::read(ws.as_ref().unwrap_or(&Value::Null), &paths))
+}
+// ---- Windows ------------------------------------------------------------------
+/// A window asks who it is, whether it runs the background work, and what it
+/// was opened to show.
+#[tauri::command]
+fn window_hello(window: tauri::Window, b: tauri::State<Backend>) -> Result<Value, String> {
+    let mut reg = b.windows.lock().map_err(|_| "Windows unavailable")?;
+    let label = window.label();
+    reg.opened(label);
+    Ok(json!({"label": label, "leader": reg.leader == label, "intent": reg.take_intent(label)}))
+}
+/// Opens another window. `view` is what it shows first (page, ticker, view
+/// code), handed over when the window starts.
+#[tauri::command]
+async fn window_open(app: tauri::AppHandle, b: tauri::State<'_, Backend>, view: Value, title: String) -> Result<String, String> {
+    if view.to_string().len() > 2000 {
+        return Err("Invalid window view".into());
+    }
+    let title: String = title.chars().filter(|c| !c.is_control()).take(80).collect();
+    let label = b.windows.lock().map_err(|_| "Windows unavailable")?.reserve(view);
+    let built = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .title(if title.trim().is_empty() { "Aperture".into() } else { title })
+        .inner_size(1280.0, 860.0)
+        .min_inner_size(1000.0, 700.0)
+        .build();
+    match built {
+        Ok(_) => {
+            b.windows.lock().map_err(|_| "Windows unavailable")?.opened(&label);
+            Ok(label)
+        }
+        Err(e) => {
+            if let Ok(mut reg) = b.windows.lock() {
+                reg.closed(&label);
+            }
+            Err(format!("Could not open a window: {e}"))
+        }
+    }
+}
+/// A closed window gives up its price symbols and vessel stream, and hands
+/// the background work to another window if it was doing it.
+fn window_closed(app: &tauri::AppHandle, label: &str) {
+    let b = app.state::<Backend>();
+    let next = b.windows.lock().ok().and_then(|mut reg| reg.closed(label));
+    if let Ok(mut rt) = b.quotes.lock() {
+        if rt.subs.remove(label).is_some() {
+            resubscribe(&mut rt);
+        }
+    }
+    if let Ok(mut rt) = b.ais.lock() {
+        if rt.watchers.remove(label) && rt.watchers.is_empty() {
+            stop_ais(&mut rt);
+        }
+    }
+    if let Some(leader) = next {
+        let _ = app.emit("window-leader", json!({"label": leader}));
+    }
+}
+#[tauri::command]
 fn paper_trade(
+    app: tauri::AppHandle,
+    window: tauri::Window,
     b: tauri::State<Backend>,
     mode: String,
     order: ledger::Trade,
@@ -299,36 +399,28 @@ fn paper_trade(
     if !["sample", "market"].contains(&mode.as_str()) {
         return Err("Invalid account".into());
     }
-    let mut db = b.db.lock().map_err(|_| "Database unavailable")?;
-    let tx = db.transaction().map_err(|e| e.to_string())?;
-    let raw: String = tx
-        .query_row("SELECT body FROM workspace WHERE id=1", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    let mut state: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    let mut account: ledger::Account =
-        serde_json::from_value(state["accounts"][&mode].clone()).map_err(|e| e.to_string())?;
-    let map = if mode == "sample" {
-        "assets"
-    } else {
-        "marketAssets"
-    };
-    // Options trade on their underlying's prices; shares on their own.
-    let priced = match order.instrument.as_deref() {
-        Some("option") => options::parse_occ(&order.symbol).map(|c| c.root),
-        _ => Some(order.symbol.clone()),
-    };
-    if priced.as_ref().is_none_or(|s| state[map].get(s).is_none()) {
-        return Err("Import prices for this symbol before trading".into());
-    }
-    let marks: ledger::Marks = marks.and_then(|m| serde_json::from_value(m).ok()).unwrap_or_default();
-    account.append_with(order, &marks)?;
-    state["accounts"][&mode] = serde_json::to_value(account).map_err(|e| e.to_string())?;
-    tx.execute(
-        "UPDATE workspace SET body=?1 WHERE id=1",
-        [state.to_string()],
-    )
-    .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
+    let state = change_workspace(&b, |state| {
+        let mut account: ledger::Account =
+            serde_json::from_value(state["accounts"][&mode].clone()).map_err(|e| e.to_string())?;
+        let map = if mode == "sample" {
+            "assets"
+        } else {
+            "marketAssets"
+        };
+        // Options trade on their underlying's prices; shares on their own.
+        let priced = match order.instrument.as_deref() {
+            Some("option") => options::parse_occ(&order.symbol).map(|c| c.root),
+            _ => Some(order.symbol.clone()),
+        };
+        if priced.as_ref().is_none_or(|s| state[map].get(s).is_none()) {
+            return Err("Import prices for this symbol before trading".into());
+        }
+        let marks: ledger::Marks = marks.and_then(|m| serde_json::from_value(m).ok()).unwrap_or_default();
+        account.append_with(order, &marks)?;
+        state["accounts"][&mode] = serde_json::to_value(account).map_err(|e| e.to_string())?;
+        Ok(state.clone())
+    })?;
+    announce(&app, window.label(), &[vec!["accounts".into(), mode]]);
     Ok(state)
 }
 #[tauri::command]
@@ -821,10 +913,20 @@ struct AisRuntime {
     last_message: i64,
     session: u64,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Windows showing vessels; the stream stops when the last one leaves.
+    watchers: std::collections::HashSet<String>,
+}
+fn stop_ais(rt: &mut AisRuntime) {
+    if let Some(t) = rt.task.take() {
+        t.abort();
+    }
+    rt.session += 1;
+    rt.status = "stopped".into();
 }
 /// Starts (or moves) the live vessel stream to a box around one location.
+/// There is one stream; the window that asked last picks the location.
 #[tauri::command]
-fn ais_start(b: tauri::State<Backend>, area: String, lat: f64, lon: f64) -> Result<(), String> {
+fn ais_start(window: tauri::Window, b: tauri::State<Backend>, area: String, lat: f64, lon: f64) -> Result<(), String> {
     if area.len() > 40 || !area.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err("Invalid area".into());
     }
@@ -837,6 +939,7 @@ fn ais_start(b: tauri::State<Backend>, area: String, lat: f64, lon: f64) -> Resu
         return Err("Add an AISStream key in Settings → Data sources for live vessels.".into());
     }
     let mut rt = b.ais.lock().map_err(|_| "Vessel stream unavailable")?;
+    rt.watchers.insert(window.label().to_string());
     if rt.area == area && rt.task.is_some() {
         return Ok(());
     }
@@ -855,13 +958,12 @@ fn ais_start(b: tauri::State<Backend>, area: String, lat: f64, lon: f64) -> Resu
     Ok(())
 }
 #[tauri::command]
-fn ais_stop(b: tauri::State<Backend>) -> Result<(), String> {
+fn ais_stop(window: tauri::Window, b: tauri::State<Backend>) -> Result<(), String> {
     let mut rt = b.ais.lock().map_err(|_| "Vessel stream unavailable")?;
-    if let Some(t) = rt.task.take() {
-        t.abort();
+    rt.watchers.remove(window.label());
+    if rt.watchers.is_empty() {
+        stop_ais(&mut rt);
     }
-    rt.session += 1;
-    rt.status = "stopped".into();
     Ok(())
 }
 #[tauri::command]
@@ -939,11 +1041,32 @@ struct QuoteRuntime {
     last_message: i64,
     session: u64,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Each window's symbols; the stream carries all of them.
+    subs: HashMap<String, Vec<String>>,
+    /// The key the running stream connected with.
+    key: String,
 }
-/// Sets the symbols to stream. One connection is kept open and its
+/// Points the stream at every window's symbols, or stops it when no window
+/// wants any.
+fn resubscribe(rt: &mut QuoteRuntime) {
+    let all = quotes::symbols(&windows::union(&rt.subs)).unwrap_or_default();
+    if all.is_empty() {
+        if let Some(t) = rt.task.take() {
+            t.abort();
+        }
+        rt.session += 1;
+        rt.symbols.clear();
+        rt.status = "stopped".into();
+        rt.error.clear();
+        return;
+    }
+    rt.book.retain(&all);
+    rt.symbols = all;
+}
+/// Sets this window's symbols to stream. One connection is kept open and its
 /// subscriptions follow the list, since Finnhub allows one connection per key.
 #[tauri::command]
-fn quotes_start(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), String> {
+fn quotes_start(window: tauri::Window, b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), String> {
     let symbols = quotes::symbols(&symbols)?;
     let key = {
         let saved = b.saved_keys.lock().map_err(|_| "Key store unavailable")?;
@@ -953,12 +1076,16 @@ fn quotes_start(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), St
         return Err("Add a Finnhub key in Settings → Data sources for real-time prices.".into());
     }
     let mut rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
-    rt.book.retain(&symbols);
-    rt.symbols = symbols;
-    // A running stream picks up the new list within a second.
-    if rt.task.is_some() && rt.status != "error" {
+    rt.subs.insert(window.label().to_string(), symbols);
+    let all = quotes::symbols(&windows::union(&rt.subs))?;
+    rt.book.retain(&all);
+    rt.symbols = all;
+    // A running stream picks up the new list within a second; a new key
+    // needs a new connection.
+    if rt.task.is_some() && rt.status != "error" && rt.key == key {
         return Ok(());
     }
+    rt.key = key.clone();
     if let Some(t) = rt.task.take() {
         t.abort();
     }
@@ -971,15 +1098,10 @@ fn quotes_start(b: tauri::State<Backend>, symbols: Vec<String>) -> Result<(), St
     Ok(())
 }
 #[tauri::command]
-fn quotes_stop(b: tauri::State<Backend>) -> Result<(), String> {
+fn quotes_stop(window: tauri::Window, b: tauri::State<Backend>) -> Result<(), String> {
     let mut rt = b.quotes.lock().map_err(|_| "Price stream unavailable")?;
-    if let Some(t) = rt.task.take() {
-        t.abort();
-    }
-    rt.session += 1;
-    rt.symbols.clear();
-    rt.status = "stopped".into();
-    rt.error.clear();
+    rt.subs.remove(window.label());
+    resubscribe(&mut rt);
     Ok(())
 }
 #[tauri::command]
@@ -1536,7 +1658,7 @@ fn main() {
                     _ => {}
                 }
             }
-            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;db.execute_batch(lab::SCHEMA)?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone(),chains:Default::default(),backfill_stop:Default::default()});options::open(&path.join("options.sqlite")).map_err(|e|e.to_string())?;tauri::async_runtime::spawn(recorder_loop(path.clone()));let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![lab_put,lab_get,lab_list,quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,save_state,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read,analyst_configure,analyst_pick_model,analyst_set_key,analyst_sign_out,analyst_sign_in,analyst_models,options_chain,options_history,backfill_status,backfill_start,backfill_pause,options_purge,agent_status,agent_install,agent_remove]).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
+            std::fs::create_dir_all(&path)?;let db=Connection::open(path.join(legacy::DB))?;db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY,body TEXT NOT NULL);CREATE TABLE IF NOT EXISTS cache(id TEXT PRIMARY KEY,body TEXT NOT NULL,stamp INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS requests(provider TEXT NOT NULL,stamp INTEGER NOT NULL);DELETE FROM cache WHERE id LIKE 'portwatch:%';")?;db.execute_batch(lab::SCHEMA)?;app.manage(Backend{db:Mutex::new(db),gate:tokio::sync::Mutex::new(()),fast_gate:tokio::sync::Mutex::new(()),sec_gate:tokio::sync::Mutex::new(()),env_keys:Credentials::from_env(),saved_keys:Mutex::new(Credentials::load(&path.join("credentials.json"))),key_path:path.join("credentials.json"),ais:Default::default(),quotes:Default::default(),http:reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?,bulk:reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)).read_timeout(std::time::Duration::from_secs(60)).timeout(std::time::Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none()).build()?,refdb:std::sync::Arc::new(Mutex::new(open_reference(&path.join("reference.sqlite"))?)),ref_path:path.join("reference.sqlite"),jobs:Default::default(),quant:Default::default(),quant_gate:Default::default(),bundled_python:app.path().resource_dir().ok().and_then(|d| quant::bundled(&d)),analyst:Default::default(),data_dir:path.clone(),chains:Default::default(),backfill_stop:Default::default(),ws:Default::default(),windows:Default::default()});app.state::<Backend>().windows.lock().map_err(|_| "Windows unavailable")?.opened(windows::MAIN);options::open(&path.join("options.sqlite")).map_err(|e|e.to_string())?;tauri::async_runtime::spawn(recorder_loop(path.clone()));let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::spawn(analyst_host::idle_watch(host));Ok(())}).invoke_handler(tauri::generate_handler![lab_put,lab_get,lab_list,quant_status,quant_choose,quant_forget,quant_analyze,quant_analyze_batch,quant_cached,load_state,workspace_patch,workspace_read,window_hello,window_open,key_status,set_keys,clear_key,fetch_data,fetch_sec,paper_trade,export_file,ais_start,ais_stop,ais_snapshot,quotes_start,quotes_stop,quotes_snapshot,quotes_tape,market_status,market_refresh,market_snapshot,holdings_status,holdings_update,holders,holder_portfolio,holders_find,universe_status,universe_refresh,universe_search,universe_browse,universe_facets,universe_get,analyst_status,analyst_install,analyst_remove,analyst_chat,analyst_cancel,analyst_news,analyst_read,analyst_configure,analyst_pick_model,analyst_set_key,analyst_sign_out,analyst_sign_in,analyst_models,options_chain,options_history,backfill_status,backfill_start,backfill_pause,options_purge,agent_status,agent_install,agent_remove]).on_window_event(|window,event|{if let tauri::WindowEvent::Destroyed=event{window_closed(window.app_handle(),window.label());}}).build(tauri::generate_context!()).expect("Could not launch Market Lens").run(|app,event|{
         // Never leave the AI engine running (and holding memory) after quitting.
         if let tauri::RunEvent::Exit=event{let host=app.state::<Backend>().analyst.clone();tauri::async_runtime::block_on(analyst_host::stop(&host));}
     });

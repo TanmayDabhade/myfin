@@ -80,6 +80,11 @@ import {
   quotesStop,
   quotesSnapshot,
   quotesTape,
+  windowHello,
+  windowOpen,
+  setWindowTitle,
+  onWindowLeader,
+  onWorkspaceChanged,
   native,
   nativeTrade,
   holdingsStatus,
@@ -169,6 +174,14 @@ const pct = (x) => (x == null ? "—" : fmt(x * 100) + "%"),
 // of the app works without it, so a failure only disables those views.
 let mathError = "";
 await loadMath(fetch(wasmUrl)).catch((e) => (mathError = String(e?.message || e)));
+// This window: its label, whether it runs the background work (only one
+// window does), and what it was opened to show. Listening starts before the
+// workspace loads; changes from other windows are read after it.
+const self = await windowHello();
+const leader = () => self.leader;
+let appReady = false; // set after the first render; earlier changes are in that render
+
+onWorkspaceChanged(self.label, () => state, (paths) => remoteChange(paths));
 let state = migrate(await load()),
   page = "Overview",
   keyInfo = await keyStatus().catch(() => null),
@@ -523,7 +536,7 @@ function render() {
   const demo = page !== "Setup" && state.mode === "sample";
   volBuilds = {};
   document.getElementById("app").innerHTML =
-    `<aside><div class="brand"><i>◈</i> APERTURE</div><div class="side-search"><input id="search" placeholder="Ticker or AAPL HDS" aria-label="Search any listing or type a function like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${sideNav()}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small></div></aside><main><section class="content">${page === "Stock" ? "" : `<div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>`}${views[page]()}</section><footer>Aperture 0.3 · USD equity workspace · Daily and intraday prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
+    `<aside><div class="brand"><i>◈</i> APERTURE</div><div class="side-search"><input id="search" placeholder="Ticker or AAPL HDS" aria-label="Search any listing or type a function like AAPL HDS" autocomplete="off" spellcheck="false"><kbd>↵</kbd><div id="search-results" class="combo-list" role="listbox" hidden></div></div><nav>${sideNav()}</nav><div class="sidebar-bottom"><div id="stream-status">${streamText()}</div><div class="mode-switch"><span class="dot ${live() ? "on" : ""}"></span><select id="mode" aria-label="Data workspace"><option value="market" ${state.mode === "market" ? "selected" : ""}>Live data</option><option value="sample" ${state.mode === "sample" ? "selected" : ""}>Demo data</option></select></div><small id="sync-status">${esc(syncText())}</small>${native ? `<button class="new-window" data-action="new-window" title="Open another window (⌘N). ⌘-click a page or stock to open it in one.">⧉ New window</button>` : ""}</div></aside><main><section class="content">${page === "Stock" ? "" : `<div class="title-row"><div><p class="eyebrow">${page === "Setup" ? "FIRST RUN" : page === "Universe" ? "EVERY LISTING WE CAN FIND" : state.mode === "sample" ? "DEMONSTRATION" : "LIVE RESEARCH"}</p><h1>${page === "Overview" ? "Your market, in focus." : page === "Setup" ? "Connect your data" : page}</h1></div>${page === "Setup" ? "" : `<div class="title-tags">${demo ? '<span class="tag warn" title="Prices and company metrics are synthetic. Switch to Live data at the bottom of the sidebar.">Demo data · synthetic prices</span>' : ""}<span class="tag">${assets().length} assets in workspace</span></div>`}</div>`}${views[page]()}</section><footer>Aperture 0.3 · USD equity workspace · Daily and intraday prices with real-time trades when streaming · Paper trades only · No investment recommendations</footer></main>`;
   bind();
   bindVessel();
   drawCharts();
@@ -544,6 +557,7 @@ function render() {
   syncVesselStream();
   syncPriceStream();
   syncTape();
+  titleWindow();
 }
 // Sidebar: market and account pages, then the loaded stock and recent ones.
 function sideNav() {
@@ -2770,9 +2784,10 @@ function relationsSweep() {
 // Shortly after launch, then every 6 hours: anything older than 7 days is
 // read again; a newly watched stock is picked up on the next check.
 setInterval(() => {
+  if (!leader()) return;
   if (Date.now() - relationsSweptAt >= 6 * 3600 * 1000 || (relationsSweptAt && state.watchlist.some((s) => !state.filingScans?.[graph().nodes.find((n) => n.ticker === s)?.id]))) relationsSweep();
 }, 60 * 1000);
-setTimeout(() => relationsSweep(), 20 * 1000);
+setTimeout(() => leader() && relationsSweep(), 20 * 1000);
 // Company search: entities already in the graph first, then every company
 // in SEC's list (live mode).
 function bindCompanySearch(recenter) {
@@ -3231,7 +3246,7 @@ function checkQuant(again = false) {
       // Show saved results right away, then bring the watchlist up to date.
       if (s?.gsQuant) {
         await loadQuantCache();
-        quantSweep();
+        if (leader()) quantSweep();
       }
     })
     .catch((e) => (quantEnv = { error: message(e) }))
@@ -3311,7 +3326,7 @@ function quantSweep() {
 // Every minute: rerun the watchlist every 15 minutes while the market is
 // open (live prices), hourly otherwise (only if something changed).
 setInterval(() => {
-  if (!native || !quantEnv?.gsQuant) return;
+  if (!native || !quantEnv?.gsQuant || !leader()) return;
   if (Date.now() - quantSweptAt >= (usMarketOpen() ? 15 : 60) * 60 * 1000) quantSweep();
 }, 60 * 1000);
 const gsQuantLink = () => link("https://github.com/goldmansachs/gs-quant", "gs-quant on GitHub");
@@ -4463,7 +4478,8 @@ function bind() {
 
   document.querySelectorAll("[data-page]").forEach(
     (el) =>
-      (el.onclick = () => {
+      (el.onclick = (e) => {
+        if (newWindowClick(e)) return newWindow(el.dataset.page === "Stock" ? stockIntent(symbol, stockView) : { page: el.dataset.page, symbol });
         if (el.dataset.page === "Stock") return openStock(symbol, stockView);
         page = el.dataset.page;
         // Trading needs a stock with prices in this workspace.
@@ -4471,7 +4487,7 @@ function bind() {
         render();
       }),
   );
-  document.querySelectorAll("[data-recent]").forEach((el) => (el.onclick = () => openStock(el.dataset.recent, page === "Stock" ? stockView : null)));
+  document.querySelectorAll("[data-recent]").forEach((el) => (el.onclick = (e) => (newWindowClick(e) ? newWindow(stockIntent(el.dataset.recent, page === "Stock" ? stockView : null)) : openStock(el.dataset.recent, page === "Stock" ? stockView : null))));
   // Watchlist rows, heatmap cells and movers open the stock page; on Trade
   // they pick the stock to trade.
   document.querySelectorAll("[data-symbol]").forEach(
@@ -4962,6 +4978,9 @@ async function action(act, value) {
       page = "Settings";
       render();
       break;
+    case "new-window":
+      await newWindow();
+      break;
     case "quant-check":
       checkQuant(true).then(() => runQuant(true));
       break;
@@ -5383,6 +5402,69 @@ document.addEventListener("click", async (e) => {
     el.disabled = false;
   }
 });
+// ---- Windows ---------------------------------------------------------------
+// Any number of windows share one workspace. Each shows its own page and
+// stock; what one saves (watchlist, prices, notes, trades) reaches the others.
+const PAGES = ["Overview", "Stock", "Universe", "Trade", "Portfolio", "Screener", "Economy", "Volatility", "Alerts", "Commodities", "Settings", "Quant Lab"];
+const stockIntent = (t, view) => ({ page: "Stock", symbol: t, view: view || null });
+const currentIntent = () => (page === "Stock" ? stockIntent(symbol, stockView) : { page: PAGES.includes(page) ? page : "Overview", symbol });
+const newWindowClick = (e) => native && !!(e?.metaKey || e?.ctrlKey);
+function windowTitle(v) {
+  if (v.page !== "Stock") return `Aperture · ${v.page}`;
+  return `Aperture · ${v.symbol}${v.view ? " " + v.view : ""}`;
+}
+async function newWindow(view = currentIntent()) {
+  if (!native) return notify("More windows open in the desktop app.", true);
+  // The new window reads the saved workspace, so save this one's changes first.
+  await persist().catch(() => {});
+  await windowOpen(view, windowTitle(view)).catch((e) => notify(message(e), true));
+}
+// What a window opened from another one shows first.
+function openIntent(i) {
+  if (!i || typeof i !== "object") return;
+  if (typeof i.symbol === "string" && tickerPattern.test(i.symbol)) symbol = i.symbol;
+  if (!PAGES.includes(i.page)) return;
+  page = i.page;
+  if (page !== "Stock") return;
+  stockView = VIEW_CODES.has(i.view) ? i.view : null;
+  if (stockView === "SPLC") followGraph();
+  if (live() && !assets().some((a) => a.symbol === symbol)) ensureAsset(symbol).then(refresh).catch((e) => notify(message(e), true));
+}
+let shownTitle = "";
+function titleWindow() {
+  const t = windowTitle(currentIntent());
+  if (!native || t === shownTitle) return;
+  shownTitle = t;
+  setWindowTitle(t);
+}
+// Another window saved: show its changes here. Waits while something here
+// is being typed into, so the field isn't redrawn under the cursor.
+let remoteTimer = null,
+  remotePending = false;
+function remoteChange(paths) {
+  if (!appReady) return;
+  if (paths.some(([k]) => k === "vesselLocation") && locations.some((x) => x.id === state.vesselLocation) && state.vesselLocation !== maritimeSelected) {
+    maritimeSelected = state.vesselLocation;
+    ais = null;
+  }
+  remotePending = true;
+  clearTimeout(remoteTimer);
+  remoteTimer = setTimeout(() => {
+    const f = document.activeElement;
+    if (busy || (f && ["INPUT", "TEXTAREA", "SELECT"].includes(f.tagName))) return;
+    remotePending = false;
+    render();
+  }, 250);
+}
+document.addEventListener("focusout", () => {
+  if (remotePending) remoteChange([]);
+});
+// ⌘N (Ctrl+N): another window showing what this one shows.
+document.addEventListener("keydown", (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== "n") return;
+  e.preventDefault();
+  newWindow();
+});
 // Esc on a stock view goes back to the stock's panel grid.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || page !== "Stock" || !stockView) return;
@@ -5423,11 +5505,27 @@ await labInit({
   symbol: () => symbol,
   barsFor: labBars,
 }).catch((e) => console.error("Quant Lab", e));
+openIntent(self.intent);
 render();
-syncWatchlist();
-autoReference().then(() => refresh());
+appReady = true;
+// Background work runs in one window; the others show its results as it
+// saves them. Closing that window hands the work to another.
+function startBackground() {
+  syncWatchlist();
+  autoReference().then(() => refresh());
+}
+if (leader()) startBackground();
+else readReference().then(() => watchReference()).then(() => refresh());
+onWindowLeader((label) => {
+  const was = self.leader;
+  self.leader = label === self.label;
+  if (self.leader && !was) {
+    startBackground();
+    if (quantEnv?.gsQuant) quantSweep();
+  }
+});
 // Find GS Quant at launch so the watchlist's analytics are ready before
 // anyone opens them.
 checkQuant();
 // Daily data: re-check every 30 minutes. Cached data costs no requests.
-setInterval(() => syncWatchlist(), 30 * 60 * 1000);
+setInterval(() => leader() && syncWatchlist(), 30 * 60 * 1000);
